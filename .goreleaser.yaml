@@ -1,0 +1,264 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+project_name: openstack-spiffe
+
+env:
+  - CGO_ENABLED=0
+#  - _GO_MK_VARS_NAME={{ .Env._GO_MK_VARS_NAME}}
+#  - _GO_MK_VARS_METADATA_PACKAGE={{ .Env._GO_MK_VARS_METADATA_PACKAGE }}
+before:
+  hooks:
+    - go mod download
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: openstack-spire-metadata
+    main: ./cmd/openstack-spire-metadata
+    binary: openstack-spire-metadata
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v1
+      - v2
+      - v3
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+    flags:
+      - -trimpath  
+    ldflags:
+      - -s -w 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Name={{.ArtifactName}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Description={{.Env._GO_MK_VARS_DESCRIPTION}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Copyright={{.Env._GO_MK_VARS_COPYRIGHT}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.License={{.Env._GO_MK_VARS_LICENSE}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.LicenseURL={{.Env._GO_MK_VARS_LICENSE_URL}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Version={{.Version}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMajor={{.Major}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMinor={{.Minor}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionPatch={{.Patch}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Vendor={{.Env._GO_MK_VARS_VENDOR}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Maintainer={{.Env._GO_MK_VARS_MAINTAINER}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.DotEnvVarName={{.Env._GO_MK_VARS_DOTENV_VAR_NAME}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.BuildTime={{.Now}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTag={{.Tag}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitCommit={{.Commit}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTime={{.CommitDate}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTreeState={{.GitTreeState}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitBranch={{.Branch}}'
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GoReleaserVersion={{.Env._GORELEASER_VERSION}}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: openstack-server-plugin
+    main: ./cmd/openstack-server-plugin
+    binary: openstack-server-plugin
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v1
+      - v2
+      - v3
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+    flags:
+      - -trimpath  
+    ldflags:
+      - -s -w 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Name={{.ArtifactName}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Description={{.Env._GO_MK_VARS_DESCRIPTION}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Copyright={{.Env._GO_MK_VARS_COPYRIGHT}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.License={{.Env._GO_MK_VARS_LICENSE}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.LicenseURL={{.Env._GO_MK_VARS_LICENSE_URL}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Version={{.Version}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMajor={{.Major}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMinor={{.Minor}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionPatch={{.Patch}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Vendor={{.Env._GO_MK_VARS_VENDOR}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Maintainer={{.Env._GO_MK_VARS_MAINTAINER}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.DotEnvVarName={{.Env._GO_MK_VARS_DOTENV_VAR_NAME}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.BuildTime={{.Now}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTag={{.Tag}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitCommit={{.Commit}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTime={{.CommitDate}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTreeState={{.GitTreeState}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitBranch={{.Branch}}'
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GoReleaserVersion={{.Env._GORELEASER_VERSION}}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: openstack-agent-plugin
+    main: ./cmd/openstack-agent-plugin
+    binary: openstack-agent-plugin
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      - v1
+      - v2
+      - v3
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+    flags:
+      - -trimpath  
+    ldflags:
+      - -s -w 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Name={{.ArtifactName}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Description={{.Env._GO_MK_VARS_DESCRIPTION}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Copyright={{.Env._GO_MK_VARS_COPYRIGHT}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.License={{.Env._GO_MK_VARS_LICENSE}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.LicenseURL={{.Env._GO_MK_VARS_LICENSE_URL}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Version={{.Version}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMajor={{.Major}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionMinor={{.Minor}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.VersionPatch={{.Patch}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Vendor={{.Env._GO_MK_VARS_VENDOR}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.Maintainer={{.Env._GO_MK_VARS_MAINTAINER}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.DotEnvVarName={{.Env._GO_MK_VARS_DOTENV_VAR_NAME}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.BuildTime={{.Now}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTag={{.Tag}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitCommit={{.Commit}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTime={{.CommitDate}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitTreeState={{.GitTreeState}}' 
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GitBranch={{.Branch}}'
+      - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GoReleaserVersion={{.Env._GORELEASER_VERSION}}'
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: openstack-spiffe
+    builds:
+      - openstack-spire-metadata
+      - openstack-agent-plugin
+      - openstack-server-plugin
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}{{ .Arm }}{{ end }}
+      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+upx:
+  - # Whether to enable it or not.
+    #
+    # Templates: allowed.
+    enabled: false
+
+    # Filter by build ID.
+    ids: [midpoint]
+
+    # Filter by GOOS.
+    goos: [linux, windows]
+
+    # Filter by GOARCH.
+    goarch: [amd64, arm64]
+
+    # Filter by GOAMD64.
+    goamd64: [v1, v2, v3]
+
+    # Compress argument.
+    # Valid options are from '1' (faster) to '9' (better), and 'best'.
+    compress: "9"
+
+    # Whether to try LZMA (slower).
+    lzma: true
+
+    # Whether to try all methods and filters (slow).
+    #brute: true
+
+nfpms:
+  - id: openstack-spiffe
+    package_name: openstack-spiffe
+    homepage: "https://github.com/dihedron"
+    maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
+    description: |
+      openstack-spiffe is a command line tool to manage OpenStack SPIFFE identities.
+    vendor: "Andrea Funtò"
+    license: "MIT"
+    formats:
+      - rpm
+      - deb
+      - apk
+    ids:
+      - openstack-spiffe
+    contents:
+      - src: ./{{.ProjectName}}.conf
+        dst: /etc/{{.ProjectName}}.conf
+        type: config
+        expand: true
+    scripts:
+      postinstall: ./postinstall.sh
+    epoch: "1"
+    release: "1"
+    section: default
+    priority: "optional"
+
+# MSI packaging is a GoReleaser Pro feature.
+# If you have GoReleaser Pro, you can uncomment the following section.
+# packagers:
+#   - id: midpoint-msi
+#     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+#     builds:
+#       - midpoint
+#     extra_files:
+#       - src: ./midpoint.conf
+#     upgrade_code: "53c6e944-a35a-4e67-b3b9-8c9e7a8a0a3a"
+#     msi:
+#       component_id: midpoint
+#       directory_id: midpoint
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source.tar.gz"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+sboms:
+  - cmd: syft
+    documents:
+      - "${artifact}.spdx.json"
+    args: ["$artifact", "--output", "cyclonedx-json=$document", "-vvv"]
+    artifacts: package
+    disable: false
+    
+    
+release:
+  footer: |
+    ---
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

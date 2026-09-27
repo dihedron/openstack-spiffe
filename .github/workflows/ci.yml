@@ -1,0 +1,38 @@
+name: Continuous Build
+
+on:
+  push:
+    branches:
+      - "**"
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go compiler
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+
+      - name: Ensure GoReleaser is installed
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Run Makefile target
+        run: make
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

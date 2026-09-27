@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    # We only run on tags, like 'v1.0.0'
+    tags:
+      - "v[0-9]+.*"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go compiler
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+
+      - name: Ensure GoReleaser is installed
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: "latest"
+
+      - name: Run Makefile target
+        run: make release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: Test
+      #   run: |
+      #     go test -v ./...
+      #     # You can add more steps here, like linting or building a coverage report
+
+      # - name: Run GoReleaser
+      #   uses: goreleaser/goreleaser-action@v5
+      #   with:
+      #     # We use the official GoReleaser release action
+      #     distribution: goreleaser
+      #     version: latest
+      #     args: release --clean
+      #   env:
+      #     # GITHUB_TOKEN is required for GoReleaser to create the GitHub Release and upload artifacts
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
