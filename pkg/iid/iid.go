@@ -63,9 +63,10 @@ type Claims struct {
 	// Tags holds the filtered, string-only instance metadata.
 	Tags map[string]string `json:"tags"`
 	// Custom holds the operator-configured static claims, serialized as
-	// top-level claims. A custom claim can never shadow a reserved one:
-	// marshaling fails on duplicate names, and ValidateCustomClaims rejects
-	// them upfront. On unmarshal it collects every non-reserved claim.
+	// top-level claims. Custom claims must not use reserved names: issuers
+	// must check them with ValidateCustomClaims; in addition, marshaling
+	// fails if one collides with an always-emitted claim. On unmarshal it
+	// collects every claim not otherwise modelled here.
 	Custom map[string]string `json:",embed"`
 }
 
@@ -73,11 +74,35 @@ type Claims struct {
 // empty or reserved name.
 var ErrInvalidCustomClaim = errors.New("invalid custom claim")
 
+// Names of the optional enrichment claims, looked up from Nova and Keystone
+// when enabled in the issuer configuration.
+const (
+	// ClaimAvailabilityZone is the availability zone the instance runs in.
+	ClaimAvailabilityZone = "availability_zone"
+	// ClaimFlavor is the name of the instance flavor.
+	ClaimFlavor = "flavor"
+	// ClaimUserID is the ID of the user who booted the instance.
+	ClaimUserID = "user_id"
+	// ClaimProjectName is the name of the project owning the instance.
+	ClaimProjectName = "project_name"
+	// ClaimDomainID is the ID of the domain of the project owning the instance.
+	ClaimDomainID = "domain_id"
+)
+
+var enrichmentClaims = []string{
+	ClaimAvailabilityZone, ClaimFlavor, ClaimUserID, ClaimProjectName, ClaimDomainID,
+}
+
 // reservedClaims are the claim names defined by this contract; custom claims
 // must not use them.
-var reservedClaims = []string{
+var reservedClaims = append([]string{
 	"iss", "aud", "sub", "iat", "nbf", "exp", "jti",
 	"project_id", "instance_id", "hostname", "tags",
+}, enrichmentClaims...)
+
+// EnrichmentClaims returns the names of the optional enrichment claims.
+func EnrichmentClaims() []string {
+	return slices.Clone(enrichmentClaims)
 }
 
 // ReservedClaims returns the claim names that custom claims must not use.

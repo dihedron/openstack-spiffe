@@ -138,8 +138,14 @@ func TestClaimsCustomClaimsAtTopLevel(t *testing.T) {
 	}
 }
 
-func TestClaimsCustomClaimCannotShadowReservedClaim(t *testing.T) {
+// Always-emitted claims are also protected by the encoder itself; optional
+// (enrichment) claims rely on ValidateCustomClaims, which the minter re-runs
+// right before signing.
+func TestClaimsCustomClaimCannotShadowAlwaysEmittedClaim(t *testing.T) {
 	for _, name := range ReservedClaims() {
+		if slices.Contains(EnrichmentClaims(), name) {
+			continue
+		}
 		_, err := json.Marshal(Claims{
 			Tags:   map[string]string{},
 			Custom: map[string]string{name: "evil"},
@@ -151,7 +157,7 @@ func TestClaimsCustomClaimCannotShadowReservedClaim(t *testing.T) {
 }
 
 func TestReservedClaims(t *testing.T) {
-	want := []string{"aud", "exp", "hostname", "iat", "instance_id", "iss", "jti", "nbf", "project_id", "sub", "tags"}
+	want := []string{"aud", "availability_zone", "domain_id", "exp", "flavor", "hostname", "iat", "instance_id", "iss", "jti", "nbf", "project_id", "project_name", "sub", "tags", "user_id"}
 	got := ReservedClaims()
 	slices.Sort(got)
 	if !slices.Equal(got, want) {
@@ -188,5 +194,17 @@ func TestValidateCustomClaims(t *testing.T) {
 		if err := ValidateCustomClaims(bad); !errors.Is(err, ErrInvalidCustomClaim) {
 			t.Errorf("ValidateCustomClaims(%v) = %v, want ErrInvalidCustomClaim", bad, err)
 		}
+	}
+}
+
+func TestEnrichmentClaims(t *testing.T) {
+	want := []string{"availability_zone", "flavor", "user_id", "project_name", "domain_id"}
+	got := EnrichmentClaims()
+	if !slices.Equal(got, want) {
+		t.Fatalf("EnrichmentClaims() = %v, want %v", got, want)
+	}
+	got[0] = "tampered"
+	if EnrichmentClaims()[0] != ClaimAvailabilityZone {
+		t.Fatalf("EnrichmentClaims() exposes internal state")
 	}
 }

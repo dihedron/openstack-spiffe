@@ -1,0 +1,79 @@
+package config
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+const minimalAggregator = `
+tls_cert_path: /tls.crt
+tls_key_path: /tls.key
+replicas:
+  - https://signer-a.internal:8443/.well-known/jwks.json
+  - https://signer-b.internal:8443/.well-known/jwks.json
+`
+
+func TestAggregatorDefaults(t *testing.T) {
+	cfg, err := parseAggregator(strings.NewReader(minimalAggregator))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	checks := []struct {
+		name      string
+		got, want any
+	}{
+		{"listen_addr", cfg.ListenAddr, "0.0.0.0:8444"},
+		{"poll_interval", cfg.PollInterval, 30 * time.Second},
+		{"fetch_timeout", cfg.FetchTimeout, 5 * time.Second},
+		{"stale_key_retention", cfg.StaleKeyRetention, 5 * time.Minute},
+		{"cache_max_age", cfg.CacheMaxAge, 30 * time.Second},
+		{"replicas", len(cfg.Replicas), 2},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestAggregatorInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"unknown key", minimalAggregator + "bogus: 1\n", "bogus"},
+		{"no replicas", "tls_cert_path: /c\ntls_key_path: /k\n", "replicas"},
+		{"missing tls", "replicas: [https://a/jwks]\n", "tls_cert_path"},
+		{"http replica", "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [http://a/jwks]\n", "replicas"},
+		{"replica without host", "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [\"https:///jwks\"]\n", "replicas"},
+		{"unparsable replica", "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [\"https://a b/\"]\n", "replicas"},
+		{"duplicate replica", "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks, https://a/jwks]\n", "replicas"},
+		{"poll interval zero", minimalAggregator + "poll_interval: 0s\n", "poll_interval"},
+		{"fetch timeout >= poll", minimalAggregator + "poll_interval: 10s\nfetch_timeout: 10s\n", "fetch_timeout"},
+		{"retention shorter than token ttl", minimalAggregator + "stale_key_retention: 4m\n", "stale_key_retention"},
+		{"negative cache age", minimalAggregator + "cache_max_age: -1s\n", "cache_max_age"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseAggregator(strings.NewReader(tt.doc))
+			if !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want ErrInvalidConfig mentioning %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadAggregator(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aggregator.yaml")
+	if err := os.WriteFile(path, []byte(minimalAggregator), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAggregator(path); err != nil {
+		t.Fatalf("LoadAggregator: %v", err)
+	}
+}
