@@ -2,6 +2,7 @@ package iid
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"maps"
 	"slices"
 	"testing"
@@ -108,5 +109,84 @@ func TestVendorDataResponseShape(t *testing.T) {
 	}
 	if back.Target.JWT != "a.b.c" {
 		t.Fatalf("round trip jwt = %q", back.Target.JWT)
+	}
+}
+
+func TestClaimsCustomClaimsAtTopLevel(t *testing.T) {
+	data, err := json.Marshal(Claims{
+		Subject: "i",
+		Tags:    map[string]string{},
+		Custom:  map[string]string{"country": "italy", "region": "eu-south-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(data, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if generic["country"] != "italy" || generic["region"] != "eu-south-1" {
+		t.Fatalf("custom claims not at top level: %s", data)
+	}
+
+	var back Claims
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal into Claims: %v", err)
+	}
+	if len(back.Custom) != 2 || back.Custom["country"] != "italy" {
+		t.Fatalf("custom claims round trip = %v", back.Custom)
+	}
+}
+
+func TestClaimsCustomClaimCannotShadowReservedClaim(t *testing.T) {
+	for _, name := range ReservedClaims() {
+		_, err := json.Marshal(Claims{
+			Tags:   map[string]string{},
+			Custom: map[string]string{name: "evil"},
+		})
+		if err == nil {
+			t.Errorf("marshaling custom claim %q succeeded, want duplicate name error", name)
+		}
+	}
+}
+
+func TestReservedClaims(t *testing.T) {
+	want := []string{"aud", "exp", "hostname", "iat", "instance_id", "iss", "jti", "nbf", "project_id", "sub", "tags"}
+	got := ReservedClaims()
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("ReservedClaims() = %v, want %v", got, want)
+	}
+	for _, name := range want {
+		if !IsReservedClaim(name) {
+			t.Errorf("IsReservedClaim(%q) = false", name)
+		}
+	}
+	if IsReservedClaim("country") {
+		t.Errorf("IsReservedClaim(\"country\") = true")
+	}
+	// the returned slice must be a copy
+	got[0] = "tampered"
+	if IsReservedClaim("tampered") {
+		t.Errorf("ReservedClaims() exposes internal state")
+	}
+}
+
+func TestValidateCustomClaims(t *testing.T) {
+	if err := ValidateCustomClaims(map[string]string{"country": "italy"}); err != nil {
+		t.Fatalf("valid custom claims rejected: %v", err)
+	}
+	if err := ValidateCustomClaims(nil); err != nil {
+		t.Fatalf("nil custom claims rejected: %v", err)
+	}
+	for _, bad := range []map[string]string{
+		{"": "x"},
+		{"project_id": "someone-else"},
+		{"sub": "x"},
+		{"tags": "x"},
+	} {
+		if err := ValidateCustomClaims(bad); !errors.Is(err, ErrInvalidCustomClaim) {
+			t.Errorf("ValidateCustomClaims(%v) = %v, want ErrInvalidCustomClaim", bad, err)
+		}
 	}
 }

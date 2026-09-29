@@ -220,7 +220,8 @@ JSON
 
 * **Payload Bloat Protection:** Users frequently abuse OpenStack instance metadata for large cloud-init scripts. To prevent JWT headers from exceeding standard HTTP limits (4KB-8KB) downstream, tags must filter the incoming metadata field using an explicit allowlist of approved keys, or enforce a strict 1024-byte maximum size for the tags object.  
 * **TTL:** exp \- iat must be a short, fixed window of 5 minutes.  
-* **Immutability:** Every claim value comes exclusively from the authorized Nova request.
+* **Immutability:** Every claim value comes exclusively from the authorized Nova request, except for operator-configured custom claims (see below).
+* **Custom claims:** The operator can configure static string claims (e.g. "country": "italy") in the service configuration file (custom\_claims); they are added as top-level claims to every token. Custom claims must not use a reserved claim name (iss, aud, sub, iat, nbf, exp, jti, project\_id, instance\_id, hostname, tags): the service refuses to start if they do, and can never emit a token where a custom claim shadows a reserved one.
 
 ## **Signing key management**
 
@@ -268,7 +269,9 @@ key\_store:
   backend: "vault\_transit" \# or "ephemeral\_memory"  
   vault\_proxy\_endpoint: "https://vault-proxy.internal:8200"  
 token\_ttl\_seconds: 300  
-rate\_limit\_per\_instance: "1/5s"
+rate\_limit\_per\_instance: "1/5s"  
+custom\_claims:  
+  country: "italy"
 
 ## **Error handling and failure modes**
 

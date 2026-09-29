@@ -5,7 +5,12 @@
 // than re-declaring any of these values.
 package iid
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"time"
+)
 
 const (
 	// TargetName is the name of the Nova DynamicJSON vendordata target; Nova
@@ -57,6 +62,46 @@ type Claims struct {
 	Hostname string `json:"hostname"`
 	// Tags holds the filtered, string-only instance metadata.
 	Tags map[string]string `json:"tags"`
+	// Custom holds the operator-configured static claims, serialized as
+	// top-level claims. A custom claim can never shadow a reserved one:
+	// marshaling fails on duplicate names, and ValidateCustomClaims rejects
+	// them upfront. On unmarshal it collects every non-reserved claim.
+	Custom map[string]string `json:",embed"`
+}
+
+// ErrInvalidCustomClaim is returned (wrapped) when a custom claim has an
+// empty or reserved name.
+var ErrInvalidCustomClaim = errors.New("invalid custom claim")
+
+// reservedClaims are the claim names defined by this contract; custom claims
+// must not use them.
+var reservedClaims = []string{
+	"iss", "aud", "sub", "iat", "nbf", "exp", "jti",
+	"project_id", "instance_id", "hostname", "tags",
+}
+
+// ReservedClaims returns the claim names that custom claims must not use.
+func ReservedClaims() []string {
+	return slices.Clone(reservedClaims)
+}
+
+// IsReservedClaim reports whether name is a claim defined by this contract.
+func IsReservedClaim(name string) bool {
+	return slices.Contains(reservedClaims, name)
+}
+
+// ValidateCustomClaims checks that no custom claim has an empty or reserved
+// name.
+func ValidateCustomClaims(custom map[string]string) error {
+	for name := range custom {
+		if name == "" {
+			return fmt.Errorf("%w: empty name", ErrInvalidCustomClaim)
+		}
+		if IsReservedClaim(name) {
+			return fmt.Errorf("%w: %q is a reserved claim", ErrInvalidCustomClaim, name)
+		}
+	}
+	return nil
 }
 
 // VendorDataResponse is the body returned to Nova; its only key must match
