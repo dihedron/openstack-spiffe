@@ -305,6 +305,21 @@ nova\_lookup:
   cache\_ttl: "60s"  
 enrich: \["availability\_zone", "flavor", "user\_id", "project\_name", "domain\_id"\]
 
+## **Configuration validation**
+
+The binary provides a command to validate configuration files before deployment (e.g. in CI or a pre-rollout hook), with the same rules the services apply at startup:
+
+    openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--format text|json|yaml] [--strict] [--skip-files] [--print-effective]
+
+* **Complete report:** all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.
+* **Unknown keys** are errors and carry a "did you mean ...?" suggestion when a known key is close (e.g. rate\_limt\_per\_instance).
+* **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring nova\_lookup, ...) are errors.
+* **Cross-file consistency:** when an aggregator file is given, each signer's key\_store.publish\_ahead must exceed the aggregator's poll\_interval plus fetch\_timeout (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's stale\_key\_retention must be at least each signer's token TTL; replica\_id must be unique across all signer files.
+* **File checks** (skippable): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles parse. A certificate expiring within 30 days and a private key readable by group/others are warnings.
+* **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, replica\_id derived from the hostname, a per-instance rate limit looser than 1/5s.
+* **Exit codes:** 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with --strict), 2 when a file cannot be read or the command line is invalid.
+* The services refuse to start on any error and log warnings at startup.
+
 ## **Error handling and failure modes**
 
 | Failure | Behavior |
