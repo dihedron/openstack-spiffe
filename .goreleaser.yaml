@@ -177,7 +177,7 @@ upx:
     enabled: false
 
     # Filter by build ID.
-    ids: [midpoint]
+    ids: [openstack-spire-metadata, openstack-server-plugin, openstack-agent-plugin]
 
     # Filter by GOOS.
     goos: [linux, windows]
