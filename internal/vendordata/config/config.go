@@ -1,57 +1,85 @@
 // Package config loads and validates the configuration files of the
-// vendordata JWT issuer (signer) and of the JWKS aggregator.
+// vendordata JWT issuer (signer) and of the JWKS aggregator. Checking a file
+// yields every finding at once (syntax errors, unknown keys, invalid values,
+// rule violations, file problems and risky settings), each with its line and
+// YAML path; loading a file fails if any finding is an error.
 package config
 
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-
-	"go.yaml.in/yaml/v3"
+	"time"
 )
 
-// ErrInvalidConfig is returned (wrapped) for every configuration problem.
+// ErrInvalidConfig is wrapped by every error returned for a configuration
+// with error findings.
 var ErrInvalidConfig = errors.New("invalid configuration")
 
 // replicaIDPattern is a DNS label: it ends up in every kid the replica issues.
 var replicaIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// decode parses a YAML document into target, which must already hold the
-// defaults; unknown keys are rejected so that typos don't go unnoticed.
-func decode(r io.Reader, target any) error {
-	decoder := yaml.NewDecoder(r)
-	decoder.KnownFields(true)
-	if err := decoder.Decode(target); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
-	}
-	return nil
+// CheckOptions tunes how configuration files are checked.
+type CheckOptions struct {
+	// Hostname returns the host name used to derive a missing replica_id
+	// (default: os.Hostname).
+	Hostname func() (string, error)
+	// Now returns the current time, used to check certificate validity
+	// (default: time.Now).
+	Now func() time.Time
+	// SkipFiles disables the checks on the TLS and CA files the
+	// configuration refers to.
+	SkipFiles bool
 }
 
-// load opens path and hands it to parse.
-func load[T any](path string, parse func(io.Reader) (*T, error)) (*T, error) {
-	f, err := os.Open(filepath.Clean(path))
+func (o CheckOptions) withDefaults() CheckOptions {
+	if o.Hostname == nil {
+		o.Hostname = os.Hostname
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	return o
+}
+
+// LoadSigner reads and checks the signer configuration file at path, without
+// file checks (the server loads those files itself). It fails if there is any
+// error finding; otherwise it returns the configuration and the warnings.
+func LoadSigner(path string) (*Signer, []Finding, error) {
+	return load(path, CheckSigner)
+}
+
+// LoadAggregator reads and checks the aggregator configuration file at path,
+// like LoadSigner.
+func LoadAggregator(path string) (*Aggregator, []Finding, error) {
+	return load(path, CheckAggregator)
+}
+
+func load[T any](path string, check func(string, []byte, CheckOptions) *Result[T]) (*T, []Finding, error) {
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return nil, fmt.Errorf("opening configuration file: %w", err)
+		return nil, nil, fmt.Errorf("reading configuration file: %w", err)
 	}
-	defer f.Close()
-	cfg, err := parse(f)
-	if err != nil {
-		return nil, fmt.Errorf("loading %s: %w", path, err)
+	result := check(path, data, CheckOptions{SkipFiles: true})
+	if err := result.Err(); err != nil {
+		return nil, nil, fmt.Errorf("loading %s: %w", path, err)
 	}
-	return cfg, nil
+	return result.Config, result.Warnings(), nil
 }
 
-// problems accumulates validation errors, so that operators see all of them
-// at once.
-type problems []error
-
-func (p *problems) add(format string, args ...any) {
-	*p = append(*p, fmt.Errorf("%w: "+format, append([]any{ErrInvalidConfig}, args...)...))
-}
-
-func (p problems) err() error {
-	return errors.Join(p...)
+// checkList flags empty and duplicate entries of the list at path.
+func checkList[T any](r *Result[T], path string, list []string) {
+	seen := map[string]bool{}
+	for i, item := range list {
+		itemPath := fmt.Sprintf("%s[%d]", path, i)
+		switch {
+		case item == "":
+			r.errorf(KindRuleViolation, itemPath, "empty entry")
+		case seen[item]:
+			r.errorf(KindRuleViolation, itemPath, "%q is listed more than once", item)
+		}
+		seen[item] = true
+	}
 }

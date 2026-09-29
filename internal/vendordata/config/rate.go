@@ -46,14 +46,21 @@ func (r Rate) String() string {
 	return fmt.Sprintf("%d/%s", r.Events, r.Per)
 }
 
-// UnmarshalYAML decodes a rate from a YAML scalar.
+// MarshalText encodes the rate in its "<events>/<period>" form.
+func (r Rate) MarshalText() ([]byte, error) {
+	return []byte(r.String()), nil
+}
+
+// UnmarshalYAML decodes a rate from a YAML scalar. Errors are returned as
+// *yaml.TypeError so that the decoder records them and carries on with the
+// rest of the document.
 func (r *Rate) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode {
-		return fmt.Errorf("line %d: rate must be a string like \"1/5s\"", node.Line)
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: rate must be a string like \"1/5s\"", node.Line)}}
 	}
 	rate, err := ParseRate(node.Value)
 	if err != nil {
-		return fmt.Errorf("line %d: %w", node.Line, err)
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %v", node.Line, err)}}
 	}
 	*r = rate
 	return nil

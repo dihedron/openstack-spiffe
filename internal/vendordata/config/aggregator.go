@@ -1,7 +1,7 @@
 package config
 
 import (
-	"io"
+	"fmt"
 	"net/url"
 	"time"
 
@@ -43,57 +43,58 @@ func defaultAggregator() *Aggregator {
 	}
 }
 
-// LoadAggregator reads and validates the aggregator configuration file at path.
-func LoadAggregator(path string) (*Aggregator, error) {
-	return load(path, parseAggregator)
-}
-
-func parseAggregator(r io.Reader) (*Aggregator, error) {
+// CheckAggregator checks an aggregator configuration document, like
+// CheckSigner.
+func CheckAggregator(file string, data []byte, opts CheckOptions) *Result[Aggregator] {
+	opts = opts.withDefaults()
+	result := &Result[Aggregator]{File: file}
 	cfg := defaultAggregator()
-	if err := decode(r, cfg); err != nil {
-		return nil, err
+	if !decodeDocument(result, data, cfg) {
+		return result
 	}
-	var p problems
-	cfg.validate(&p)
-	if err := p.err(); err != nil {
-		return nil, err
+	result.Config = cfg
+	cfg.validate(result)
+	if !opts.SkipFiles {
+		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
+		checkCABundle(result, "replica_ca_cert_path", cfg.ReplicaCACertPath)
 	}
-	return cfg, nil
+	return result
 }
 
-func (a *Aggregator) validate(p *problems) {
+func (a *Aggregator) validate(r *Result[Aggregator]) {
 	if a.ListenAddr == "" {
-		p.add("listen_addr is required")
+		r.errorf(KindRuleViolation, "listen_addr", "is required")
 	}
 	if a.TLSCertPath == "" {
-		p.add("tls_cert_path is required")
+		r.errorf(KindRuleViolation, "tls_cert_path", "is required")
 	}
 	if a.TLSKeyPath == "" {
-		p.add("tls_key_path is required")
+		r.errorf(KindRuleViolation, "tls_key_path", "is required")
 	}
 	if len(a.Replicas) == 0 {
-		p.add("replicas must list at least one replica JWKS URL")
+		r.errorf(KindRuleViolation, "replicas", "must list at least one replica JWKS URL")
 	}
-	checkList(p, "replicas", a.Replicas)
-	for _, replica := range a.Replicas {
+	checkList(r, "replicas", a.Replicas)
+	for i, replica := range a.Replicas {
+		path := fmt.Sprintf("replicas[%d]", i)
 		u, err := url.Parse(replica)
 		switch {
 		case err != nil:
-			p.add("replicas: %q is not a valid URL: %w", replica, err)
+			r.errorf(KindRuleViolation, path, "%q is not a valid URL: %v", replica, err)
 		case u.Scheme != "https" || u.Host == "":
-			p.add("replicas: %q must be an https URL with a host", replica)
+			r.errorf(KindRuleViolation, path, "%q must be an https URL with a host", replica)
 		}
 	}
 	if a.PollInterval <= 0 {
-		p.add("poll_interval %v must be positive", a.PollInterval)
+		r.errorf(KindRuleViolation, "poll_interval", "%v must be positive", a.PollInterval)
 	}
 	if a.FetchTimeout <= 0 || a.FetchTimeout >= a.PollInterval {
-		p.add("fetch_timeout %v must be positive and shorter than poll_interval", a.FetchTimeout)
+		r.errorf(KindRuleViolation, "fetch_timeout", "%v must be positive and shorter than poll_interval (%v)", a.FetchTimeout, a.PollInterval)
 	}
 	if a.StaleKeyRetention < iid.TTL {
-		p.add("stale_key_retention %v must be at least the token TTL (%v)", a.StaleKeyRetention, iid.TTL)
+		r.errorf(KindRuleViolation, "stale_key_retention", "%v must be at least the maximum token TTL (%v)", a.StaleKeyRetention, iid.TTL)
 	}
 	if a.CacheMaxAge < 0 {
-		p.add("cache_max_age %v must not be negative", a.CacheMaxAge)
+		r.errorf(KindRuleViolation, "cache_max_age", "%v must not be negative", a.CacheMaxAge)
 	}
 }

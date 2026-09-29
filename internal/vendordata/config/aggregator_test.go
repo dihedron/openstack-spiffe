@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,20 @@ replicas:
   - https://signer-a.internal:8443/.well-known/jwks.json
   - https://signer-b.internal:8443/.well-known/jwks.json
 `
+
+// parseAggregator checks the document without file checks and fails on any
+// error finding.
+func parseAggregator(r io.Reader) (*Aggregator, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	result := CheckAggregator("", data, CheckOptions{SkipFiles: true})
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return result.Config, nil
+}
 
 func TestAggregatorDefaults(t *testing.T) {
 	cfg, err := parseAggregator(strings.NewReader(minimalAggregator))
@@ -73,7 +88,7 @@ func TestLoadAggregator(t *testing.T) {
 	if err := os.WriteFile(path, []byte(minimalAggregator), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadAggregator(path); err != nil {
+	if _, _, err := LoadAggregator(path); err != nil {
 		t.Fatalf("LoadAggregator: %v", err)
 	}
 }

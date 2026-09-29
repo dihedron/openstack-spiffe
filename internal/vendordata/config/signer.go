@@ -1,8 +1,8 @@
 package config
 
 import (
-	"io"
-	"os"
+	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +26,10 @@ const (
 	maxValidationCacheTTL = 10 * time.Minute
 	maxProjectCacheTTL    = time.Hour
 )
+
+// recommendedInstanceRate is the per-instance rate limit recommended by the
+// specification.
+var recommendedInstanceRate = Rate{Events: 1, Per: 5 * time.Second}
 
 var (
 	signingAlgorithms = []string{"RS256", "ES256"}
@@ -133,7 +137,7 @@ func defaultSigner() *Signer {
 			PublishAhead:     2 * time.Minute,
 		},
 		TokenTTLSeconds:      int(iid.TTL / time.Second),
-		RateLimitPerInstance: Rate{Events: 1, Per: 5 * time.Second},
+		RateLimitPerInstance: recommendedInstanceRate,
 		RateLimitPerSource:   Rate{Events: 200, Per: time.Second},
 		// Nova forwards user-data (up to 64 KiB, base64-encoded) and metadata
 		// in the same body, so legitimate requests can exceed 150 KiB.
@@ -154,30 +158,34 @@ func defaultSigner() *Signer {
 	}
 }
 
-// LoadSigner reads and validates the signer configuration file at path.
-func LoadSigner(path string) (*Signer, error) {
-	return load(path, func(r io.Reader) (*Signer, error) { return parseSigner(r, os.Hostname) })
-}
-
-func parseSigner(r io.Reader, hostname func() (string, error)) (*Signer, error) {
+// CheckSigner checks a signer configuration document: it decodes it on top of
+// the defaults, derives a missing replica_id from the hostname and records
+// every finding. file is only used to label the findings.
+func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
+	opts = opts.withDefaults()
+	result := &Result[Signer]{File: file}
 	cfg := defaultSigner()
-	if err := decode(r, cfg); err != nil {
-		return nil, err
+	if !decodeDocument(result, data, cfg) {
+		return result
 	}
-	var p problems
+	result.Config = cfg
+
 	if cfg.ReplicaID == "" {
-		name, err := hostname()
+		name, err := opts.Hostname()
 		if err != nil {
-			p.add("replica_id not set and hostname unavailable: %w", err)
+			result.errorf(KindRuleViolation, "replica_id", "not set, and the hostname is unavailable: %v", err)
 		} else {
 			cfg.ReplicaID, _, _ = strings.Cut(strings.ToLower(name), ".")
+			result.warnf("replica_id", "not set: each host derives it from its hostname (here %q); set it explicitly for stable, predictable kids", cfg.ReplicaID)
 		}
 	}
-	cfg.validate(&p)
-	if err := p.err(); err != nil {
-		return nil, err
+	cfg.validate(result)
+	cfg.warn(result)
+	if !opts.SkipFiles {
+		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
+		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
 	}
-	return cfg, nil
+	return result
 }
 
 // TokenTTL returns the configured token validity as a duration.
@@ -185,94 +193,102 @@ func (s *Signer) TokenTTL() time.Duration {
 	return time.Duration(s.TokenTTLSeconds) * time.Second
 }
 
-func (s *Signer) validate(p *problems) {
+func (s *Signer) validate(r *Result[Signer]) {
 	if s.ListenAddr == "" {
-		p.add("listen_addr is required")
+		r.errorf(KindRuleViolation, "listen_addr", "is required")
 	}
 	if s.TLSCertPath == "" {
-		p.add("tls_cert_path is required")
+		r.errorf(KindRuleViolation, "tls_cert_path", "is required")
 	}
 	if s.TLSKeyPath == "" {
-		p.add("tls_key_path is required")
+		r.errorf(KindRuleViolation, "tls_key_path", "is required")
 	}
 	if s.ReplicaID != "" && !replicaIDPattern.MatchString(s.ReplicaID) {
-		p.add("replica_id %q must be a lowercase DNS label (set it explicitly if the hostname is not)", s.ReplicaID)
+		r.errorf(KindRuleViolation, "replica_id", "%q must be a lowercase DNS label (set it explicitly if the hostname is not one)", s.ReplicaID)
 	}
 
 	switch s.KeyStore.Backend {
 	case BackendEphemeralMemory:
 	case BackendVaultTransit:
-		p.add("key_store.backend %q is not supported yet", BackendVaultTransit)
+		r.errorf(KindRuleViolation, "key_store.backend", "%q is not supported yet", BackendVaultTransit)
 	default:
-		p.add("key_store.backend %q is unknown", s.KeyStore.Backend)
+		r.errorf(KindRuleViolation, "key_store.backend", "%q is not one of %v", s.KeyStore.Backend, []string{BackendEphemeralMemory, BackendVaultTransit})
 	}
 	if !slices.Contains(signingAlgorithms, s.KeyStore.Algorithm) {
-		p.add("key_store.algorithm %q must be one of %v", s.KeyStore.Algorithm, signingAlgorithms)
+		r.errorf(KindRuleViolation, "key_store.algorithm", "%q is not one of %v", s.KeyStore.Algorithm, signingAlgorithms)
 	}
 	if s.KeyStore.RotationInterval < minRotationInterval {
-		p.add("key_store.rotation_interval %v must be at least %v", s.KeyStore.RotationInterval, minRotationInterval)
+		r.errorf(KindRuleViolation, "key_store.rotation_interval", "%v must be at least %v", s.KeyStore.RotationInterval, minRotationInterval)
 	}
 	if s.KeyStore.PublishAhead <= 0 || s.KeyStore.PublishAhead >= s.KeyStore.RotationInterval {
-		p.add("key_store.publish_ahead %v must be positive and shorter than key_store.rotation_interval", s.KeyStore.PublishAhead)
+		r.errorf(KindRuleViolation, "key_store.publish_ahead", "%v must be positive and shorter than key_store.rotation_interval (%v)", s.KeyStore.PublishAhead, s.KeyStore.RotationInterval)
 	}
 
 	if s.TokenTTLSeconds < 1 || s.TokenTTL() > iid.TTL {
-		p.add("token_ttl_seconds %d must be between 1 and %d", s.TokenTTLSeconds, int(iid.TTL/time.Second))
+		r.errorf(KindRuleViolation, "token_ttl_seconds", "%d must be between 1 and %d", s.TokenTTLSeconds, int(iid.TTL/time.Second))
 	}
 	if s.MaxBodyBytes < minMaxBodyBytes || s.MaxBodyBytes > maxMaxBodyBytes {
-		p.add("max_body_bytes %d must be between %d and %d", s.MaxBodyBytes, minMaxBodyBytes, maxMaxBodyBytes)
+		r.errorf(KindRuleViolation, "max_body_bytes", "%d must be between %d and %d", s.MaxBodyBytes, minMaxBodyBytes, maxMaxBodyBytes)
 	}
-	if err := iid.ValidateCustomClaims(s.CustomClaims); err != nil {
-		p.add("custom_claims: %w", err)
+	for _, name := range slices.Sorted(maps.Keys(s.CustomClaims)) {
+		switch {
+		case name == "":
+			r.errorf(KindRuleViolation, "custom_claims", "a custom claim has an empty name")
+		case iid.IsReservedClaim(name):
+			r.errorf(KindRuleViolation, "custom_claims."+name, "%q is a reserved claim", name)
+		}
 	}
-	checkList(p, "tags.allowlist", s.Tags.Allowlist)
+	checkList(r, "tags.allowlist", s.Tags.Allowlist)
 
 	if len(s.Keystone.AllowedUsers) == 0 {
-		p.add("keystone.allowed_users must list at least one user")
+		r.errorf(KindRuleViolation, "keystone.allowed_users", "must list at least one user")
 	}
-	checkList(p, "keystone.allowed_users", s.Keystone.AllowedUsers)
+	checkList(r, "keystone.allowed_users", s.Keystone.AllowedUsers)
 	if s.Keystone.RequiredRole == "" {
-		p.add("keystone.required_role is required")
+		r.errorf(KindRuleViolation, "keystone.required_role", "is required")
 	}
 	if s.Keystone.ValidationCacheTTL <= 0 || s.Keystone.ValidationCacheTTL > maxValidationCacheTTL {
-		p.add("keystone.validation_cache_ttl %v must be positive and at most %v", s.Keystone.ValidationCacheTTL, maxValidationCacheTTL)
+		r.errorf(KindRuleViolation, "keystone.validation_cache_ttl", "%v must be positive and at most %v", s.Keystone.ValidationCacheTTL, maxValidationCacheTTL)
 	}
 	if s.Keystone.ProjectCacheTTL <= 0 || s.Keystone.ProjectCacheTTL > maxProjectCacheTTL {
-		p.add("keystone.project_cache_ttl %v must be positive and at most %v", s.Keystone.ProjectCacheTTL, maxProjectCacheTTL)
+		r.errorf(KindRuleViolation, "keystone.project_cache_ttl", "%v must be positive and at most %v", s.Keystone.ProjectCacheTTL, maxProjectCacheTTL)
 	}
 
 	if s.NovaLookup.CacheTTL <= 0 || s.NovaLookup.CacheTTL > s.TokenTTL() {
-		p.add("nova_lookup.cache_ttl %v must be positive and at most the token TTL (%v)", s.NovaLookup.CacheTTL, s.TokenTTL())
+		r.errorf(KindRuleViolation, "nova_lookup.cache_ttl", "%v must be positive and at most the token TTL (%v)", s.NovaLookup.CacheTTL, s.TokenTTL())
 	}
 	if len(s.NovaLookup.AllowedStatuses) == 0 {
-		p.add("nova_lookup.allowed_statuses must list at least one status")
+		r.errorf(KindRuleViolation, "nova_lookup.allowed_statuses", "must list at least one status")
 	}
-	for _, status := range s.NovaLookup.AllowedStatuses {
+	for i, status := range s.NovaLookup.AllowedStatuses {
 		if !slices.Contains(novaStatusesAllowable, status) {
-			p.add("nova_lookup.allowed_statuses: %q is not one of %v", status, novaStatusesAllowable)
+			r.errorf(KindRuleViolation, fmt.Sprintf("nova_lookup.allowed_statuses[%d]", i), "%q is not one of %v", status, novaStatusesAllowable)
 		}
 	}
 
-	checkList(p, "enrich", s.Enrich)
-	for _, claim := range s.Enrich {
+	checkList(r, "enrich", s.Enrich)
+	for i, claim := range s.Enrich {
+		path := fmt.Sprintf("enrich[%d]", i)
 		if !slices.Contains(iid.EnrichmentClaims(), claim) {
-			p.add("enrich: %q is not one of %v", claim, iid.EnrichmentClaims())
+			r.errorf(KindRuleViolation, path, "%q is not one of %v", claim, iid.EnrichmentClaims())
 		} else if slices.Contains(serverEnrichments, claim) && !s.NovaLookup.Enabled {
-			p.add("enrich: %q requires nova_lookup.enabled", claim)
+			r.errorf(KindRuleViolation, path, "%q requires nova_lookup.enabled", claim)
 		}
 	}
 }
 
-// checkList rejects empty and duplicate entries.
-func checkList(p *problems, name string, list []string) {
-	seen := map[string]bool{}
-	for _, item := range list {
-		switch {
-		case item == "":
-			p.add("%s contains an empty entry", name)
-		case seen[item]:
-			p.add("%s contains %q more than once", name, item)
-		}
-		seen[item] = true
+// warn flags valid but risky settings.
+func (s *Signer) warn(r *Result[Signer]) {
+	if !s.NovaLookup.Enabled {
+		r.warnf("nova_lookup.enabled", "instance verification is disabled: Nova's claims about project and instance are not checked against the Nova API")
+	}
+	if len(s.Tags.Allowlist) == 0 {
+		r.warnf("tags.allowlist", "not set: every string-valued metadata entry (up to %d bytes) is copied into tokens", iid.MaxTagsBytes)
+	}
+	if s.KeyStore.VaultProxyEndpoint != "" && s.KeyStore.Backend != BackendVaultTransit {
+		r.warnf("key_store.vault_proxy_endpoint", "ignored by the %q backend", s.KeyStore.Backend)
+	}
+	if limit := s.RateLimitPerInstance; limit.Events > 0 && time.Duration(limit.Events)*recommendedInstanceRate.Per > limit.Per*time.Duration(recommendedInstanceRate.Events) {
+		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)
 	}
 }

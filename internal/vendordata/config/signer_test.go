@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,19 @@ replica_id: signer-a
 keystone:
   allowed_users: ["nova"]
 `
+
+// parseSigner checks doc without file checks and fails on any error finding.
+func parseSigner(r io.Reader, hostname func() (string, error)) (*Signer, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	result := CheckSigner("", data, CheckOptions{Hostname: hostname, SkipFiles: true})
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return result.Config, nil
+}
 
 func parseSignerString(t *testing.T, doc string) (*Signer, error) {
 	t.Helper()
@@ -214,15 +228,25 @@ func TestLoadSigner(t *testing.T) {
 	if err := os.WriteFile(path, []byte(minimalSigner), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadSigner(path)
+	cfg, warnings, err := LoadSigner(path)
 	if err != nil {
 		t.Fatalf("LoadSigner: %v", err)
 	}
 	if cfg.ReplicaID != "signer-a" {
 		t.Fatalf("replica_id = %q", cfg.ReplicaID)
 	}
-	if _, err := LoadSigner(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+	if len(warnings) != 1 || warnings[0].Path != "tags.allowlist" || warnings[0].File != path {
+		t.Fatalf("warnings = %+v, want the tags.allowlist warning", warnings)
+	}
+	if _, _, err := LoadSigner(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatalf("LoadSigner on a missing file succeeded")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(bad, []byte(minimalSigner+"token_ttl_seconds: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadSigner(bad); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadSigner on an invalid file: err = %v, want ErrInvalidConfig", err)
 	}
 }
 
