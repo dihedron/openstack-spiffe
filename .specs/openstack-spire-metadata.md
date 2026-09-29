@@ -223,6 +223,34 @@ JSON
 * **Immutability:** Every claim value comes exclusively from the authorized Nova request, except for operator-configured custom claims (see below).
 * **Custom claims:** The operator can configure static string claims (e.g. "country": "italy") in the service configuration file (custom\_claims); they are added as top-level claims to every token. Custom claims must not use a reserved claim name (iss, aud, sub, iat, nbf, exp, jti, project\_id, instance\_id, hostname, tags): the service refuses to start if they do, and can never emit a token where a custom claim shadows a reserved one.
 
+## **Instance verification and claim enrichment**
+
+Nova's DynamicJSON request carries only project-id, instance-id, image-id, hostname, metadata, user-data and boot-roles. The availability zone and other control-plane attributes are not part of it, so the service looks them up itself, with its own service credentials, before signing.
+
+**Instance verification** (nova\_lookup.enabled, on by default): the service fetches the server record (GET /servers/{instance-id} on the Nova API) and checks, against this independent source, that:
+
+* the instance exists;
+* it belongs to the project-id stated in the request;
+* its status is one of nova\_lookup.allowed\_statuses (default: ACTIVE, BUILD, REBOOT, HARD\_REBOOT, REBUILD, RESIZE, VERIFY\_RESIZE, MIGRATING, PASSWORD).
+
+Any mismatch is rejected with 403 and logged; no token is issued.
+
+**Claim enrichment** (enrich, a list of attribute names, empty by default): each enabled attribute is added as an optional top-level claim:
+
+| Claim | Source | Notes |
+| :---- | :---- | :---- |
+| availability\_zone | Nova server record (OS-EXT-AZ:availability\_zone) | Requires nova\_lookup |
+| flavor | Nova server record (flavor original\_name, microversion ≥ 2.47) | Requires nova\_lookup |
+| user\_id | Nova server record (user\_id of the booting user) | Requires nova\_lookup |
+| project\_name | Keystone (GET /v3/projects/{project-id}) | |
+| domain\_id | Keystone (GET /v3/projects/{project-id}) | |
+
+* Only control-plane-authoritative attributes are offered; user-controlled server attributes (name, tags, key pair) are deliberately not, since they carry no more trust than metadata.
+* Compute host / hypervisor names are deliberately not offered: the token is readable from inside the guest (vendor\_data2.json) and would disclose the physical layout to tenants.
+* The enrichment claim names are reserved: custom claims cannot use them.
+* **Caching:** to protect nova-api and Keystone during boot storms, server records are cached per instance-id for at most nova\_lookup.cache\_ttl (default 60s, never more than the token TTL, since the availability zone can change on migration/resize); project records are cached for keystone.project\_cache\_ttl (default 10m).
+* **Failure:** if Nova or Keystone cannot be reached, the request is rejected with 503. The service never issues a token with missing or stale-beyond-TTL enrichment claims.
+
 ## **Signing key management**
 
 To prevent thundering herd failures during cluster scale-ups, this service avoids routing per-token Sign requests to control-plane key managers like Barbican.  
@@ -272,6 +300,10 @@ token\_ttl\_seconds: 300
 rate\_limit\_per\_instance: "1/5s"  
 custom\_claims:  
   country: "italy"
+nova\_lookup:  
+  enabled: true  
+  cache\_ttl: "60s"  
+enrich: \["availability\_zone", "flavor", "user\_id", "project\_name", "domain\_id"\]
 
 ## **Error handling and failure modes**
 
@@ -279,6 +311,8 @@ custom\_claims:
 | :---- | :---- |
 | Missing/Invalid nova-compute service token | Reject with 401/403, do not sign, log mismatch |
 | Key store / Proxy unreachable | Reject with 503; Nova omits metadata response |
+| Instance not found, owned by another project, or in a disallowed status | Reject with 403, do not sign, log mismatch |
+| Nova API / Keystone unreachable during verification or enrichment | Reject with 503 |
 | Rate limit exceeded | Reject with 429 *before* payload parsing |
 | Malformed JSON body | Reject with 400, log payload |
 
@@ -289,6 +323,7 @@ custom\_claims:
 **Unit tests**:
 
 * Claim construction verifying the strict size limits/allowlist on the tags field.  
+* Instance verification rejects unknown instances, project mismatches and disallowed statuses; enrichment claims appear only when enabled; lookups are served from cache within the TTL.  
 * kid accurately reflects the active in-memory or Vault-backed signing key.  
 * JWKS response correctly manages the retention window for rotated keys.
 
