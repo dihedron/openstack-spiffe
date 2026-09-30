@@ -252,8 +252,8 @@ func TestNewFailsWhenKeystoneIsDown(t *testing.T) {
 	}
 }
 
-// TestRefusesTLS12Endpoints: the service connects to OpenStack with TLS 1.3
-// or later only.
+// TestRefusesTLS12Endpoints: by default, the service connects to OpenStack
+// with TLS 1.3 or later only; WithMinTLSVersion lowers the bar to TLS 1.2.
 func TestRefusesTLS12Endpoints(t *testing.T) {
 	legacy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	legacy.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
@@ -272,5 +272,15 @@ func TestRefusesTLS12Endpoints(t *testing.T) {
 	_, err = New(context.Background(), creds, ca)
 	if err == nil || !strings.Contains(err.Error(), "protocol version") {
 		t.Fatalf("New against a TLS 1.2-only Keystone: %v, want a protocol version error", err)
+	}
+
+	// with TLS 1.2 allowed, the handshake succeeds (authentication then
+	// fails, since the legacy server is no Keystone)
+	_, err = New(context.Background(), creds, ca, WithMinTLSVersion(tls.VersionTLS12))
+	if err == nil || strings.Contains(err.Error(), "protocol version") || strings.Contains(err.Error(), "tls:") {
+		t.Fatalf("New with TLS 1.2 allowed: %v, want a non-TLS failure", err)
+	}
+	if _, err := New(context.Background(), creds, ca, WithMinTLSVersion(tls.VersionTLS11)); err == nil || !strings.Contains(err.Error(), "unsupported minimum TLS version") {
+		t.Fatalf("TLS 1.1 minimum: %v, want an unsupported version error", err)
 	}
 }

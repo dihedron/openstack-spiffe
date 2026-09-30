@@ -32,7 +32,7 @@ func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 	if cfg == nil {
 		return nil, errors.New("creating aggregator: missing configuration")
 	}
-	client, err := aggregator.NewHTTPClient(cfg.ReplicaCACertPath)
+	client, err := aggregator.NewHTTPClient(cfg.ReplicaCACertPath, cfg.MinTLSVersion())
 	if err != nil {
 		return nil, fmt.Errorf("creating aggregator: %w", err)
 	}
@@ -67,7 +67,7 @@ func (a *Aggregator) Run(ctx context.Context) error {
 // Serve serves HTTPS on the listener (see serve) and runs the replica polling
 // and readiness loops, until the context ends.
 func (a *Aggregator) Serve(ctx context.Context, ln net.Listener) error {
-	return serve(ctx, ln, a.handler, a.cfg.TLSCertPath, a.cfg.TLSKeyPath,
+	return serve(ctx, ln, a.handler, a.cfg.TLSCertPath, a.cfg.TLSKeyPath, a.cfg.MinTLSVersion(),
 		[]any{"component", "jwks-aggregator"},
 		a.merged.Run, a.readiness.Run)
 }

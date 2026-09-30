@@ -123,7 +123,7 @@ func caFile(t *testing.T, r *replica) string {
 
 func newAggregator(t *testing.T, clock *testClock, replicas ...*replica) *Aggregator {
 	t.Helper()
-	client, err := NewHTTPClient(caFile(t, replicas[0]))
+	client, err := NewHTTPClient(caFile(t, replicas[0]), tls.VersionTLS13)
 	if err != nil {
 		t.Fatalf("NewHTTPClient: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 	target.publish(t, ecKey(t, "elsewhere"))
 	redirecting := httptest.NewTLSServer(http.RedirectHandler(target.url(), http.StatusFound))
 	t.Cleanup(redirecting.Close)
-	client, err := NewHTTPClient(caFile(t, target))
+	client, err := NewHTTPClient(caFile(t, target), tls.VersionTLS13)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestFetchTimeout(t *testing.T) {
 	release := make(chan struct{})
 	ra.hook = func() { <-release }
 	t.Cleanup(func() { close(release) })
-	client, _ := NewHTTPClient(caFile(t, ra))
+	client, _ := NewHTTPClient(caFile(t, ra), tls.VersionTLS13)
 	a, err := New([]string{ra.url()}, client, WithFetchTimeout(50*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +438,7 @@ func TestReplicaStatusTransitionsLogged(t *testing.T) {
 func TestRun(t *testing.T) {
 	ra := newReplica(t)
 	ra.publish(t, ecKey(t, "a"))
-	client, _ := NewHTTPClient(caFile(t, ra))
+	client, _ := NewHTTPClient(caFile(t, ra), tls.VersionTLS13)
 	a, err := New([]string{ra.url()}, client, WithPollInterval(20*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +473,7 @@ func TestHTTPClientRequiresTLS13(t *testing.T) {
 	t.Cleanup(legacy.Close)
 	path := filepath.Join(t.TempDir(), "ca.pem")
 	os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600)
-	client, err := NewHTTPClient(path)
+	client, err := NewHTTPClient(path, tls.VersionTLS13)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,16 +484,37 @@ func TestHTTPClientRequiresTLS13(t *testing.T) {
 	}
 }
 
+func TestHTTPClientWithTLS12Minimum(t *testing.T) {
+	legacy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	legacy.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
+	legacy.StartTLS()
+	t.Cleanup(legacy.Close)
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600)
+	client, err := NewHTTPClient(path, tls.VersionTLS12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(legacy.URL)
+	if err != nil {
+		t.Fatalf("tls_min_version 1.2: could not reach a TLS 1.2-only replica: %v", err)
+	}
+	resp.Body.Close()
+	if _, err := NewHTTPClient(path, tls.VersionTLS11); err == nil {
+		t.Fatal("accepted TLS 1.1 as minimum")
+	}
+}
+
 func TestNewHTTPClientRejectsBadBundles(t *testing.T) {
-	if _, err := NewHTTPClient(filepath.Join(t.TempDir(), "missing.pem")); err == nil {
+	if _, err := NewHTTPClient(filepath.Join(t.TempDir(), "missing.pem"), tls.VersionTLS13); err == nil {
 		t.Fatal("accepted a missing CA bundle")
 	}
 	empty := filepath.Join(t.TempDir(), "empty.pem")
 	os.WriteFile(empty, []byte("nothing"), 0o600)
-	if _, err := NewHTTPClient(empty); err == nil {
+	if _, err := NewHTTPClient(empty, tls.VersionTLS13); err == nil {
 		t.Fatal("accepted a CA bundle without certificates")
 	}
-	if _, err := NewHTTPClient(""); err != nil {
+	if _, err := NewHTTPClient("", tls.VersionTLS13); err != nil {
 		t.Fatalf("system roots: %v", err)
 	}
 }

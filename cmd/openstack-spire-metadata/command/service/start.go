@@ -50,7 +50,7 @@ func (cmd *Start) Execute(args []string) error {
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
-	client, err := osclient.New(ctx, creds, cfg.Keystone.CACertPath)
+	client, err := osclient.New(ctx, creds, cfg.Keystone.CACertPath, osclient.WithMinTLSVersion(cfg.MinTLSVersion()))
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}

@@ -6,6 +6,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -85,4 +86,34 @@ func checkList[T any](r *Result[T], path string, list []string) {
 		}
 		seen[item] = true
 	}
+}
+
+// TLS minimum versions accepted by tls_min_version.
+const (
+	TLSVersion12 = "1.2"
+	TLSVersion13 = "1.3"
+)
+
+// tlsVersions maps tls_min_version values to crypto/tls versions.
+var tlsVersions = map[string]uint16{TLSVersion12: tls.VersionTLS12, TLSVersion13: tls.VersionTLS13}
+
+// checkTLSMinVersion flags an unsupported tls_min_version and warns about
+// TLS 1.2.
+func checkTLSMinVersion[T any](r *Result[T], version string) {
+	switch version {
+	case TLSVersion13:
+	case TLSVersion12:
+		r.warnf("tls_min_version", "TLS 1.2 is allowed: prefer %q unless a peer cannot negotiate TLS 1.3", TLSVersion13)
+	default:
+		r.errorf(KindRuleViolation, "tls_min_version", "%q is not one of %q, %q", version, TLSVersion12, TLSVersion13)
+	}
+}
+
+// minTLSVersion returns the crypto/tls version for a checked
+// tls_min_version, TLS 1.3 for anything else.
+func minTLSVersion(version string) uint16 {
+	if v, ok := tlsVersions[version]; ok {
+		return v
+	}
+	return tls.VersionTLS13
 }

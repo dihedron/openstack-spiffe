@@ -71,7 +71,7 @@ The request is made by `nova-api-metadata`, not by the user who booted the insta
 
 **Service credentials**: the service validates tokens with its own credentials, taken from the `OS_*` environment variables of a standard openrc file and never from the configuration file:
 
-- `OS_AUTH_URL`, https only (the service connects to OpenStack endpoints with TLS 1.3 or later);
+- `OS_AUTH_URL`, https only (the service connects to OpenStack endpoints with `tls_min_version` or later, see TLS below);
 - either `OS_USERNAME` or `OS_USER_ID` with `OS_USER_DOMAIN_NAME`/`_ID`, `OS_PASSWORD` and a project scope (`OS_PROJECT_NAME` with `OS_PROJECT_DOMAIN_NAME`/`_ID`, or `OS_PROJECT_ID`);
 - or an application credential (`OS_APPLICATION_CREDENTIAL_ID` or `_NAME`, and `_SECRET`);
 - optionally `OS_REGION_NAME` and `OS_INTERFACE` (`public`, `internal` or `admin`; default `public`), which select the catalog endpoints used for instance verification.
@@ -185,9 +185,9 @@ Each replica exposes the public halves of its trusted signing keys, which the ag
 
 Since every replica signs with its own keys, the SPIRE Server-side plugin fetches keys from a JWKS aggregator rather than from individual replicas.
 
-- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS 1.3 or later, with the certificate the SPIRE Server operator pins.
+- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS (`tls_min_version`, default 1.3, or later), with the certificate the SPIRE Server operator pins.
 - **Discovery**: a static list of replica JWKS URLs (`replicas`, https only).
-- **Polling**: at startup and then every `poll_interval` (default 30s), all replicas are fetched concurrently, each within `fetch_timeout` (default 5s), over TLS 1.3 or later verified against `replica_ca_cert_path` (or the system roots). A fetch fails on a non-`200` status, a response larger than 1 MiB, or a body that is not a JWK Set; redirects are never followed, since the configured URL itself must answer. A failing replica is logged when it starts failing and when it recovers, not on every poll.
+- **Polling**: at startup and then every `poll_interval` (default 30s), all replicas are fetched concurrently, each within `fetch_timeout` (default 5s), over TLS (`tls_min_version` or later) verified against `replica_ca_cert_path` (or the system roots). A fetch fails on a non-`200` status, a response larger than 1 MiB, or a body that is not a JWK Set; redirects are never followed, since the configured URL itself must answer. A failing replica is logged when it starts failing and when it recovers, not on every poll.
 - **Merging**: the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas, or one replica twice, publish the same kid with different key material, that kid is excluded and an error is logged on every poll while the conflict lasts (fail closed); identical duplicates are served once. Only public keys with `use=sig` and an allowed algorithm (RS256 with RSA of at least 2048 bits, ES256 on P-256) are passed through; other keys are left out and logged. A key carrying private key material (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth` or `k`) is rejected and logged as an error, without the material itself; the replica's other keys are still used. The merged set is sorted by kid.
 - **Unreachable replicas**: the keys from a replica's last successful fetch are kept for `stale_key_retention` (default and minimum: 5 minutes, the maximum token TTL), so in-flight tokens keep verifying during short outages. Keys a reachable replica stops publishing are dropped on its next successful fetch.
 - **Endpoints**: `GET /.well-known/jwks.json` with `Cache-Control: public, max-age=<cache_max_age>` (default 30s), so consumers refresh on a reasonable schedule without hitting the endpoint on every attestation; `/liveness`; `/readiness` (ready while at least one replica has been fetched successfully within `stale_key_retention`, i.e. while the merged set holds any replica's keys; see the health endpoints).
@@ -231,6 +231,8 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **Aggregator endpoints**: `GET /.well-known/jwks.json` (called by the SPIRE Server-side plugin), `/liveness` and `/readiness` (see above).
 
+**TLS**: each service's `tls_min_version` (`"1.2"` or `"1.3"`, default `"1.3"`) is the minimum TLS version of both its HTTPS server and the connections it makes: the signer's to Keystone and Nova, the aggregator's to the replicas. `"1.3"` is recommended; `"1.2"` exists for peers that cannot negotiate TLS 1.3 (e.g. an older load balancer in front of the OpenStack APIs) and makes `config check` warn. Any other value is an error.
+
 **Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_METADATA_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_METADATA_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials and `user-data` are never logged.
 
 **Request IDs**: every response carries an `X-Request-Id` header with a random ID generated by the service (incoming values are ignored), and every log record written while handling the request carries it as `request_id`.
@@ -245,8 +247,8 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **Command line** (object/verb convention):
 
-- `openstack-spire-metadata service start --config <path>`: run a signer replica. It refuses to start (exit code 1) on any configuration error (the pre-flight check includes the file checks of `config check`), missing or invalid `OS_*` credentials, a failed Keystone authentication or an unusable TLS certificate, and logs configuration warnings. It serves HTTPS with TLS 1.3 or later and bounded timeouts (read header 5s, read 15s, write 30s, idle 2m; headers at most 64 KiB), and on `SIGINT` or `SIGTERM` stops accepting connections and lets in-flight requests complete for up to 15 seconds.
-- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator. Like `service start`, it refuses to start on any configuration error, file checks included, logs configuration warnings, serves TLS 1.3 or later with the same timeouts, and shuts down gracefully on `SIGINT` or `SIGTERM`.
+- `openstack-spire-metadata service start --config <path>`: run a signer replica. It refuses to start (exit code 1) on any configuration error (the pre-flight check includes the file checks of `config check`), missing or invalid `OS_*` credentials, a failed Keystone authentication or an unusable TLS certificate, and logs configuration warnings. It serves HTTPS with TLS `tls_min_version` or later and bounded timeouts (read header 5s, read 15s, write 30s, idle 2m; headers at most 64 KiB), and on `SIGINT` or `SIGTERM` stops accepting connections and lets in-flight requests complete for up to 15 seconds.
+- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator. Like `service start`, it refuses to start on any configuration error, file checks included, logs configuration warnings, serves TLS `tls_min_version` or later with the same timeouts, and shuts down gracefully on `SIGINT` or `SIGTERM`.
 - `openstack-spire-metadata config check ...`: validate configuration files (see below).
 
 ## Configuration
@@ -255,6 +257,7 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 ```yaml
 listen_addr: "0.0.0.0:8443"
+tls_min_version: "1.3"                                  # or "1.2" (server and OpenStack connections)
 tls_cert_path: "/etc/vendordata-signer/tls.crt"         # required
 tls_key_path: "/etc/vendordata-signer/tls.key"          # required
 replica_id: "signer-a"                                  # default: first label of the hostname
@@ -294,6 +297,7 @@ The service's OpenStack credentials never appear in this file: they come from th
 
 ```yaml
 listen_addr: "0.0.0.0:8444"
+tls_min_version: "1.3"                                 # or "1.2" (server and replica connections)
 tls_cert_path: "/etc/jwks-aggregator/tls.crt"          # required
 tls_key_path: "/etc/jwks-aggregator/tls.key"           # required
 replicas:                                              # required, https only
@@ -318,10 +322,10 @@ openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--
 
 - **Complete report**: all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.
 - **Unknown keys** are errors and carry a "did you mean ...?" suggestion when a known key is close (e.g. `rate_limt_per_instance`).
-- **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring `nova_lookup`, `allowed_users` entries that are neither user IDs nor `name@domain`, `trusted_proxies` entries that are neither IP addresses nor CIDR ranges, an empty or invalid `client_address.header`, ...) are errors.
+- **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring `nova_lookup`, `allowed_users` entries that are neither user IDs nor `name@domain`, `trusted_proxies` entries that are neither IP addresses nor CIDR ranges, an empty or invalid `client_address.header`, a `tls_min_version` other than `"1.2"` or `"1.3"`, ...) are errors.
 - **Cross-file consistency**: when an aggregator file is given, each signer's `key_store.publish_ahead` must exceed the aggregator's `poll_interval` plus `fetch_timeout` (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's `stale_key_retention` must be at least each signer's token TTL (always true, since the aggregator itself requires at least the maximum token TTL). `replica_id` must be unique across all signer files.
 - **File checks** (skippable with `--skip-files`): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles parse. A certificate expiring within 30 days and a private key readable by group or others are warnings.
-- **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, `client_address.header` set without `trusted_proxies` (ignored), `trusted_proxies` covering every address (e.g. `0.0.0.0/0` or `::/0`, which lets any client choose its rate-limiting key), `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s.
+- **Warnings** flag valid but risky settings: `tls_min_version` set to `"1.2"`, instance verification disabled, no tags allowlist, keys ignored by the selected backend, `client_address.header` set without `trusted_proxies` (ignored), `trusted_proxies` covering every address (e.g. `0.0.0.0/0` or `::/0`, which lets any client choose its rate-limiting key), `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s.
 - **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
 - The services run the same checks at startup, file checks included, as a pre-flight check: they refuse to start on any error (e.g. a missing, mismatched or expired TLS certificate, or an unparseable CA bundle) and log the warnings.
 

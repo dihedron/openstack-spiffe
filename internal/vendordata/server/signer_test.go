@@ -317,6 +317,22 @@ func TestTLS13Minimum(t *testing.T) {
 	}
 }
 
+func TestTLS12AllowedWhenConfigured(t *testing.T) {
+	h := start(t, `tls_min_version: "1.2"`+"\n")
+	legacy := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:    h.client.Transport.(*http.Transport).TLSClientConfig.RootCAs,
+		MaxVersion: tls.VersionTLS12,
+	}}}
+	resp, err := legacy.Get(h.url + "/liveness")
+	if err != nil {
+		t.Fatalf("TLS 1.2 client refused with tls_min_version 1.2: %v", err)
+	}
+	resp.Body.Close()
+	if resp.TLS.Version != tls.VersionTLS12 {
+		t.Fatalf("negotiated %#x, want TLS 1.2", resp.TLS.Version)
+	}
+}
+
 func TestWithoutInstanceVerification(t *testing.T) {
 	h := start(t, "nova_lookup:\n  enabled: false\nenrich: [domain_id]\n")
 	token := h.cloud.IssueToken(novaUser, time.Now().Add(time.Hour))

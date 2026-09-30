@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -396,5 +397,54 @@ func TestRateMarshal(t *testing.T) {
 	}
 	if strings.TrimSpace(string(out)) != "r: 1/5s" {
 		t.Fatalf("yaml = %q", out)
+	}
+}
+
+func TestTLSMinVersion(t *testing.T) {
+	signer := func(extra string) string {
+		return "tls_cert_path: /c\ntls_key_path: /k\nreplica_id: a\ntags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n" + extra
+	}
+	aggregator := func(extra string) string {
+		return "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks]\n" + extra
+	}
+	opts := checkOptions()
+	opts.SkipFiles = true
+
+	// default: TLS 1.3, no findings
+	s := CheckSigner("s.yaml", []byte(signer("")), opts)
+	a := CheckAggregator("a.yaml", []byte(aggregator("")), opts)
+	if len(s.Findings)+len(a.Findings) != 0 {
+		t.Fatalf("unexpected findings:\n%s%s", dump(s.Findings), dump(a.Findings))
+	}
+	if s.Config.TLSMinVersion != "1.3" || s.Config.MinTLSVersion() != tls.VersionTLS13 ||
+		a.Config.TLSMinVersion != "1.3" || a.Config.MinTLSVersion() != tls.VersionTLS13 {
+		t.Fatalf("defaults: signer %q, aggregator %q", s.Config.TLSMinVersion, a.Config.TLSMinVersion)
+	}
+
+	// 1.2: allowed, with a warning
+	s = CheckSigner("s.yaml", []byte(signer(`tls_min_version: "1.2"`+"\n")), opts)
+	a = CheckAggregator("a.yaml", []byte(aggregator(`tls_min_version: "1.2"`+"\n")), opts)
+	for _, r := range [][]Finding{s.Findings, a.Findings} {
+		if got := keysOf(r); len(got) != 1 || got[0].Path != "tls_min_version" || got[0].Severity != SeverityWarning {
+			t.Fatalf("findings %+v, want one tls_min_version warning", got)
+		}
+	}
+	if s.Config.MinTLSVersion() != tls.VersionTLS12 || a.Config.MinTLSVersion() != tls.VersionTLS12 {
+		t.Fatal("1.2 not mapped to tls.VersionTLS12")
+	}
+
+	// anything else: an error
+	// unquoted numbers decode as their string form
+	if s := CheckSigner("s.yaml", []byte(signer("tls_min_version: 1.2\n")), opts); s.Config.MinTLSVersion() != tls.VersionTLS12 || len(s.Errors()) != 0 {
+		t.Fatalf("unquoted 1.2: %q, errors %+v", s.Config.TLSMinVersion, s.Errors())
+	}
+	for _, bad := range []string{`"1.1"`, `"1.0"`, `"TLS1.3"`, `1.30`, `""`} {
+		s = CheckSigner("s.yaml", []byte(signer("tls_min_version: "+bad+"\n")), opts)
+		a = CheckAggregator("a.yaml", []byte(aggregator("tls_min_version: "+bad+"\n")), opts)
+		for _, errs := range [][]Finding{s.Errors(), a.Errors()} {
+			if len(errs) != 1 || errs[0].Path != "tls_min_version" {
+				t.Fatalf("tls_min_version %s: errors %+v, want one on tls_min_version", bad, errs)
+			}
+		}
 	}
 }

@@ -162,11 +162,31 @@ type Client struct {
 	endpoints gophercloud.EndpointOpts
 }
 
+// Option configures a Client.
+type Option func(*options)
+
+type options struct {
+	minTLSVersion uint16
+}
+
+// WithMinTLSVersion sets the minimum TLS version of the connections to
+// OpenStack (tls.VersionTLS12 or tls.VersionTLS13; default: TLS 1.3).
+func WithMinTLSVersion(version uint16) Option {
+	return func(o *options) { o.minTLSVersion = version }
+}
+
 // New authenticates with Keystone and returns the client. caCertPath is an
 // optional PEM bundle that replaces the system roots for every OpenStack
 // endpoint (keystone.ca_cert_path).
-func New(ctx context.Context, creds Credentials, caCertPath string) (*Client, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+func New(ctx context.Context, creds Credentials, caCertPath string, opts ...Option) (*Client, error) {
+	o := options{minTLSVersion: tls.VersionTLS13}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.minTLSVersion != tls.VersionTLS12 && o.minTLSVersion != tls.VersionTLS13 {
+		return nil, fmt.Errorf("creating OpenStack client: unsupported minimum TLS version %#x", o.minTLSVersion)
+	}
+	tlsConfig := &tls.Config{MinVersion: o.minTLSVersion}
 	if caCertPath != "" {
 		pem, err := os.ReadFile(caCertPath)
 		if err != nil {

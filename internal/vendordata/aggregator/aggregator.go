@@ -37,11 +37,15 @@ const maxResponseBytes = 1 << 20
 // sections 6.2.2, 6.3.2 and 6.4.1).
 var privateMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"}
 
-// NewHTTPClient returns the client used to fetch the replicas: TLS 1.3 or
-// later, verified against caCertPath (replica_ca_cert_path; the system roots
-// if empty), never following redirects.
-func NewHTTPClient(caCertPath string) (*http.Client, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+// NewHTTPClient returns the client used to fetch the replicas: minTLSVersion
+// (tls.VersionTLS12 or tls.VersionTLS13) or later, verified against
+// caCertPath (replica_ca_cert_path; the system roots if empty), never
+// following redirects.
+func NewHTTPClient(caCertPath string, minTLSVersion uint16) (*http.Client, error) {
+	if minTLSVersion != tls.VersionTLS12 && minTLSVersion != tls.VersionTLS13 {
+		return nil, fmt.Errorf("unsupported minimum TLS version %#x", minTLSVersion)
+	}
+	tlsConfig := &tls.Config{MinVersion: minTLSVersion}
 	if caCertPath != "" {
 		pem, err := os.ReadFile(caCertPath)
 		if err != nil {

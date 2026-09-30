@@ -17,6 +17,9 @@ type Aggregator struct {
 	TLSCertPath string `yaml:"tls_cert_path"`
 	// TLSKeyPath is the path to the server private key (PEM).
 	TLSKeyPath string `yaml:"tls_key_path"`
+	// TLSMinVersion is the minimum TLS version ("1.2" or "1.3") of the HTTPS
+	// server and of the connections to the replicas.
+	TLSMinVersion string `yaml:"tls_min_version"`
 	// Replicas lists the JWKS URLs of the signer replicas.
 	Replicas []string `yaml:"replicas"`
 	// PollInterval is how often each replica is polled; it must be shorter
@@ -36,6 +39,7 @@ type Aggregator struct {
 func defaultAggregator() *Aggregator {
 	return &Aggregator{
 		ListenAddr:        "0.0.0.0:8444",
+		TLSMinVersion:     TLSVersion13,
 		PollInterval:      30 * time.Second,
 		FetchTimeout:      5 * time.Second,
 		StaleKeyRetention: iid.TTL,
@@ -61,7 +65,11 @@ func CheckAggregator(file string, data []byte, opts CheckOptions) *Result[Aggreg
 	return result
 }
 
+// MinTLSVersion returns tls_min_version as a crypto/tls version.
+func (a *Aggregator) MinTLSVersion() uint16 { return minTLSVersion(a.TLSMinVersion) }
+
 func (a *Aggregator) validate(r *Result[Aggregator]) {
+	checkTLSMinVersion(r, a.TLSMinVersion)
 	if a.ListenAddr == "" {
 		r.errorf(KindRuleViolation, "listen_addr", "is required")
 	}

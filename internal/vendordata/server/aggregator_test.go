@@ -66,7 +66,7 @@ type aggregatorHarness struct {
 	done   chan error
 }
 
-func startAggregator(t *testing.T, replicas ...*fakeReplica) *aggregatorHarness {
+func startAggregator(t *testing.T, extra string, replicas ...*fakeReplica) *aggregatorHarness {
 	t.Helper()
 	certPath, keyPath, pool := writeTLS(t)
 	ca := filepath.Join(t.TempDir(), "replicas-ca.pem")
@@ -77,6 +77,7 @@ func startAggregator(t *testing.T, replicas ...*fakeReplica) *aggregatorHarness 
 	for _, r := range replicas {
 		doc += "  - " + r.URL + "/.well-known/jwks.json\n"
 	}
+	doc += extra
 	result := config.CheckAggregator("aggregator.yaml", []byte(doc), config.CheckOptions{})
 	if err := result.Err(); err != nil {
 		t.Fatalf("configuration: %v", err)
@@ -121,7 +122,7 @@ func (h *aggregatorHarness) get(t *testing.T, method, path string) (*http.Respon
 }
 
 func TestAggregatorEndToEnd(t *testing.T) {
-	h := startAggregator(t, newFakeReplica(t, "2026-09-29-signer-a-key-1"), newFakeReplica(t, "2026-09-29-signer-b-key-1"))
+	h := startAggregator(t, "", newFakeReplica(t, "2026-09-29-signer-a-key-1"), newFakeReplica(t, "2026-09-29-signer-b-key-1"))
 
 	// the first poll runs at startup; wait for the merged set
 	var set jwks.Set
@@ -176,7 +177,7 @@ func TestAggregatorEndToEnd(t *testing.T) {
 }
 
 func TestAggregatorTLS13Minimum(t *testing.T) {
-	h := startAggregator(t, newFakeReplica(t, "k"))
+	h := startAggregator(t, "", newFakeReplica(t, "k"))
 	old := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 		RootCAs:    h.client.Transport.(*http.Transport).TLSClientConfig.RootCAs,
 		MaxVersion: tls.VersionTLS12,
@@ -187,8 +188,21 @@ func TestAggregatorTLS13Minimum(t *testing.T) {
 	}
 }
 
+func TestAggregatorTLS12AllowedWhenConfigured(t *testing.T) {
+	h := startAggregator(t, `tls_min_version: "1.2"`+"\n", newFakeReplica(t, "k"))
+	legacy := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:    h.client.Transport.(*http.Transport).TLSClientConfig.RootCAs,
+		MaxVersion: tls.VersionTLS12,
+	}}}
+	resp, err := legacy.Get(h.url + "/liveness")
+	if err != nil {
+		t.Fatalf("TLS 1.2 client refused with tls_min_version 1.2: %v", err)
+	}
+	resp.Body.Close()
+}
+
 func TestAggregatorGracefulShutdown(t *testing.T) {
-	h := startAggregator(t, newFakeReplica(t, "k"))
+	h := startAggregator(t, "", newFakeReplica(t, "k"))
 	h.get(t, http.MethodGet, "/liveness")
 	h.cancel()
 	select {

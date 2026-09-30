@@ -25,11 +25,11 @@ func run(ctx context.Context, addr string, serveFn func(context.Context, net.Lis
 	return serveFn(ctx, ln)
 }
 
-// serve serves HTTPS on the listener with the given certificate, TLS 1.3 or
-// later and bounded timeouts, while running the background loops. When the
+// serve serves HTTPS on the listener with the given certificate, TLS
+// minTLSVersion or later and bounded timeouts, while running the background loops. When the
 // context ends, it stops accepting connections, lets in-flight requests
 // complete (up to shutdownTimeout), stops the loops and returns nil.
-func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, logAttrs []any, loops ...func(context.Context) error) error {
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, minTLSVersion uint16, logAttrs []any, loops ...func(context.Context) error) error {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		ln.Close()
@@ -37,7 +37,7 @@ func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath,
 	}
 	srv := &http.Server{
 		Handler:           handler,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
+		TLSConfig:         &tls.Config{MinVersion: minTLSVersion, Certificates: []tls.Certificate{cert}},
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

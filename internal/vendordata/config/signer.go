@@ -56,6 +56,9 @@ type Signer struct {
 	TLSCertPath string `yaml:"tls_cert_path"`
 	// TLSKeyPath is the path to the server private key (PEM).
 	TLSKeyPath string `yaml:"tls_key_path"`
+	// TLSMinVersion is the minimum TLS version ("1.2" or "1.3") of the HTTPS
+	// server and of the connections to Keystone and Nova.
+	TLSMinVersion string `yaml:"tls_min_version"`
 	// ReplicaID uniquely identifies this replica and is embedded in every
 	// kid it issues; defaults to the first label of the hostname.
 	ReplicaID string `yaml:"replica_id"`
@@ -147,7 +150,8 @@ type NovaLookup struct {
 
 func defaultSigner() *Signer {
 	return &Signer{
-		ListenAddr: "0.0.0.0:8443",
+		ListenAddr:    "0.0.0.0:8443",
+		TLSMinVersion: TLSVersion13,
 		KeyStore: KeyStore{
 			Backend:          BackendEphemeralMemory,
 			Algorithm:        iid.Algorithm,
@@ -213,7 +217,11 @@ func (s *Signer) TokenTTL() time.Duration {
 	return time.Duration(s.TokenTTLSeconds) * time.Second
 }
 
+// MinTLSVersion returns tls_min_version as a crypto/tls version.
+func (s *Signer) MinTLSVersion() uint16 { return minTLSVersion(s.TLSMinVersion) }
+
 func (s *Signer) validate(r *Result[Signer]) {
+	checkTLSMinVersion(r, s.TLSMinVersion)
 	if s.ListenAddr == "" {
 		r.errorf(KindRuleViolation, "listen_addr", "is required")
 	}

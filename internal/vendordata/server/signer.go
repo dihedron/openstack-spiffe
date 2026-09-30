@@ -153,7 +153,7 @@ func (s *Signer) Run(ctx context.Context) error {
 // Serve serves HTTPS on the listener (see serve) and runs the key rotation
 // and readiness loops, until the context ends.
 func (s *Signer) Serve(ctx context.Context, ln net.Listener) error {
-	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath,
+	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath, s.cfg.MinTLSVersion(),
 		[]any{"component", "signer", "replica_id", s.cfg.ReplicaID},
 		s.keys.Run, s.readiness.Run)
 }
