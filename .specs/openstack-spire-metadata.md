@@ -195,10 +195,10 @@ Because Nova calls this service whenever the instance reads its vendordata, the 
 - **Fresh jti**: a new UUID for every token, even for the same instance asking again seconds later; a jti is never reused.
 - **No replay tracking**: enforcing jti uniqueness is the responsibility of the downstream SPIRE Server-side plugin, if it chooses to track it. This service's job is to never issue two tokens with the same jti, not to police reuse downstream.
 - **Two-stage rate limiting**: limits blunt any attempt to use this endpoint to exhaust the signing key store's request budget. The instance ID is only available inside the JSON body, so rate limiting happens in two stages, both answering `429`:
-  1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`), so spam is rejected cheaply without allocating memory for the payload.
+  1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`: a larger declared `Content-Length` is rejected with `400` at once, and reading an undeclared body stops at the cap), so spam is rejected cheaply without allocating memory for the payload. IPv6 sources are keyed by their /64 prefix, since a single host usually controls a whole /64 and could otherwise bypass the limit by rotating addresses.
   2. **Right after a size-capped decode**: a per-instance-ID token bucket (`rate_limit_per_instance`, default 1/5s: no more than one token every few seconds per instance), before any lookup or signing operation.
 
-  Limits are enforced per replica, since replicas share nothing.
+  A `429` carries a `Retry-After` header. A rate `N/period` allows bursts of up to N requests and refills N tokens per period. Limits are enforced per replica, since replicas share nothing. The number of tracked keys is bounded: buckets that have refilled completely are forgotten, and if the bound is still reached, an arbitrary bucket is evicted (its key starts over with a full bucket), so a flood of distinct sources can neither exhaust memory nor lock out every new source.
 
 ## API surface
 
