@@ -46,6 +46,11 @@ type fakeBackend struct {
 
 	serverCalls  atomic.Int32
 	projectCalls atomic.Int32
+
+	// serverHook and projectHook, if set, run at the start of each lookup
+	// and may fail it.
+	serverHook  func(ctx context.Context) error
+	projectHook func(ctx context.Context) error
 }
 
 func newBackend() *fakeBackend {
@@ -59,6 +64,11 @@ func newBackend() *fakeBackend {
 
 func (f *fakeBackend) Server(ctx context.Context, id string) (Server, error) {
 	f.serverCalls.Add(1)
+	if f.serverHook != nil {
+		if err := f.serverHook(ctx); err != nil {
+			return Server{}, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.serverErr != nil {
@@ -73,6 +83,11 @@ func (f *fakeBackend) Server(ctx context.Context, id string) (Server, error) {
 
 func (f *fakeBackend) Project(ctx context.Context, id string) (Project, error) {
 	f.projectCalls.Add(1)
+	if f.projectHook != nil {
+		if err := f.projectHook(ctx); err != nil {
+			return Project{}, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.projectErr != nil {
@@ -341,5 +356,61 @@ func TestNewVerifierValidation(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
+	}
+}
+
+// TestLookupsRunInParallel makes each lookup wait until the other one has
+// started: run one after the other, they would time out.
+func TestLookupsRunInParallel(t *testing.T) {
+	b := newBackend()
+	serverStarted, projectStarted := make(chan struct{}), make(chan struct{})
+	await := func(ctx context.Context, other <-chan struct{}) error {
+		select {
+		case <-other:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("the other lookup never started: lookups are sequential")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	b.serverHook = func(ctx context.Context) error { close(serverStarted); return await(ctx, projectStarted) }
+	b.projectHook = func(ctx context.Context) error { close(projectStarted); return await(ctx, serverStarted) }
+	v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment(iid.EnrichmentClaims()))
+
+	e, err := v.Verify(context.Background(), projectID, instanceID)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := claims.Enrichment{AvailabilityZone: "az-1", Flavor: "m1.small", UserID: "u1", ProjectName: "web", DomainID: "default"}
+	if e != want {
+		t.Fatalf("enrichment %+v, want %+v", e, want)
+	}
+}
+
+func TestServerFailureDoesNotWaitForTheProjectLookup(t *testing.T) {
+	b := newBackend()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	b.projectHook = func(ctx context.Context) error { <-release; return nil } // Keystone hangs
+	v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment([]string{iid.ClaimProjectName}))
+
+	start := time.Now()
+	_, err := v.Verify(context.Background(), projectID, "00000000-0000-4000-8000-000000000000")
+	if !errors.Is(err, ErrInstanceMismatch) {
+		t.Fatalf("Verify error %v, want ErrInstanceMismatch", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Verify took %v: it waited for the hanging project lookup", elapsed)
+	}
+}
+
+func TestProjectFailureAfterServerSuccess(t *testing.T) {
+	b := newBackend()
+	b.projectErr = errors.New("connection refused")
+	v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment([]string{iid.ClaimAvailabilityZone, iid.ClaimDomainID}))
+	e, err := v.Verify(context.Background(), projectID, instanceID)
+	if !errors.Is(err, ErrLookupUnavailable) || e != (claims.Enrichment{}) {
+		t.Fatalf("Verify = %+v, %v; want no enrichment and ErrLookupUnavailable", e, err)
 	}
 }

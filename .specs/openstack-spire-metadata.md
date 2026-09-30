@@ -49,7 +49,11 @@ This service is a Nova **DynamicJSON vendordata target**: a REST service that `n
 - `hostname`: required, at most 255 characters, no control characters.
 - `image-id`: optional (empty for instances booted from volume).
 
-**Response shape**: Nova nests the response under the target name in `vendor_data2.json`. This service returns `{"openstack_iid": {"jwt": "<token>"}}`; matching the `openstack_iid` target name gives the agent plugin (companion spec) a fixed lookup path.
+**Response shape**: Nova nests the response under the target name in `vendor_data2.json`. This service returns `{"openstack_iid": {"jwt": "<token>"}}` (`application/json`); matching the `openstack_iid` target name gives the agent plugin (companion spec) a fixed lookup path. The body is a credential, so every `/attest` response carries `Cache-Control: no-store`. Only `POST` is accepted (`405` otherwise), and error responses carry the bare status text, never details.
+
+**Processing order**: per-source rate limit and body cap → caller authentication → decoding and validation → per-instance rate limit → instance verification and enrichment → signing. Each step runs only if the previous ones succeeded, so an unauthenticated or invalid request never costs a lookup or a signature.
+
+**Logging of rejected payloads**: a malformed or invalid body is logged truncated to 512 bytes, with `user-data` redacted: in a JSON object its value is replaced; in a payload that cannot be parsed, everything from the first mention of `user-data` onwards is dropped, since the value cannot be located reliably. An oversized body is logged only with the size cap.
 
 ## Caller authentication and request-context binding
 
@@ -137,7 +141,7 @@ Any mismatch is rejected with `403` and logged; no token is issued.
 - Only control-plane-authoritative attributes are offered. User-controlled server attributes (name, tags, key pair) are deliberately not, since they carry no more trust than metadata.
 - Compute host and hypervisor names are deliberately not offered: the token is readable from inside the guest (`vendor_data2.json`) and would disclose the physical layout to tenants.
 - The enrichment claim names are reserved: custom claims cannot use them.
-- **Lookups**: the Nova endpoint is taken from the service catalog (selected by `OS_REGION_NAME` and `OS_INTERFACE`, default `public`), and server records are requested with compute microversion 2.47, so that they embed the flavor's original name. Keystone is reached at `OS_AUTH_URL`. Each lookup is bounded by a timeout (5s).
+- **Lookups**: the Nova endpoint is taken from the service catalog (selected by `OS_REGION_NAME` and `OS_INTERFACE`, default `public`), and server records are requested with compute microversion 2.47, so that they embed the flavor's original name. Keystone is reached at `OS_AUTH_URL`. Each lookup is bounded by a timeout (5s). The Nova and Keystone lookups are independent and run concurrently, so a request waits for the slower of the two, not for their sum; this keeps the worst case within Nova's own wait for the vendordata response (`[api] vendordata_dynamic_read_timeout`, default 5s). A failed instance check is answered at once, without waiting for the Keystone lookup.
 - **Caching**: to protect nova-api and Keystone during boot storms, server records are cached per instance ID for at most `nova_lookup.cache_ttl` (default 60s, never more than the token TTL, since the availability zone can change on migration or resize); project records are cached for `keystone.project_cache_ttl` (default 10m). The cached record is still checked against each request. Caches are bounded in size, failures are not cached, and concurrent lookups of the same record are merged into a single request.
 - **Unknown project**: if a Keystone lookup finds no project with the request's `project-id`, the request is rejected with `403`, like an instance mismatch.
 - **Failure**: if Nova or Keystone cannot be reached, the request is rejected with `503`. The service never issues a token with missing enrichment claims, or with enrichment claims staler than the TTL: an enabled attribute that is empty in the record (e.g. the availability zone of an instance not scheduled yet) is also rejected with `503`, so that Nova retries on the instance's next metadata read.

@@ -182,74 +182,115 @@ func NewVerifier(backend Backend, options ...Option) (*Verifier, error) {
 // exists, belongs to the project and is in an allowed status, and returns
 // the enabled enrichment claims. It fails with ErrInstanceMismatch (403) or
 // ErrLookupUnavailable (503), never with partial enrichment.
+//
+// The Keystone project lookup does not depend on the Nova server record, so
+// both run at the same time: the latency is that of the slower lookup, not
+// their sum. A failed server check returns at once, without waiting for the
+// project lookup, which still completes (and is cached) in the background.
 func (v *Verifier) Verify(ctx context.Context, projectID, instanceID string) (claims.Enrichment, error) {
-	var e claims.Enrichment
 	log := slog.With("project_id", projectID, "instance_id", instanceID)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	if v.verify {
-		server, err := v.servers.Get(ctx, instanceID, func(ctx context.Context) (Server, time.Time, error) {
-			s, err := v.backend.Server(ctx, instanceID)
-			return s, v.now().Add(v.serverTTL), err
-		})
-		switch {
-		case errors.Is(err, ErrNotFound):
-			log.WarnContext(ctx, "instance verification failed", "reason", "instance not found in Nova")
-			return e, fmt.Errorf("%w: instance not found", ErrInstanceMismatch)
-		case err != nil:
-			log.ErrorContext(ctx, "cannot look up instance in Nova", "error", err)
-			return e, fmt.Errorf("%w: looking up instance: %w", ErrLookupUnavailable, err)
-		case server.ProjectID != projectID:
-			log.WarnContext(ctx, "instance verification failed", "reason", "instance belongs to another project", "server_project_id", server.ProjectID)
-			return e, fmt.Errorf("%w: instance belongs to another project", ErrInstanceMismatch)
-		case !slices.Contains(v.statuses, server.Status):
-			log.WarnContext(ctx, "instance verification failed", "reason", "disallowed instance status", "status", server.Status)
-			return e, fmt.Errorf("%w: instance status %q is not allowed", ErrInstanceMismatch, server.Status)
-		}
-		for _, name := range v.enrich {
-			var value string
-			switch name {
-			case iid.ClaimAvailabilityZone:
-				value = server.AvailabilityZone
-				e.AvailabilityZone = value
-			case iid.ClaimFlavor:
-				value = server.Flavor
-				e.Flavor = value
-			case iid.ClaimUserID:
-				value = server.UserID
-				e.UserID = value
-			default:
-				continue
-			}
-			if value == "" {
-				log.ErrorContext(ctx, "server record lacks an enrichment attribute", "claim", name, "status", server.Status)
-				return claims.Enrichment{}, fmt.Errorf("%w: server record lacks %s", ErrLookupUnavailable, name)
-			}
-		}
+	projectDone := make(chan struct{})
+	var project claims.Enrichment
+	var projectErr error
+	if slices.Contains(v.enrich, iid.ClaimProjectName) || slices.Contains(v.enrich, iid.ClaimDomainID) {
+		go func() {
+			defer close(projectDone)
+			project, projectErr = v.lookupProject(ctx, log, projectID)
+		}()
+	} else {
+		close(projectDone)
 	}
 
-	if slices.Contains(v.enrich, iid.ClaimProjectName) || slices.Contains(v.enrich, iid.ClaimDomainID) {
-		project, err := v.projects.Get(ctx, projectID, func(ctx context.Context) (Project, time.Time, error) {
-			p, err := v.backend.Project(ctx, projectID)
-			return p, v.now().Add(v.projectTTL), err
-		})
-		switch {
-		case errors.Is(err, ErrNotFound):
-			log.WarnContext(ctx, "instance verification failed", "reason", "project not found in Keystone")
-			return claims.Enrichment{}, fmt.Errorf("%w: project not found", ErrInstanceMismatch)
-		case err != nil:
-			log.ErrorContext(ctx, "cannot look up project in Keystone", "error", err)
-			return claims.Enrichment{}, fmt.Errorf("%w: looking up project: %w", ErrLookupUnavailable, err)
+	e, err := v.verifyServer(ctx, log, projectID, instanceID)
+	if err != nil {
+		return claims.Enrichment{}, err
+	}
+	<-projectDone
+	if projectErr != nil {
+		return claims.Enrichment{}, projectErr
+	}
+	e.ProjectName, e.DomainID = project.ProjectName, project.DomainID
+	return e, nil
+}
+
+// verifyServer checks the server record, if instance verification is
+// enabled, and returns the enrichment claims read from it.
+func (v *Verifier) verifyServer(ctx context.Context, log *slog.Logger, projectID, instanceID string) (claims.Enrichment, error) {
+	var e claims.Enrichment
+	if !v.verify {
+		return e, nil
+	}
+	server, err := v.servers.Get(ctx, instanceID, func(ctx context.Context) (Server, time.Time, error) {
+		s, err := v.backend.Server(ctx, instanceID)
+		return s, v.now().Add(v.serverTTL), err
+	})
+	switch {
+	case errors.Is(err, ErrNotFound):
+		log.WarnContext(ctx, "instance verification failed", "reason", "instance not found in Nova")
+		return e, fmt.Errorf("%w: instance not found", ErrInstanceMismatch)
+	case err != nil:
+		log.ErrorContext(ctx, "cannot look up instance in Nova", "error", err)
+		return e, fmt.Errorf("%w: looking up instance: %w", ErrLookupUnavailable, err)
+	case server.ProjectID != projectID:
+		log.WarnContext(ctx, "instance verification failed", "reason", "instance belongs to another project", "server_project_id", server.ProjectID)
+		return e, fmt.Errorf("%w: instance belongs to another project", ErrInstanceMismatch)
+	case !slices.Contains(v.statuses, server.Status):
+		log.WarnContext(ctx, "instance verification failed", "reason", "disallowed instance status", "status", server.Status)
+		return e, fmt.Errorf("%w: instance status %q is not allowed", ErrInstanceMismatch, server.Status)
+	}
+	for _, name := range v.enrich {
+		var value string
+		switch name {
+		case iid.ClaimAvailabilityZone:
+			value = server.AvailabilityZone
+			e.AvailabilityZone = value
+		case iid.ClaimFlavor:
+			value = server.Flavor
+			e.Flavor = value
+		case iid.ClaimUserID:
+			value = server.UserID
+			e.UserID = value
+		default:
+			continue
 		}
-		if slices.Contains(v.enrich, iid.ClaimProjectName) {
-			e.ProjectName = project.Name
+		if value == "" {
+			log.ErrorContext(ctx, "server record lacks an enrichment attribute", "claim", name, "status", server.Status)
+			return claims.Enrichment{}, fmt.Errorf("%w: server record lacks %s", ErrLookupUnavailable, name)
 		}
-		if slices.Contains(v.enrich, iid.ClaimDomainID) {
-			e.DomainID = project.DomainID
-		}
-		if (slices.Contains(v.enrich, iid.ClaimProjectName) && e.ProjectName == "") || (slices.Contains(v.enrich, iid.ClaimDomainID) && e.DomainID == "") {
-			log.ErrorContext(ctx, "project record lacks an enrichment attribute")
-			return claims.Enrichment{}, fmt.Errorf("%w: project record lacks name or domain", ErrLookupUnavailable)
-		}
+	}
+	return e, nil
+}
+
+// lookupProject returns the enrichment claims read from the project record.
+func (v *Verifier) lookupProject(ctx context.Context, log *slog.Logger, projectID string) (claims.Enrichment, error) {
+	var e claims.Enrichment
+	project, err := v.projects.Get(ctx, projectID, func(ctx context.Context) (Project, time.Time, error) {
+		p, err := v.backend.Project(ctx, projectID)
+		return p, v.now().Add(v.projectTTL), err
+	})
+	switch {
+	case errors.Is(err, ErrNotFound):
+		log.WarnContext(ctx, "instance verification failed", "reason", "project not found in Keystone")
+		return e, fmt.Errorf("%w: project not found", ErrInstanceMismatch)
+	case err != nil && ctx.Err() != nil:
+		// abandoned: the server check failed, or the caller went away
+		return e, fmt.Errorf("%w: looking up project: %w", ErrLookupUnavailable, err)
+	case err != nil:
+		log.ErrorContext(ctx, "cannot look up project in Keystone", "error", err)
+		return e, fmt.Errorf("%w: looking up project: %w", ErrLookupUnavailable, err)
+	}
+	if slices.Contains(v.enrich, iid.ClaimProjectName) {
+		e.ProjectName = project.Name
+	}
+	if slices.Contains(v.enrich, iid.ClaimDomainID) {
+		e.DomainID = project.DomainID
+	}
+	if (slices.Contains(v.enrich, iid.ClaimProjectName) && e.ProjectName == "") || (slices.Contains(v.enrich, iid.ClaimDomainID) && e.DomainID == "") {
+		log.ErrorContext(ctx, "project record lacks an enrichment attribute")
+		return claims.Enrichment{}, fmt.Errorf("%w: project record lacks name or domain", ErrLookupUnavailable)
 	}
 	return e, nil
 }
