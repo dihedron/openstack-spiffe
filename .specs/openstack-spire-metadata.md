@@ -76,7 +76,7 @@ The request is made by `nova-api-metadata`, not by the user who booted the insta
 - or an application credential (`OS_APPLICATION_CREDENTIAL_ID` or `_NAME`, and `_SECRET`);
 - optionally `OS_REGION_NAME` and `OS_INTERFACE` (`public`, `internal` or `admin`; default `public`), which select the catalog endpoints used for instance verification.
 
-The service user needs the permission to validate other users' tokens (by default the `service` or `admin` role), and re-authenticates when its own token expires.
+The service user needs, with default policies, the permissions to validate other users' tokens (`identity:validate_token`), to read any project (`identity:get_project`, for the `project_name` and `domain_id` enrichment) and to read any server (`os_compute_api:servers:show`, for instance verification): typically the `admin` role in the `service` project, as for the other OpenStack service users, or a dedicated role with policy overrides for these rules. It re-authenticates when its own token expires.
 
 Trust in Nova's claims about `project-id` and `instance-id` thus rests on the authenticated identity of the compute control plane, and is independently confirmed by the instance verification described below.
 
@@ -375,6 +375,7 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 - A standalone HTTP service written in Go, for consistency with the SPIRE plugins of the companion specs.
 - Deployed close to the Nova control plane's network segment, since `nova-api-metadata` must reach it on every vendordata request; its availability is coupled to that of the metadata service. It runs as several share-nothing signer replicas behind a load balancer (the target of Nova's DynamicJSON configuration), plus one or more JWKS aggregator instances behind their own load balancer (the endpoint of the SPIRE Server-side plugin). The signer's load balancer either preserves client addresses, or is listed in `client_address.trusted_proxies` and forwards them in `client_address.header` (see client address).
 - No private key material is ever written to the deployment host's disk. The only secrets the service holds locally are its client credentials (Keystone `OS_*` variables, and the Vault credentials once `vault_transit` exists); they come from the platform's standard secret-injection mechanism, never baked into the image.
+- Annotated sample configurations (signer, aggregator, `OS_*` credentials template and the Nova settings) live in `examples/`, and a test keeps the signer and aggregator samples valid, cross-file checks included; the README documents deployment, OpenStack setup and tuning.
 - Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
 
 ## Resolved questions and out of scope
