@@ -94,7 +94,7 @@ func (a *Aggregator) validate(r *Result[Aggregator]) {
 	if a.StaleKeyRetention < iid.TTL {
 		r.errorf(KindRuleViolation, "stale_key_retention", "%v must be at least the maximum token TTL (%v)", a.StaleKeyRetention, iid.TTL)
 	}
-	if a.CacheMaxAge < 0 {
-		r.errorf(KindRuleViolation, "cache_max_age", "%v must not be negative", a.CacheMaxAge)
+	if a.CacheMaxAge < 0 || a.CacheMaxAge%time.Second != 0 {
+		r.errorf(KindRuleViolation, "cache_max_age", "%v must be a non-negative whole number of seconds", a.CacheMaxAge)
 	}
 }

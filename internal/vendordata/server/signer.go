@@ -5,14 +5,10 @@ package server
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
-	"sync"
-	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/attest"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
@@ -29,10 +25,6 @@ import (
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/token"
 	"github.com/gophercloud/gophercloud/v2"
 )
-
-// shutdownTimeout bounds the graceful shutdown: in-flight requests get this
-// long to complete once the context ends.
-const shutdownTimeout = 15 * time.Second
 
 // Signer is an assembled signer replica.
 type Signer struct {
@@ -155,60 +147,13 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 
 // Run listens on the configured address and serves until the context ends.
 func (s *Signer) Run(ctx context.Context) error {
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", s.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", s.cfg.ListenAddr, err)
-	}
-	return s.Serve(ctx, ln)
+	return run(ctx, s.cfg.ListenAddr, s.Serve)
 }
 
-// Serve serves HTTPS on the listener, with the configured certificate and
-// TLS 1.3 or later, and runs the key rotation and readiness loops. When the
-// context ends, it stops accepting connections, lets in-flight requests
-// complete (up to shutdownTimeout) and returns nil.
+// Serve serves HTTPS on the listener (see serve) and runs the key rotation
+// and readiness loops, until the context ends.
 func (s *Signer) Serve(ctx context.Context, ln net.Listener) error {
-	cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertPath, s.cfg.TLSKeyPath)
-	if err != nil {
-		ln.Close()
-		return fmt.Errorf("loading TLS certificate: %w", err)
-	}
-	srv := &http.Server{
-		Handler:           s.handler,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    64 << 10,
-		// TLS handshake failures from scanners are not worth more than debug
-		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
-	}
-
-	background, stop := context.WithCancel(ctx)
-	defer stop()
-	var wg sync.WaitGroup
-	wg.Go(func() { s.keys.Run(background) })
-	wg.Go(func() { s.readiness.Run(background) })
-
-	served := make(chan error, 1)
-	go func() { served <- srv.ServeTLS(ln, "", "") }()
-	slog.InfoContext(ctx, "signer serving", "address", ln.Addr().String(), "replica_id", s.cfg.ReplicaID)
-
-	var result error
-	select {
-	case err := <-served:
-		result = fmt.Errorf("serving: %w", err)
-	case <-ctx.Done():
-		slog.InfoContext(ctx, "signer shutting down", "replica_id", s.cfg.ReplicaID)
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			result = fmt.Errorf("shutting down: %w", err)
-		}
-		<-served // http.ErrServerClosed
-	}
-	stop()
-	wg.Wait()
-	return result
+	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath,
+		[]any{"component", "signer", "replica_id", s.cfg.ReplicaID},
+		s.keys.Run, s.readiness.Run)
 }

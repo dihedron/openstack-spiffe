@@ -72,6 +72,7 @@ func TestAggregatorInvalid(t *testing.T) {
 		{"fetch timeout >= poll", minimalAggregator + "poll_interval: 10s\nfetch_timeout: 10s\n", "fetch_timeout"},
 		{"retention shorter than token ttl", minimalAggregator + "stale_key_retention: 4m\n", "stale_key_retention"},
 		{"negative cache age", minimalAggregator + "cache_max_age: -1s\n", "cache_max_age"},
+		{"fractional cache age", minimalAggregator + "cache_max_age: 1500ms\n", "cache_max_age"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

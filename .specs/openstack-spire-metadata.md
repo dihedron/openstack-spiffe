@@ -185,12 +185,12 @@ Each replica exposes the public halves of its trusted signing keys, which the ag
 
 Since every replica signs with its own keys, the SPIRE Server-side plugin fetches keys from a JWKS aggregator rather than from individual replicas.
 
-- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS, with the certificate the SPIRE Server operator pins.
+- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS 1.3 or later, with the certificate the SPIRE Server operator pins.
 - **Discovery**: a static list of replica JWKS URLs (`replicas`, https only).
-- **Polling**: every `poll_interval` (default 30s) each replica is fetched concurrently, with `fetch_timeout` (default 5s), a response size cap, and TLS verified against `replica_ca_cert_path` (or the system roots).
-- **Merging**: the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas publish the same kid with different key material, that kid is excluded and an error is logged (fail closed). Only public keys with `use=sig` and an allowed algorithm are passed through; private key material is rejected.
+- **Polling**: at startup and then every `poll_interval` (default 30s), all replicas are fetched concurrently, each within `fetch_timeout` (default 5s), over TLS 1.3 or later verified against `replica_ca_cert_path` (or the system roots). A fetch fails on a non-`200` status, a response larger than 1 MiB, or a body that is not a JWK Set; redirects are never followed, since the configured URL itself must answer. A failing replica is logged when it starts failing and when it recovers, not on every poll.
+- **Merging**: the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas, or one replica twice, publish the same kid with different key material, that kid is excluded and an error is logged on every poll while the conflict lasts (fail closed); identical duplicates are served once. Only public keys with `use=sig` and an allowed algorithm (RS256 with RSA of at least 2048 bits, ES256 on P-256) are passed through; other keys are left out and logged. A key carrying private key material (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth` or `k`) is rejected and logged as an error, without the material itself; the replica's other keys are still used. The merged set is sorted by kid.
 - **Unreachable replicas**: the keys from a replica's last successful fetch are kept for `stale_key_retention` (default and minimum: 5 minutes, the maximum token TTL), so in-flight tokens keep verifying during short outages. Keys a reachable replica stops publishing are dropped on its next successful fetch.
-- **Endpoints**: `GET /.well-known/jwks.json` with `Cache-Control: public, max-age=<cache_max_age>` (default 30s), so consumers refresh on a reasonable schedule without hitting the endpoint on every attestation; `/liveness`; `/readiness` (ready once at least one replica has been fetched successfully).
+- **Endpoints**: `GET /.well-known/jwks.json` with `Cache-Control: public, max-age=<cache_max_age>` (default 30s), so consumers refresh on a reasonable schedule without hitting the endpoint on every attestation; `/liveness`; `/readiness` (ready while at least one replica has been fetched successfully within `stale_key_retention`, i.e. while the merged set holds any replica's keys; see the health endpoints).
 
 **Requirements on the SPIRE Server-side plugin** (companion spec): fetch keys from the aggregator, select the verification key by the JWT header kid, and re-fetch the JWK Set (rate-limited) when it meets an unknown kid.
 
@@ -239,13 +239,14 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 - `/liveness` answers `200` as long as the HTTP server is serving.
 - `/readiness` answers `200` only if every readiness check passed in its latest run, else `503`. The checks run in the background, concurrently, every 5 seconds, each bounded by a 2-second timeout; probes are answered at once from the latest results, so they never wait on a dependency (orchestrators' probe timeouts are often shorter than a dependency check), and dependencies are checked at a fixed rate however often the endpoint is probed. The service is not ready before the first run completes, nor when the latest results are older than three intervals.
+- Aggregator check: `replicas` (at least one replica fetched within `stale_key_retention`).
 - Signer checks: `key_store` (the key store can sign, which includes the publish-ahead gate at startup), `keystone` (Keystone is reachable and accepts the service's token; an expired service token is renewed, not reported), and `nova` when `nova_lookup.enabled` (the Nova API is reachable).
 - The JSON body gives the overall status and each check as `ok`, `failing` or `pending`, never error details, which are logged when a check changes state (not on every run).
 
 **Command line** (object/verb convention):
 
 - `openstack-spire-metadata service start --config <path>`: run a signer replica. It refuses to start (exit code 1) on any configuration error (the pre-flight check includes the file checks of `config check`), missing or invalid `OS_*` credentials, a failed Keystone authentication or an unusable TLS certificate, and logs configuration warnings. It serves HTTPS with TLS 1.3 or later and bounded timeouts (read header 5s, read 15s, write 30s, idle 2m; headers at most 64 KiB), and on `SIGINT` or `SIGTERM` stops accepting connections and lets in-flight requests complete for up to 15 seconds.
-- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator.
+- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator. Like `service start`, it refuses to start on any configuration error, file checks included, logs configuration warnings, serves TLS 1.3 or later with the same timeouts, and shuts down gracefully on `SIGINT` or `SIGTERM`.
 - `openstack-spire-metadata config check ...`: validate configuration files (see below).
 
 ## Configuration
@@ -302,7 +303,7 @@ poll_interval: "30s"
 fetch_timeout: "5s"
 replica_ca_cert_path: "/etc/ssl/signer-ca.pem"         # optional
 stale_key_retention: "5m"                              # at least 5m
-cache_max_age: "30s"
+cache_max_age: "30s"                                   # whole seconds
 ```
 
 Unknown keys are errors in both files, so that typos are never silently ignored.

@@ -1,0 +1,78 @@
+package server
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// shutdownTimeout bounds the graceful shutdown: in-flight requests get this
+// long to complete once the context ends.
+const shutdownTimeout = 15 * time.Second
+
+// run listens on addr and calls serveFn until the context ends.
+func run(ctx context.Context, addr string, serveFn func(context.Context, net.Listener) error) error {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", addr, err)
+	}
+	return serveFn(ctx, ln)
+}
+
+// serve serves HTTPS on the listener with the given certificate, TLS 1.3 or
+// later and bounded timeouts, while running the background loops. When the
+// context ends, it stops accepting connections, lets in-flight requests
+// complete (up to shutdownTimeout), stops the loops and returns nil.
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, logAttrs []any, loops ...func(context.Context) error) error {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		ln.Close()
+		return fmt.Errorf("loading TLS certificate: %w", err)
+	}
+	srv := &http.Server{
+		Handler:           handler,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+		// TLS handshake failures from scanners are not worth more than debug
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
+	}
+	log := slog.With(logAttrs...)
+
+	background, stop := context.WithCancel(ctx)
+	defer stop()
+	var wg sync.WaitGroup
+	for _, loop := range loops {
+		wg.Go(func() { loop(background) })
+	}
+
+	served := make(chan error, 1)
+	go func() { served <- srv.ServeTLS(ln, "", "") }()
+	log.InfoContext(ctx, "serving", "address", ln.Addr().String())
+
+	var result error
+	select {
+	case err := <-served:
+		result = fmt.Errorf("serving: %w", err)
+	case <-ctx.Done():
+		log.InfoContext(ctx, "shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			result = fmt.Errorf("shutting down: %w", err)
+		}
+		<-served // http.ErrServerClosed
+	}
+	stop()
+	wg.Wait()
+	return result
+}
