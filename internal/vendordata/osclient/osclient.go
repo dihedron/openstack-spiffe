@@ -220,3 +220,30 @@ func (c *Client) Identity() (*gophercloud.ServiceClient, error) {
 	}
 	return identity, nil
 }
+
+// CheckIdentity checks that Keystone is reachable and accepts the service's
+// token (GET /v3/auth/catalog). The request is authenticated, so an expired
+// token is renewed rather than reported as a failure.
+func (c *Client) CheckIdentity(ctx context.Context) error {
+	identity, err := c.Identity()
+	if err != nil {
+		return err
+	}
+	if _, err := identity.Get(ctx, identity.ServiceURL("auth", "catalog"), nil, &gophercloud.RequestOpts{OkCodes: []int{http.StatusOK}}); err != nil {
+		return fmt.Errorf("checking Keystone: %w", err)
+	}
+	return nil
+}
+
+// CheckCompute checks that the Nova API is reachable, by reading the compute
+// endpoint's version document.
+func (c *Client) CheckCompute(ctx context.Context) error {
+	compute, err := c.Compute()
+	if err != nil {
+		return err
+	}
+	if _, err := compute.Get(ctx, compute.ResourceBaseURL(), nil, &gophercloud.RequestOpts{OkCodes: []int{http.StatusOK}}); err != nil {
+		return fmt.Errorf("checking Nova: %w", err)
+	}
+	return nil
+}

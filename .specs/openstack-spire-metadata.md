@@ -231,6 +231,13 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **Aggregator endpoints**: `GET /.well-known/jwks.json` (called by the SPIRE Server-side plugin), `/liveness` and `/readiness` (see above).
 
+**Health endpoints** (signer and aggregator; `GET` and `HEAD` only, `Cache-Control: no-store`, unauthenticated):
+
+- `/liveness` answers `200` as long as the HTTP server is serving.
+- `/readiness` answers `200` only if every readiness check passed in its latest run, else `503`. The checks run in the background, concurrently, every 5 seconds, each bounded by a 2-second timeout; probes are answered at once from the latest results, so they never wait on a dependency (orchestrators' probe timeouts are often shorter than a dependency check), and dependencies are checked at a fixed rate however often the endpoint is probed. The service is not ready before the first run completes, nor when the latest results are older than three intervals.
+- Signer checks: `key_store` (the key store can sign, which includes the publish-ahead gate at startup), `keystone` (Keystone is reachable and accepts the service's token; an expired service token is renewed, not reported), and `nova` when `nova_lookup.enabled` (the Nova API is reachable).
+- The JSON body gives the overall status and each check as `ok`, `failing` or `pending`, never error details, which are logged when a check changes state (not on every run).
+
 **Command line** (object/verb convention):
 
 - `openstack-spire-metadata service start --config <path>`: run a signer replica.

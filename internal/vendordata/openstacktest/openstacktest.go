@@ -112,6 +112,8 @@ func New(t *testing.T) *Server {
 	mux.HandleFunc("POST /v3/auth/tokens", s.authenticate)
 	mux.HandleFunc("GET /v3/auth/tokens", s.validate)
 	mux.HandleFunc("GET /v3/projects/{id}", s.project)
+	mux.HandleFunc("GET /v3/auth/catalog", s.catalog)
+	mux.HandleFunc("GET "+computePath+"/{$}", s.computeVersion)
 	mux.HandleFunc("GET "+computePath+"/servers/{id}", s.server)
 	s.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.down.Load() {
@@ -295,6 +297,22 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	return ok
 }
 
+func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"catalog": s.catalogEntries()})
+}
+
+func (s *Server) computeVersion(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": map[string]any{
+		"id": "v2.1", "status": "CURRENT", "min_version": "2.1", "version": "2.96",
+	}})
+}
+
 func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	s.ProjectLookups.Add(1)
 	if !s.authorized(w, r) {
@@ -363,15 +381,19 @@ func (s *Server) writeToken(w http.ResponseWriter, status int, u User, expires t
 			"id": serviceProjectID, "name": serviceProjectName,
 			"domain": map[string]string{"id": Service.DomainID, "name": Service.DomainName},
 		},
-		"catalog": []any{map[string]any{
-			"id": "compute-service", "type": "compute", "name": "nova",
-			"endpoints": []any{map[string]any{
-				"id": "compute-public", "interface": "public", "region": Region, "region_id": Region,
-				"url": s.URL + computePath,
-			}},
-		}},
+		"catalog": s.catalogEntries(),
 	}}
 	writeJSON(w, status, body)
+}
+
+func (s *Server) catalogEntries() []any {
+	return []any{map[string]any{
+		"id": "compute-service", "type": "compute", "name": "nova",
+		"endpoints": []any{map[string]any{
+			"id": "compute-public", "interface": "public", "region": Region, "region_id": Region,
+			"url": s.URL + computePath,
+		}},
+	}}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

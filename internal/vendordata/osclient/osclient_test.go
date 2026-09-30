@@ -191,3 +191,39 @@ func TestNewFailures(t *testing.T) {
 		t.Fatalf("error leaks the password: %v", err)
 	}
 }
+
+func TestDependencyChecks(t *testing.T) {
+	ks := openstacktest.New(t)
+	creds, err := CredentialsFromEnv(getenv(ks.Env()))
+	if err != nil {
+		t.Fatalf("CredentialsFromEnv: %v", err)
+	}
+	c, err := New(context.Background(), creds, ks.CAFile(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := c.CheckIdentity(ctx); err != nil {
+		t.Fatalf("CheckIdentity: %v", err)
+	}
+	if err := c.CheckCompute(ctx); err != nil {
+		t.Fatalf("CheckCompute: %v", err)
+	}
+
+	// an expired service token is renewed, not reported
+	ks.RevokeServiceTokens()
+	if err := c.CheckIdentity(ctx); err != nil {
+		t.Fatalf("CheckIdentity after service token expiry: %v", err)
+	}
+	if n := ks.Authentications.Load(); n != 2 {
+		t.Fatalf("%d authentications, want 2", n)
+	}
+
+	ks.SetDown(true)
+	if err := c.CheckIdentity(ctx); err == nil {
+		t.Fatal("CheckIdentity passed with Keystone down")
+	}
+	if err := c.CheckCompute(ctx); err == nil {
+		t.Fatal("CheckCompute passed with Nova down")
+	}
+}
