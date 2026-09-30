@@ -1,4 +1,4 @@
-# openstack-spire-metadata JWKS aggregator ("jwks aggregate --config aggregator.yaml").
+# openstack-spire-vendordata JWKS aggregator ("jwks aggregate --config aggregator.yaml").
 # Values shown are the defaults unless marked otherwise.
 
 listen_addr: "0.0.0.0:8444"

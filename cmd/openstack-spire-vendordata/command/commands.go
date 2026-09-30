@@ -1,9 +1,9 @@
 package command
 
 import (
-	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-metadata/command/config"
-	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-metadata/command/jwks"
-	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-metadata/command/service"
+	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-vendordata/command/config"
+	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-vendordata/command/jwks"
+	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-vendordata/command/service"
 	"github.com/dihedron/openstack-spiffe/internal/command/version"
 )
 

@@ -1,9 +1,9 @@
 # openstack-spiffe
 A complete solution providing all needed components to implement SPIFFE on OpenStack.
 
-## openstack-spire-metadata: the instance identity token issuer
+## openstack-spire-vendordata: the instance identity token issuer
 
-`openstack-spire-metadata` hands every OpenStack instance a short-lived signed JWT (the *instance identity document*) that proves its `project_id` and `instance_id`. The SPIRE `openstack_iid` node attestor verifies this token, so it is the trust root of every SPIFFE ID issued to OpenStack workloads. The full design is in [.specs/openstack-spire-metadata.md](.specs/openstack-spire-metadata.md).
+`openstack-spire-vendordata` hands every OpenStack instance a short-lived signed JWT (the *instance identity document*) that proves its `project_id` and `instance_id`. The SPIRE `openstack_iid` node attestor verifies this token, so it is the trust root of every SPIFFE ID issued to OpenStack workloads. The full design is in [.specs/openstack-spire-vendordata.md](.specs/openstack-spire-vendordata.md).
 
 ### How it works
 
@@ -28,7 +28,7 @@ A complete solution providing all needed components to implement SPIFFE on OpenS
 ### Build
 
 ```bash
-make                       # or: go build ./cmd/openstack-spire-metadata
+make                       # or: go build ./cmd/openstack-spire-vendordata
 ```
 
 ### Configure
@@ -36,7 +36,7 @@ make                       # or: go build ./cmd/openstack-spire-metadata
 Annotated samples are in [examples/](examples): [signer.yaml](examples/signer.yaml), [aggregator.yaml](examples/aggregator.yaml), [signer.env](examples/signer.env) (credentials) and [nova.conf](examples/nova.conf). Unknown keys are errors, so typos never go unnoticed. Validate the files before every rollout:
 
 ```bash
-openstack-spire-metadata config check --signer signer-a.yaml --signer signer-b.yaml --aggregator aggregator.yaml
+openstack-spire-vendordata config check --signer signer-a.yaml --signer signer-b.yaml --aggregator aggregator.yaml
 ```
 
 The command reports every problem in one run, each with its line, and applies the same rules the services apply at startup. That includes checks across files, such as unique `replica_id`s and `publish_ahead` against the aggregator's timing, and checks on the files referenced (certificates and keys exist, match and have not expired; CA bundles parse). It exits with 0 when the files are valid, 1 on errors (or on warnings with `--strict`), and 2 when a file cannot be read. Use `--format json|yaml` for CI and `--print-effective` to see the defaults applied.
@@ -64,8 +64,8 @@ Like the other OpenStack service users, it typically gets the `admin` role in th
 
 ```bash
 set -a; . /run/secrets/signer.env; set +a      # or your platform's secret injection
-openstack-spire-metadata service start --config /etc/openstack-spire-metadata/signer.yaml
-openstack-spire-metadata jwks aggregate --config /etc/openstack-spire-metadata/aggregator.yaml
+openstack-spire-vendordata service start --config /etc/openstack-spire-vendordata/signer.yaml
+openstack-spire-vendordata jwks aggregate --config /etc/openstack-spire-vendordata/aggregator.yaml
 ```
 
 Both services perform a pre-flight check at startup. They refuse to start (exit code 1) on any configuration error, on problems with the referenced files, and, for the signer, on missing credentials or a failed Keystone authentication. Both shut down gracefully on `SIGINT`/`SIGTERM`, giving in-flight requests up to 15 seconds.
@@ -78,7 +78,7 @@ Both services perform a pre-flight check at startup. They refuse to start (exit 
 - A freshly started signer stays not ready until its first key has been published for `publish_ahead`.
 - Route traffic on readiness. A missed token during an instance's first boot can break SPIRE-dependent units on that instance, so alert on readiness failures.
 
-**Logging.** Logs go to standard error at `info` level. Set `OPENSTACK_SPIRE_METADATA_LOG_LEVEL` to `debug`, `info`, `warn`, `error` or `off`. Every request carries an `X-Request-Id`, which also appears in its log lines as `request_id`. Tokens, keys, credentials and user data are never logged.
+**Logging.** Logs go to standard error at `info` level. Set `OPENSTACK_SPIRE_VENDORDATA_LOG_LEVEL` to `debug`, `info`, `warn`, `error` or `off`. Every request carries an `X-Request-Id`, which also appears in its log lines as `request_id`. Tokens, keys, credentials and user data are never logged.
 
 **TLS.** `tls_min_version` (`"1.3"` by default, or `"1.2"`) applies both to what each service accepts and to the connections it makes. Set `"1.2"` only for peers that cannot negotiate TLS 1.3.
 

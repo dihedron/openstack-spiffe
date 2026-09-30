@@ -21,9 +21,9 @@ before:
     - go generate ./...
 
 builds:
-  - id: openstack-spire-metadata
-    main: ./cmd/openstack-spire-metadata
-    binary: openstack-spire-metadata
+  - id: openstack-spire-vendordata
+    main: ./cmd/openstack-spire-vendordata
+    binary: openstack-spire-vendordata
     goos:
       - linux
       - windows
@@ -151,7 +151,7 @@ builds:
 archives:
   - id: openstack-spiffe
     builds:
-      - openstack-spire-metadata
+      - openstack-spire-vendordata
       - openstack-agent-plugin
       - openstack-server-plugin
     formats:
