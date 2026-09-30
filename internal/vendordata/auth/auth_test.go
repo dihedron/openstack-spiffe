@@ -328,10 +328,7 @@ func TestCacheIsBounded(t *testing.T) {
 			t.Fatalf("Authenticate: %v", err)
 		}
 	}
-	a.mu.Lock()
-	size := len(a.cache)
-	a.mu.Unlock()
-	if size > 3 {
+	if size := a.cache.Len(); size > 3 {
 		t.Fatalf("cache holds %d entries, want at most 3", size)
 	}
 }
@@ -341,10 +338,16 @@ func TestCacheKeyIsTokenHash(t *testing.T) {
 	if _, err := a.Authenticate(context.Background(), serviceToken); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.cache[sha256.Sum256([]byte(serviceToken))]; !ok || len(a.cache) != 1 {
-		t.Fatal("cache not keyed by the SHA-256 of the token")
+	if a.cache.Len() != 1 {
+		t.Fatalf("%d cache entries, want 1", a.cache.Len())
+	}
+	// the entry is found under the token's hash: no load happens (the cache
+	// key type, a SHA-256 digest, rules out keying by the token itself)
+	identity, err := a.cache.Get(context.Background(), sha256.Sum256([]byte(serviceToken)), func(context.Context) (Identity, time.Time, error) {
+		return Identity{}, time.Time{}, errors.New("no entry under the SHA-256 of the token")
+	})
+	if err != nil || identity.UserID != novaUserID {
+		t.Fatalf("lookup by token hash: %+v, %v", identity, err)
 	}
 }
 

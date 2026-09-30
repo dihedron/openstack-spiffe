@@ -13,10 +13,10 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/ttlcache"
 )
 
 // TokenHeader is the header carrying the caller's Keystone token.
@@ -55,19 +55,6 @@ type TokenValidator interface {
 	Validate(ctx context.Context, token string) (Identity, error)
 }
 
-type cacheEntry struct {
-	identity Identity
-	expires  time.Time
-}
-
-// validation is an in-flight token validation, shared by every request
-// carrying the same token.
-type validation struct {
-	done     chan struct{}
-	identity Identity
-	err      error
-}
-
 // Authenticator authenticates and authorizes callers. Successful validations
 // are cached by the SHA-256 of the token, for at most the cache TTL and never
 // beyond the token's expiry; concurrent validations of the same token are
@@ -81,9 +68,9 @@ type Authenticator struct {
 	timeout    time.Duration
 	now        func() time.Time
 
-	mu       sync.Mutex
-	cache    map[[sha256.Size]byte]cacheEntry
-	inflight map[[sha256.Size]byte]*validation
+	// cache holds successful validations by the SHA-256 of the token (never
+	// the token itself) and merges concurrent validations of the same token.
+	cache *ttlcache.Cache[[sha256.Size]byte, Identity]
 }
 
 // Option configures an Authenticator.
@@ -130,8 +117,6 @@ func NewAuthenticator(validator TokenValidator, allowedUsers []string, requiredR
 		maxEntries: 1024,
 		timeout:    5 * time.Second,
 		now:        time.Now,
-		cache:      map[[sha256.Size]byte]cacheEntry{},
-		inflight:   map[[sha256.Size]byte]*validation{},
 	}
 	for _, entry := range allowedUsers {
 		user, err := ParseAllowedUser(entry)
@@ -146,6 +131,11 @@ func NewAuthenticator(validator TokenValidator, allowedUsers []string, requiredR
 	if a.cacheTTL <= 0 || a.maxEntries <= 0 || a.timeout <= 0 {
 		return nil, fmt.Errorf("creating authenticator: cache TTL (%v), cache size (%d) and validation timeout (%v) must be positive", a.cacheTTL, a.maxEntries, a.timeout)
 	}
+	cache, err := ttlcache.New[[sha256.Size]byte, Identity](ttlcache.Config{MaxEntries: a.maxEntries, LoadTimeout: a.timeout, Now: a.now})
+	if err != nil {
+		return nil, fmt.Errorf("creating authenticator: %w", err)
+	}
+	a.cache = cache
 	return a, nil
 }
 
@@ -200,82 +190,24 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (Identit
 }
 
 // validate returns the identity behind the token, from the cache or from a
-// (possibly shared) validation.
+// (possibly shared) Keystone validation. Successful validations are cached
+// for at most the cache TTL and never beyond the token's expiry; failures
+// are not cached.
 func (a *Authenticator) validate(ctx context.Context, token string) (Identity, error) {
-	key := sha256.Sum256([]byte(token))
-
-	a.mu.Lock()
-	if entry, ok := a.cache[key]; ok {
-		if a.now().Before(entry.expires) {
-			a.mu.Unlock()
-			return entry.identity, nil
+	identity, err := a.cache.Get(ctx, sha256.Sum256([]byte(token)), func(ctx context.Context) (Identity, time.Time, error) {
+		identity, err := a.validator.Validate(ctx, token)
+		if err != nil {
+			return Identity{}, time.Time{}, err
 		}
-		delete(a.cache, key)
-	}
-	v, ok := a.inflight[key]
-	if !ok {
-		v = &validation{done: make(chan struct{})}
-		a.inflight[key] = v
-		// the validation outlives any single caller, so it runs detached
-		// from the request context, bounded by its own timeout
-		go a.run(context.WithoutCancel(ctx), key, token, v)
-	}
-	a.mu.Unlock()
-
-	select {
-	case <-v.done:
-		return v.identity, v.err
-	case <-ctx.Done():
-		return Identity{}, fmt.Errorf("%w: %w", ErrUnavailable, ctx.Err())
-	}
-}
-
-func (a *Authenticator) run(ctx context.Context, key [sha256.Size]byte, token string, v *validation) {
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
-	defer cancel()
-	identity, err := a.validator.Validate(ctx, token)
+		expires := a.now().Add(a.cacheTTL)
+		if identity.ExpiresAt.Before(expires) {
+			expires = identity.ExpiresAt
+		}
+		return identity, expires, nil
+	})
 	if err != nil && !errors.Is(err, ErrInvalidToken) && !errors.Is(err, ErrUnavailable) {
+		// Keystone failures, timeouts and the caller going away
 		err = fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-
-	a.mu.Lock()
-	delete(a.inflight, key)
-	if err == nil {
-		a.store(key, identity)
-	}
-	a.mu.Unlock()
-
-	v.identity, v.err = identity, err
-	close(v.done)
-}
-
-// store caches a successful validation; callers must hold the lock.
-func (a *Authenticator) store(key [sha256.Size]byte, identity Identity) {
-	now := a.now()
-	expires := now.Add(a.cacheTTL)
-	if identity.ExpiresAt.Before(expires) {
-		expires = identity.ExpiresAt
-	}
-	if !now.Before(expires) {
-		return
-	}
-	if len(a.cache) >= a.maxEntries {
-		for k, entry := range a.cache {
-			if !now.Before(entry.expires) {
-				delete(a.cache, k)
-			}
-		}
-	}
-	for len(a.cache) >= a.maxEntries {
-		// still full: evict the entry closest to expiry
-		var victim [sha256.Size]byte
-		var earliest time.Time
-		for k, entry := range a.cache {
-			if earliest.IsZero() || entry.expires.Before(earliest) {
-				victim, earliest = k, entry.expires
-			}
-		}
-		delete(a.cache, victim)
-	}
-	a.cache[key] = cacheEntry{identity: identity, expires: expires}
+	return identity, err
 }
