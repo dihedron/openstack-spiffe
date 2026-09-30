@@ -222,7 +222,7 @@ JSON
 {  
   "header": {  
     "alg": "RS256",  
-    "kid": "2026-09-29-signer-a-key-1"  
+    "kid": "2026-09-29-signer-a-key-52331"  
   },  
   "payload": {  
     "iss": "nova-spire-plugin",  
@@ -293,7 +293,7 @@ The ephemeral\_memory backend is implemented first; vault\_transit comes later b
 
 **Replica topology:** The service runs as multiple independent, share-nothing replicas, each with its own ephemeral key; a separate JWKS aggregator (see below) merges their public keys for the SPIRE Server.
 
-* **kid:** \<YYYY-MM-DD\>-\<replica-id\>-key-\<n\> (e.g. 2026-09-29-signer-a-key-1), so kids never collide across replicas. replica\_id is a lowercase DNS label; if not configured it is derived from the first label of the hostname (config check warns about it), and it must be unique across replicas.  
+* **kid:** \<YYYY-MM-DD\>-\<replica-id\>-key-\<n\> (e.g. 2026-09-29-signer-a-key-52331), where the date is the UTC date the key was generated and n the number of seconds since UTC midnight at that moment, bumped when needed so that it strictly increases within a process; kids therefore never collide across replicas, nor across restarts of the same replica (a counter restarting from 1 would reuse a kid with different key material, which the aggregator would exclude). replica\_id is a lowercase DNS label; if not configured it is derived from the first label of the hostname (config check warns about it), and it must be unique across replicas.  
 * **Publication before use:** a token must never carry a kid the aggregated JWKS cannot serve yet. Each new key is generated and published in the replica's JWKS key\_store.publish\_ahead (default 2m) before it is used for signing; publish\_ahead must exceed the aggregator's poll\_interval plus fetch\_timeout. At startup, a replica reports not ready (/readiness 503) until its first key has been published for publish\_ahead.
 
 ## **JWKS endpoint**
