@@ -304,9 +304,10 @@ This service exposes the public half of trusted signing keys for the SPIRE Serve
 
 * **Endpoint**: GET /.well-known/jwks.json, formatted as a standard RFC 7517 JWK Set.  
 * **Protection**: Served over TLS with a certificate the SPIRE Server operator can pin.  
-* **Caching headers**: Cache-Control max-age must align with the rotation cadence.  
+* **Caching headers**: a replica serves its JWKS with Cache-Control: no-cache. Its only consumer, the aggregator, polls it on its own schedule, and a cache in between could hide a key published ahead beyond publish\_ahead, breaking publication before use. Caching for the SPIRE Server is the aggregator's job (cache\_max\_age).  
 * **Content**: Includes the key about to become active (published ahead), the currently active key and any key retired within the last token TTL (5 minutes); each entry carries kid, kty, alg, use=sig and the public key material only.  
 * **Freshness**: The content is read live from the key store, so rotations are published automatically, without any manual step.
+* **Errors**: GET and HEAD only (405 otherwise); if the keys cannot be read the endpoint replies 503, and it never serves a partial set; error responses are not cacheable (Cache-Control: no-store).
 
 ## **JWKS aggregator**
 
