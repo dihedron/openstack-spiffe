@@ -1,49 +1,90 @@
 # OpenStack vendor data JWT issuer — implementation spec
 
-Sep 20, 2026 · @Andrea Funtò
-
-> **Note:** this document contains the original specification followed by a revision ("implementation spec revision"). The revision supersedes the original wherever the two differ.
+Sep 20, 2026 (revised Sep 30, 2026) · @Andrea Funtò
 
 ## Overview
 
-This spec defines the vendordata JWT issuer: the service that runs alongside (or as part of) Nova's dynamic vendordata mechanism and hands each booting instance a short-lived, signed JWT proving its `project_id` and `instance_id`.
+This spec defines the vendordata JWT issuer (`openstack-spire-metadata`): the service that runs alongside Nova's dynamic vendordata mechanism and hands each booting instance a short-lived, signed JWT proving its `project_id` and `instance_id`.
 
-This JWT is the trust root the `openstack_iid` SPIRE node attestor pair (see the companion spec) verifies. Its correctness matters more than almost any other component in this system — every downstream SPIFFE ID and selector is only as trustworthy as this service's binding between "who is asking" and "what the token claims."
+This JWT is the trust root that the `openstack_iid` SPIRE node attestor pair (see the companion spec) verifies. Its correctness matters more than almost any other component in the system: every downstream SPIFFE ID and selector is only as trustworthy as this service's binding between "who is asking" and "what the token claims". The design addresses high-throughput data-plane requirements (instance boot storms), the realities of control-plane authorization, and the size of the token payload.
 
-**Non-goals**: this spec does not cover the SPIRE agent/server plugins that consume the JWT (separate spec), or the key management system (Barbican/HSM) itself beyond how this service talks to it.
+**Non-goals**: this spec does not cover the SPIRE agent/server plugins that consume the JWT (companion spec), nor the key management system itself (e.g. Vault) beyond how this service talks to it.
 
-## Nova integration and request-context binding
+## Architecture
 
-This service is a Nova **DynamicJSON vendordata target** — a REST service Nova's `nova-api`/`nova-api-metadata` calls on the instance's behalf, not something the instance calls directly.
+The system has three parts:
 
-**Registration** (Nova operator config, out of scope to change here, but this service must match it):
+- **Signer replicas** (`openstack-spire-metadata service start`): several independent, share-nothing replicas behind a load balancer, the target of Nova's DynamicJSON configuration. Each replica authenticates Nova, verifies the instance, mints tokens signed with its own key, and publishes its own public keys.
+- **Key store**: behind a single interface, either ephemeral in-memory keys owned by each replica (implemented first) or Vault's transit engine (later).
+- **JWKS aggregator** (`openstack-spire-metadata jwks aggregate`): one or more stateless instances behind their own load balancer that merge the replicas' public keys into a single JWK Set, the endpoint the SPIRE Server-side plugin uses.
+
+The Nova-facing HTTP handler, the JWKS handler and the key-signing client are separate, independently testable components.
+
+## Nova integration
+
+This service is a Nova **DynamicJSON vendordata target**: a REST service that `nova-api-metadata` calls on the instance's behalf, not something the instance calls directly. It is invoked whenever the instance reads `vendor_data2.json` (subject to Nova's own metadata caching), so not just at boot.
+
+**Registration** (Nova operator configuration, out of scope to change here, but this service must match it):
 
 - `api.vendordata_providers` includes `DynamicJSON`.
 - `api.vendordata_dynamic_targets` includes an entry named `openstack_iid`, e.g. `openstack_iid@https://vendordata-signer.internal:8443/attest`.
 
-**Request shape** (Nova → this service, JSON POST, re-sent on every metadata request the instance makes, not just at boot):
+**Request shape** (Nova → this service, JSON `POST`):
 
-| Field | Source |
-| --- | --- |
-| `project-id` | The project that owns the instance |
-| `instance-id` | The instance UUID |
-| `image-id` | The boot image ID |
-| `hostname` | The instance hostname |
-| `metadata` | User-supplied key/value pairs at boot time |
+| Field | Content | Use |
+| --- | --- | --- |
+| `project-id` | The project that owns the instance | Claim, verified against Nova |
+| `instance-id` | The instance UUID | Claim, verified against Nova |
+| `image-id` | The boot image ID | Validated only |
+| `hostname` | The instance hostname | Claim |
+| `metadata` | User-supplied key/value pairs set at boot time | Source of the `tags` claim |
+| `user-data` | The instance user data | Ignored: never decoded into the request model, never copied into a token, and redacted whenever a payload is logged |
+| `boot-roles` | The roles of the booting user | Ignored |
 
-**The binding this service must enforce**: Nova also passes the Keystone authentication details for the original boot request alongside this payload. This service must use those Keystone details — not the `project-id`/`instance-id` fields alone — to authorize the request before minting a token. The `project-id`/`instance-id` fields are Nova's own claims about the instance; treating them as pre-authorized input without checking the accompanying Keystone context would let anything able to reach this endpoint mint a token for an arbitrary instance ID.
+**Request validation** (`400` on failure, no token issued):
 
-**Response shape**: Nova nests the response under the target name in `vendor_data2.json`. This service must return `{"openstack_iid": {"jwt": "<token>"}}` — matching the `openstack_iid` target name means the agent plugin (companion spec) can rely on a fixed lookup path.
+- The body must be well-formed JSON of at most `max_body_bytes` (default 256 KiB: Nova forwards `user-data`, up to 64 KiB base64-encoded, together with `metadata`). Duplicate member names are rejected, so a second `instance-id` cannot be smuggled in.
+- `project-id`: required, at most 64 characters from `[A-Za-z0-9_-]`.
+- `instance-id`: required, a canonical lowercase UUID; other forms (uppercase, braces, `urn:` prefix) are rejected, so that an instance can never appear under two different `sub` values.
+- `hostname`: required, at most 255 characters, no control characters.
+- `image-id`: optional (empty for instances booted from volume).
+
+**Response shape**: Nova nests the response under the target name in `vendor_data2.json`. This service returns `{"openstack_iid": {"jwt": "<token>"}}`; matching the `openstack_iid` target name gives the agent plugin (companion spec) a fixed lookup path.
+
+## Caller authentication and request-context binding
+
+The `project-id` and `instance-id` fields are Nova's own claims about the instance. Treating them as pre-authorized input would let anything able to reach this endpoint mint a token for an arbitrary instance ID, so this service must authenticate the caller before minting a token.
+
+The request is made by `nova-api-metadata`, not by the user who booted the instance, so it does *not* carry the original user's Keystone token. Instead, Nova authenticates to this service with the credentials of its `[vendordata_dynamic_auth]` section and sends the resulting token in the `X-Auth-Token` header. This service must:
+
+- reject a request without `X-Auth-Token` with `401`;
+- validate the token against Keystone (`GET /v3/auth/tokens`); an invalid or expired token is rejected with `401`;
+- require the token's user to be listed in `keystone.allowed_users` **and** to carry `keystone.required_role` (default `service`); otherwise reject with `403` and log the user ID (never the token);
+- reject with `503` if Keystone cannot be reached;
+- cache successful validations, keyed by the SHA-256 of the token, for at most `keystone.validation_cache_ttl` (default 60s) and never beyond the token's own expiry, in a bounded cache. Failures are not cached, and concurrent validations of the same token (Nova reuses its token across requests) are merged into a single Keystone request.
+
+**Allowed users**: each `keystone.allowed_users` entry is either a user ID (32 or 64 lowercase hex digits, as Keystone generates them) or `name@domain`, where `domain` is the domain's name or ID. The name may itself contain `@`; the domain follows the last one. Bare names are configuration errors: user names are only unique within a domain, and a same-named user with the same role in another domain would otherwise be accepted.
+
+**Service credentials**: the service validates tokens with its own credentials, taken from the `OS_*` environment variables of a standard openrc file and never from the configuration file:
+
+- `OS_AUTH_URL`, https only;
+- either `OS_USERNAME` or `OS_USER_ID` with `OS_USER_DOMAIN_NAME`/`_ID`, `OS_PASSWORD` and a project scope (`OS_PROJECT_NAME` with `OS_PROJECT_DOMAIN_NAME`/`_ID`, or `OS_PROJECT_ID`);
+- or an application credential (`OS_APPLICATION_CREDENTIAL_ID` or `_NAME`, and `_SECRET`).
+
+The service user needs the permission to validate other users' tokens (by default the `service` or `admin` role), and re-authenticates when its own token expires.
+
+Trust in Nova's claims about `project-id` and `instance-id` thus rests on the authenticated identity of the compute control plane, and is independently confirmed by the instance verification described below.
 
 ## Claim schema
 
-Must match the companion `openstack_iid` node attestor spec exactly — this is a shared contract. Define it once and vendor/import it into both codebases rather than hand-copying.
+The schema must match the companion `openstack_iid` node attestor spec exactly: it is a shared contract. The header and claim definitions, the fixed values (`iss`, `aud`, target name, maximum TTL, tags size cap) and the reserved claim names are defined once, in a single Go package (`pkg/iid`) imported by this service and by the SPIRE plugins, never hand-copied.
 
 ```json
 {
   "header": {
     "alg": "RS256",
-    "kid": "2026-09-key-1"
+    "kid": "2026-09-29-signer-a-key-52331",
+    "typ": "JWT"
   },
   "payload": {
     "iss": "nova-spire-plugin",
@@ -61,398 +102,253 @@ Must match the companion `openstack_iid` node attestor spec exactly — this is 
 }
 ```
 
-- `tags` is populated from the incoming `metadata` field, filtered to string-only values — drop (don't error on) any non-string entry, but log it.
-- `exp - iat` must be a short, fixed window (recommend 5 minutes) — this service owns enforcing that, not just documenting it.
-- Every claim value comes from the authorized Nova request, never from anything else. This service must not accept overrides for `project_id`, `instance_id`, or `hostname` from any other input path.
+- **TTL**: `exp - iat` is a short, fixed window: `token_ttl_seconds`, default 300 (5 minutes), never more. This service enforces it, not just documents it: it refuses to start with a longer or non-positive value. `iat` and `nbf` are the issuance time.
+- **Tags and payload bloat protection**: users frequently abuse instance metadata for large cloud-init scripts. To keep JWT-bearing headers within standard HTTP limits (4–8 KB) downstream, the `tags` claim is derived from the incoming `metadata` field as follows:
+  - only string values are kept; other entries are dropped (not an error);
+  - if `tags.allowlist` is configured, only the listed keys are kept (an empty allowlist keeps every string entry, and `config check` warns about it);
+  - the JSON-serialized `tags` object never exceeds 1024 bytes (escaping included): entries are considered in sorted key order and any entry that would not fit is dropped, so the result is deterministic and later, smaller entries can still fit;
+  - every dropped entry is logged with its key and the reason, never its value; the token is still issued.
+- **Immutability**: every claim value comes exclusively from the authorized Nova request, except the operator-configured custom claims and the enrichment claims looked up from Nova and Keystone (see below). The service accepts no override of `project_id`, `instance_id` or `hostname` from any other input path.
+- **Custom claims**: the operator can configure static string claims (e.g. `"country": "italy"`) in `custom_claims`; they are added as top-level claims to every token, and their values are strings. Custom claims must not use a reserved claim name (`iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `project_id`, `instance_id`, `hostname`, `tags`, and the enrichment claims `availability_zone`, `flavor`, `user_id`, `project_name`, `domain_id`). The service refuses to start if they do, and re-checks the names right before signing, so it can never emit a token where a custom claim shadows a reserved one.
+
+## Instance verification and claim enrichment
+
+Nova's DynamicJSON request carries only `project-id`, `instance-id`, `image-id`, `hostname`, `metadata`, `user-data` and `boot-roles`. The availability zone and other control-plane attributes are not part of it, so the service looks them up itself, with its own service credentials, before signing.
+
+**Instance verification** (`nova_lookup.enabled`, on by default): the service fetches the server record (`GET /servers/{instance-id}` on the Nova API) and checks, against this independent source, that:
+
+- the instance exists;
+- it belongs to the `project-id` stated in the request;
+- its status is one of `nova_lookup.allowed_statuses` (default: `ACTIVE`, `BUILD`, `REBOOT`, `HARD_REBOOT`, `REBUILD`, `RESIZE`, `VERIFY_RESIZE`, `MIGRATING`, `PASSWORD`).
+
+Any mismatch is rejected with `403` and logged; no token is issued.
+
+**Claim enrichment** (`enrich`, a list of attribute names, empty by default): each enabled attribute is added as an optional top-level claim.
+
+| Claim | Source | Notes |
+| --- | --- | --- |
+| `availability_zone` | Nova server record (`OS-EXT-AZ:availability_zone`) | Requires `nova_lookup` |
+| `flavor` | Nova server record (flavor `original_name`, microversion ≥ 2.47) | Requires `nova_lookup` |
+| `user_id` | Nova server record (`user_id` of the booting user) | Requires `nova_lookup` |
+| `project_name` | Keystone (`GET /v3/projects/{project-id}`) | |
+| `domain_id` | Keystone (`GET /v3/projects/{project-id}`) | |
+
+- Only control-plane-authoritative attributes are offered. User-controlled server attributes (name, tags, key pair) are deliberately not, since they carry no more trust than metadata.
+- Compute host and hypervisor names are deliberately not offered: the token is readable from inside the guest (`vendor_data2.json`) and would disclose the physical layout to tenants.
+- The enrichment claim names are reserved: custom claims cannot use them.
+- **Caching**: to protect nova-api and Keystone during boot storms, server records are cached per instance ID for at most `nova_lookup.cache_ttl` (default 60s, never more than the token TTL, since the availability zone can change on migration or resize); project records are cached for `keystone.project_cache_ttl` (default 10m).
+- **Failure**: if Nova or Keystone cannot be reached, the request is rejected with `503`. The service never issues a token with missing enrichment claims, or with enrichment claims staler than the TTL.
 
 ## Signing key management
 
-This is the highest-risk component in the whole system — compromise of the signing key means anyone can mint a valid attestation for any instance ID.
+This is the highest-risk component in the whole system: compromise of a signing key means anyone can mint a valid attestation for any instance ID.
 
-- **Custody**: the private key must never be stored on disk in plaintext on the host running this service. Use Barbican (OpenStack's key manager) or an HSM-backed KMS for signing operations, so the private key material never leaves the key store — this service should call a `Sign` operation, not load and hold the key itself.
-- **Key generation**: RSA 2048-bit minimum (or ECDSA P-256) per signing key, generated inside the key store, never exported.
-- **`kid` assignment**: each key gets a unique `kid` at creation (recommend `<date>-key-<n>`, matching the format used in the claim schema example). This service must tag every JWT it signs with the `kid` of the key used.
-- **Rotation policy**: rotate signing keys on a fixed schedule (recommend every 30-90 days) and immediately on suspected compromise. Keep the previous key's public component in the JWKS response (see next section) for at least one full token TTL past rotation, so in-flight tokens don't fail verification during the cutover.
-- **Access control**: only this service's identity (not humans, not other services) should have `Sign` permission on the active key in Barbican/the KMS. Key creation/rotation is a separate, more privileged operation — document it as a runbook, not something this service does autonomously.
+**Custody**: private key material is never written to disk on the host running this service. The service signs through a key store interface (a `Sign` operation on a digest) and never exports keys. To prevent thundering-herd failures during cluster scale-ups, per-token signing requests are not routed to control-plane key managers such as Barbican. Two backends sit behind the interface:
 
-## JWKS endpoint
+1. **Vault transit** (`vault_transit`, recommended for enterprise persistence): signing is offloaded to a HashiCorp Vault REST API proxy (`key_store.vault_proxy_endpoint`); the private key never leaves Vault. Dual-cluster token replication and DBOS durable workflows provide the high-throughput, data-plane resilience that instance boot storms require, without writing private keys to disk.
+2. **Ephemeral in-memory keys** (`ephemeral_memory`, recommended for stateless simplicity): each replica generates its key pairs entirely in memory and never persists them; if the replica restarts, it simply generates a new key. The public halves are published through the JWKS endpoint.
 
-This service exposes the public half of every currently-trusted signing key, so the SPIRE Server-side plugin (companion spec) can fetch and cache them by `kid`.
+The `ephemeral_memory` backend is implemented first; `vault_transit` comes later behind the same interface (until then, the configuration check reports it as not supported).
 
-- **Endpoint**: `GET /.well-known/jwks.json`, standard RFC 7517 JWK Set format, one entry per active or recently-rotated key.
-- **Protection**: this endpoint is read-only and unauthenticated-by-design (public keys are not secrets), but must be served over TLS with a certificate SPIRE Server's operator can pin — treat the endpoint's own TLS identity as part of the trust chain, not an afterthought.
-- **Caching headers**: set a `Cache-Control` max-age matching the rotation cadence, so consumers refresh on a reasonable schedule without hammering this endpoint on every attestation.
-- **Content**: include keys for the currently active `kid` plus any key retired within the last full token TTL window (see rotation policy above), each with its `kid`, `kty`, `alg`, and public key material (`n`/`e` for RSA, `x`/`y` for EC).
-- This service must regenerate this endpoint's content automatically whenever a key rotation completes — never require a manual step to publish a new key's public half.
+**Algorithms**: RS256 with RSA 2048-bit keys (default) or ES256 with ECDSA P-256 keys (`key_store.algorithm`).
 
-## Freshness and replay controls
+**Rotation and retention**: keys rotate on a fixed schedule (`key_store.rotation_interval`, default 24h, at least 5 minutes) and whenever a replica restarts; restarting a replica therefore also replaces its key on suspected compromise. The previous key's public half stays in the JWKS for at least one full token TTL past rotation, so that in-flight tokens do not fail verification during the cutover.
 
-Because Nova re-queries this service on every metadata request the instance makes (not just at boot), this service should mint a brand-new token on every call rather than caching one per instance.
+**Access control**: with `vault_transit`, only this service's identity (not humans, not other services) may sign with the active key, and creating or rotating Vault keys is a separate, more privileged operation, documented as a runbook rather than done autonomously by this service. With `ephemeral_memory`, key generation and rotation are necessarily performed by the replica itself.
 
-- **Short TTL**: 5 minutes recommended (`exp - iat`), matching the claim schema. This bounds the damage window if a token is somehow exfiltrated in transit.
-- **Fresh `jti` per token**: always generate a new UUID, even for the same instance requesting again seconds later. Never reuse a `jti`.
-- **No server-side replay tracking in this service**: `jti` uniqueness enforcement (if the SPIRE Server-side plugin chooses to track it) is out of scope here — this service's job is to never issue two tokens with the same `jti`, not to police reuse downstream.
-- **Rate limiting**: apply a per-instance-ID rate limit (recommend no more than one token issuance per few seconds per instance) to blunt any attempt to use this endpoint to exhaust the signing key store's request budget.
+**Replica topology**: the service runs as multiple independent, share-nothing replicas, each with its own keys; the JWKS aggregator (see below) merges their public keys for the SPIRE Server.
 
-## API surface and configuration
+- **kid**: every key gets a unique kid at creation, and every token is tagged with the kid of the key that signed it. The format is `<YYYY-MM-DD>-<replica-id>-key-<n>` (e.g. `2026-09-29-signer-a-key-52331`), where the date is the UTC date the key was generated and `n` the number of seconds since UTC midnight at that moment, bumped when needed so that it strictly increases within a process. Kids therefore never collide across replicas, nor across restarts of the same replica (a counter restarting from 1 would reuse a kid with different key material, which the aggregator would exclude).
+- **replica_id** is a lowercase DNS label, unique across replicas; if not configured, it is derived from the first label of the hostname (`config check` warns about it).
+- **Publication before use**: a token must never carry a kid the aggregated JWKS cannot serve yet. Each new key is generated and published in the replica's JWKS `key_store.publish_ahead` (default 2m) before it is used for signing; `publish_ahead` must exceed the aggregator's `poll_interval` plus `fetch_timeout`. At startup, a replica reports not ready (`/readiness` → `503`) until its first key has been published for `publish_ahead`.
+- **Signing**: only the active key signs, and the token header carries its kid. If a rotation lands while a token is being signed, signing is retried once with the new active key; if it fails again, the request is rejected with `503`.
 
-**Endpoints**:
+## JWKS endpoint (signer replica)
+
+Each replica exposes the public halves of its trusted signing keys, which the aggregator collects for the SPIRE Server-side plugin.
+
+- **Endpoint**: `GET /.well-known/jwks.json`, a standard RFC 7517 JWK Set with one entry per key.
+- **Content**: the key about to become active (published ahead), the currently active key, and any key retired within the last token TTL (5 minutes); keys past that window are excluded. Each entry carries `kid`, `kty`, `alg`, `use=sig` and the public key material only (`n`/`e` for RSA, `crv`/`x`/`y` for EC).
+- **Freshness**: the content is read live from the key store, so rotations are published automatically, without any manual step.
+- **Protection**: the endpoint is read-only and unauthenticated by design (public keys are not secrets), but it is served over TLS with a certificate its consumer can pin: the endpoint's own TLS identity is part of the trust chain, not an afterthought.
+- **Caching headers**: a replica serves its JWKS with `Cache-Control: no-cache`. Its only consumer, the aggregator, polls it on its own schedule, and a cache in between could hide a key published ahead beyond `publish_ahead`, breaking publication before use. Caching for the SPIRE Server is the aggregator's job (`cache_max_age`).
+- **Errors**: `GET` and `HEAD` only (`405` otherwise). If the keys cannot be read, the endpoint replies `503`; it never serves a partial set. Error responses are not cacheable (`Cache-Control: no-store`).
+
+## JWKS aggregator
+
+Since every replica signs with its own keys, the SPIRE Server-side plugin fetches keys from a JWKS aggregator rather than from individual replicas.
+
+- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS, with the certificate the SPIRE Server operator pins.
+- **Discovery**: a static list of replica JWKS URLs (`replicas`, https only).
+- **Polling**: every `poll_interval` (default 30s) each replica is fetched concurrently, with `fetch_timeout` (default 5s), a response size cap, and TLS verified against `replica_ca_cert_path` (or the system roots).
+- **Merging**: the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas publish the same kid with different key material, that kid is excluded and an error is logged (fail closed). Only public keys with `use=sig` and an allowed algorithm are passed through; private key material is rejected.
+- **Unreachable replicas**: the keys from a replica's last successful fetch are kept for `stale_key_retention` (default and minimum: 5 minutes, the maximum token TTL), so in-flight tokens keep verifying during short outages. Keys a reachable replica stops publishing are dropped on its next successful fetch.
+- **Endpoints**: `GET /.well-known/jwks.json` with `Cache-Control: public, max-age=<cache_max_age>` (default 30s), so consumers refresh on a reasonable schedule without hitting the endpoint on every attestation; `/liveness`; `/readiness` (ready once at least one replica has been fetched successfully).
+
+**Requirements on the SPIRE Server-side plugin** (companion spec): fetch keys from the aggregator, select the verification key by the JWT header kid, and re-fetch the JWK Set (rate-limited) when it meets an unknown kid.
+
+## Freshness, replay and rate limiting
+
+Because Nova calls this service whenever the instance reads its vendordata, the service mints a brand-new token on every call rather than caching one per instance.
+
+- **Short TTL**: 5 minutes (see the claim schema), which bounds the damage window if a token is exfiltrated in transit.
+- **Fresh jti**: a new UUID for every token, even for the same instance asking again seconds later; a jti is never reused.
+- **No replay tracking**: enforcing jti uniqueness is the responsibility of the downstream SPIRE Server-side plugin, if it chooses to track it. This service's job is to never issue two tokens with the same jti, not to police reuse downstream.
+- **Two-stage rate limiting**: limits blunt any attempt to use this endpoint to exhaust the signing key store's request budget. The instance ID is only available inside the JSON body, so rate limiting happens in two stages, both answering `429`:
+  1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`), so spam is rejected cheaply without allocating memory for the payload.
+  2. **Right after a size-capped decode**: a per-instance-ID token bucket (`rate_limit_per_instance`, default 1/5s: no more than one token every few seconds per instance), before any lookup or signing operation.
+
+  Limits are enforced per replica, since replicas share nothing.
+
+## API surface
+
+**Signer endpoints**:
 
 | Method | Path | Called by | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/attest` | Nova (DynamicJSON target) | Issue a signed JWT for the requesting instance |
-| `GET` | `/.well-known/jwks.json` | SPIRE Server | Fetch current trusted public keys |
-| `GET` | `/healthz` | Load balancer / orchestrator | Liveness check |
+| `GET` | `/.well-known/jwks.json` | JWKS aggregator | Fetch this replica's current trusted public keys |
+| `GET` | `/liveness` | Orchestrator | HTTP server process check, used to restart crashed pods |
+| `GET` | `/readiness` | Orchestrator / load balancer | Dependency and key store connectivity check, used to route traffic; also not ready until the first key has been published for `publish_ahead` |
 
-**Config**:
+**Aggregator endpoints**: `GET /.well-known/jwks.json` (called by the SPIRE Server-side plugin), `/liveness` and `/readiness` (see above).
+
+**Command line** (object/verb convention):
+
+- `openstack-spire-metadata service start --config <path>`: run a signer replica.
+- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator.
+- `openstack-spire-metadata config check ...`: validate configuration files (see below).
+
+## Configuration
+
+**Signer** (values shown are the defaults where one exists):
 
 ```yaml
 listen_addr: "0.0.0.0:8443"
-tls_cert_path: "/etc/vendordata-signer/tls.crt"
-tls_key_path: "/etc/vendordata-signer/tls.key"
+tls_cert_path: "/etc/vendordata-signer/tls.crt"         # required
+tls_key_path: "/etc/vendordata-signer/tls.key"          # required
+replica_id: "signer-a"                                  # default: first label of the hostname
 key_store:
-  backend: "barbican"     # or "hsm"
-  barbican_endpoint: "https://barbican.internal:9311"
-  active_key_id: "<barbican secret ref>"
-token_ttl_seconds: 300
+  backend: "ephemeral_memory"                           # or "vault_transit" (later)
+  algorithm: "RS256"                                    # or "ES256"
+  rotation_interval: "24h"                              # at least 5m
+  publish_ahead: "2m"                                   # > aggregator poll_interval + fetch_timeout
+  vault_proxy_endpoint: "https://vault-proxy.internal:8200"  # vault_transit only
+token_ttl_seconds: 300                                  # at most 300
 rate_limit_per_instance: "1/5s"
+rate_limit_per_source: "200/1s"
+max_body_bytes: 262144
+custom_claims:                                          # static string claims, no reserved names
+  country: "italy"
+tags:
+  allowlist: ["role", "env"]                            # empty: every string entry
+keystone:
+  allowed_users: ["nova@Default"]                       # required: user IDs or name@domain
+  required_role: "service"
+  validation_cache_ttl: "60s"
+  project_cache_ttl: "10m"
+  ca_cert_path: "/etc/ssl/openstack-ca.pem"             # optional
+nova_lookup:
+  enabled: true
+  cache_ttl: "60s"                                      # at most the token TTL
+  allowed_statuses: ["ACTIVE", "BUILD", "REBOOT", "HARD_REBOOT", "REBUILD", "RESIZE", "VERIFY_RESIZE", "MIGRATING", "PASSWORD"]
+enrich: ["availability_zone", "flavor", "user_id", "project_name", "domain_id"]  # default: none
 ```
 
-Claude should keep the Nova-facing HTTP handler, the JWKS handler, and the key-signing client as separate, independently testable components.
+The service's OpenStack credentials never appear in this file: they come from the `OS_*` environment variables (see caller authentication).
+
+**Aggregator**:
+
+```yaml
+listen_addr: "0.0.0.0:8444"
+tls_cert_path: "/etc/jwks-aggregator/tls.crt"          # required
+tls_key_path: "/etc/jwks-aggregator/tls.key"           # required
+replicas:                                              # required, https only
+  - "https://signer-a.internal:8443/.well-known/jwks.json"
+  - "https://signer-b.internal:8443/.well-known/jwks.json"
+poll_interval: "30s"
+fetch_timeout: "5s"
+replica_ca_cert_path: "/etc/ssl/signer-ca.pem"         # optional
+stale_key_retention: "5m"                              # at least 5m
+cache_max_age: "30s"
+```
+
+Unknown keys are errors in both files, so that typos are never silently ignored.
+
+## Configuration validation
+
+The binary provides a command to validate configuration files before deployment (e.g. in CI or a pre-rollout hook), applying the same rules the services apply at startup:
+
+```
+openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--format text|json|yaml] [--strict] [--skip-files] [--print-effective]
+```
+
+- **Complete report**: all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.
+- **Unknown keys** are errors and carry a "did you mean ...?" suggestion when a known key is close (e.g. `rate_limt_per_instance`).
+- **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring `nova_lookup`, `allowed_users` entries that are neither user IDs nor `name@domain`, ...) are errors.
+- **Cross-file consistency**: when an aggregator file is given, each signer's `key_store.publish_ahead` must exceed the aggregator's `poll_interval` plus `fetch_timeout` (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's `stale_key_retention` must be at least each signer's token TTL (always true, since the aggregator itself requires at least the maximum token TTL). `replica_id` must be unique across all signer files.
+- **File checks** (skippable with `--skip-files`): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles parse. A certificate expiring within 30 days and a private key readable by group or others are warnings.
+- **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s.
+- **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
+- The services refuse to start on any error and log warnings at startup.
 
 ## Error handling and failure modes
 
 | Failure | Behavior |
 | --- | --- |
-| Request missing Keystone auth context | Reject with `401`, do not sign |
-| Keystone context doesn't authorize this project/instance | Reject with `403`, do not sign, log the mismatch |
-| Key store (Barbican/HSM) unreachable | Reject with `503`; Nova's metadata response for this target is simply omitted, instance retries on next metadata poll |
-| Rate limit exceeded for an instance ID | Reject with `429` |
-| Malformed request body from Nova | Reject with `400`, log full payload for operator review |
+| Per-source rate limit exceeded | Reject with `429` *before* the body is read |
+| Malformed, oversized or invalid request body | Reject with `400`; log the payload truncated and with `user-data` redacted |
+| Missing `X-Auth-Token`, or invalid/expired token | Reject with `401`, do not sign |
+| Token user not in `keystone.allowed_users` or lacking `keystone.required_role` | Reject with `403`, do not sign, log the user ID (never the token) |
+| Keystone unreachable while authenticating the caller | Reject with `503` |
+| Per-instance rate limit exceeded | Reject with `429` before any lookup or signing |
+| Instance not found, owned by another project, or in a disallowed status | Reject with `403`, do not sign, log the mismatch |
+| Nova API / Keystone unreachable during verification or enrichment | Reject with `503` |
+| Key store / Vault proxy unreachable | Reject with `503`; Nova omits this target from the metadata response, and the instance retries on its next metadata poll |
+| Signing fails for any other reason (e.g. a custom claim colliding with a reserved name) | Reject with `500` |
 
-A failure here must never fall back to issuing an unsigned or weakly-signed token — every rejection path ends in "no token issued," never a degraded one. Nova instances that fail to get a token will simply retry on their next metadata poll; this service should treat unavailability as safe, not as a reason to loosen verification.
+A failure must never fall back to issuing an unsigned, weakly signed or partial token: every rejection path ends in "no token issued", never a degraded one. The service treats unavailability as safe, never as a reason to loosen verification.
+
+**Operational warning**: while an instance retries a missing metadata target on its next poll, cloud-init configures the host during the initial local boot sequence. If a `503` (e.g. a key store failure) causes the JWT to be omitted during this exact window, downstream SPIRE-dependent systemd units will fail. Operators must monitor `/readiness` strictly, since transient failures break attestation for newly booting instances.
 
 ## Testing and validation
 
 **Unit tests**:
 
-- Claim construction from a valid Nova request body, including `tags` filtering of non-string metadata values.
-- Rejection of a request whose Keystone context doesn't match its claimed `project-id`.
-- `kid` correctly reflects the active signing key on every issued token.
-- JWKS response includes both the active key and any key still within its post-rotation retention window; excludes keys past it.
+- Claim construction from a valid Nova request body, including `tags` filtering: non-string values dropped, the allowlist applied, the strict size limit enforced.
+- Request validation rejects malformed bodies, duplicate members and non-canonical instance IDs.
+- Instance verification rejects unknown instances, project mismatches and disallowed statuses; enrichment claims appear only when enabled; lookups are served from cache within the TTL.
+- The kid correctly reflects the active (in-memory or Vault-backed) signing key on every issued token.
+- kid format and uniqueness across replicas; a new key is published before it is used; readiness stays false until the first key has been published for `publish_ahead`.
+- The JWKS response includes the key published ahead, the active key and any key still within its post-rotation retention window, and excludes keys past it.
+- The aggregator merges replica key sets, excludes conflicting kids, retains an unreachable replica's keys for `stale_key_retention` and then drops them.
+- The configuration check reports every finding of a broken file in one run, with correct lines.
 
 **Integration tests**:
 
-- Full request against a real (or fully mocked) Barbican/KMS backend: request in, valid signed JWT out, signature verifiable against the JWKS endpoint's own output.
-- Key rotation drill: rotate the active key, confirm tokens signed just before rotation still verify against the JWKS response, confirm new tokens use the new `kid`.
-- Rate limiting: burst requests from one instance ID, confirm `429` after the configured threshold, confirm a different instance ID is unaffected.
-
-**Required negative test**: a request with a well-formed body but no Keystone auth context attached must be rejected — this is the single test that most directly validates the request-context binding this entire design depends on.
+- **Required negative test**: a request with a well-formed body but no `X-Auth-Token` is rejected with `401` and nothing is signed. This is the test that most directly validates the request-context binding the whole design depends on.
+- Keystone token validation accepts the allowlisted service user carrying the required role and rejects arbitrary user tokens (`401`/`403`).
+- Full request against the key store backend (real or fully mocked): request in, valid signed JWT out, signature verifiable against the JWKS endpoint's own output.
+- Rate limiting: the middleware answers `429` without reading the body; a burst from one instance ID gets `429` after the configured threshold, while a different instance ID is unaffected.
+- End-to-end with two signer replicas and one aggregator: a token from either replica verifies against the aggregated JWKS by kid. Key rotation drill: after a rotation, tokens signed just before it still verify, and new tokens carry the new kid, which the aggregate publishes before its first use.
 
 ## Build, packaging, deployment
 
-- A standalone HTTP service (any language; Go recommended for consistency with the SPIRE plugins in the companion specs), stateless aside from its key-store client — safe to run as multiple replicas behind a load balancer.
-- No local private key material ever written to the deployment host's disk — the Barbican/HSM client credentials are the only secret this service holds locally, and those should come from the platform's standard secret-injection mechanism, not baked into the image.
-- Deploy close to (or as part of) the Nova control plane's network segment, since `nova-api`/`nova-api-metadata` must reach it on every metadata request — treat its availability as coupled to metadata-service availability more broadly.
-- Health checks (`/healthz`) should verify connectivity to the key store, not just process liveness — a service that's up but can't reach Barbican should report unhealthy so it's taken out of rotation.
+- A standalone HTTP service written in Go, for consistency with the SPIRE plugins of the companion specs.
+- Deployed close to the Nova control plane's network segment, since `nova-api-metadata` must reach it on every vendordata request; its availability is coupled to that of the metadata service. It runs as several share-nothing signer replicas behind a load balancer (the target of Nova's DynamicJSON configuration), plus one or more JWKS aggregator instances behind their own load balancer (the endpoint of the SPIRE Server-side plugin).
+- No private key material is ever written to the deployment host's disk. The only secrets the service holds locally are its client credentials (Keystone `OS_*` variables, and the Vault credentials once `vault_transit` exists); they come from the platform's standard secret-injection mechanism, never baked into the image.
+- Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
 
-## Open questions and out of scope
+## Resolved questions and out of scope
 
-**Open questions**:
+**Resolved questions** (open in the first draft):
 
-- [ ] Barbican vs. a cloud-neutral HSM/KMS abstraction — depends on whether this OpenStack deployment already standardizes on Barbican elsewhere.
-- [ ] Exact rotation cadence (30 vs. 90 days) — a security/operability tradeoff to decide with whoever owns key management policy.
-- [ ] Whether `tags` should be an allowlist of specific metadata keys rather than passing all user-supplied metadata through — passing everything is simpler but widens what ends up in a selector-bearing token.
+- Barbican vs. a cloud-neutral HSM/KMS abstraction: neither is used for per-token signing. Keys live behind a key store interface, with ephemeral in-memory keys first and Vault transit later.
+- Rotation cadence (30 vs. 90 days): with ephemeral per-replica keys, rotation is cheap; `key_store.rotation_interval` defaults to 24h and is configurable (at least 5 minutes).
+- Whether `tags` should be restricted to an allowlist of metadata keys: an optional `tags.allowlist`; when empty, every string entry passes, within the 1024-byte cap, and `config check` warns about it.
 
-**Explicitly out of scope for this spec**:
+**Explicitly out of scope**:
 
-- The SPIRE agent and server-side `openstack_iid` plugins that consume this service's output (companion spec).
-- Nova operator configuration (`vendordata_providers`, `vendordata_dynamic_targets`) beyond the values this service must match.
-- Barbican/HSM cluster setup and operation itself.
-
-# **OpenStack vendor data JWT issuer — implementation spec revision**
-
-## **Overview**
-
-This spec defines the vendordata JWT issuer: the service that runs alongside (or as part of) Nova's dynamic vendordata mechanism and hands each booting instance a short-lived, signed JWT proving its project\_id and instance\_id.  
-This JWT serves as the trust root for the openstack\_iid SPIRE node attestor pair. Its correctness dictates the trustworthiness of every downstream SPIFFE ID. This revised architecture addresses high-throughput data-plane requirements, control-plane authorization realities, and payload optimization.  
-**Precedence:** this revision supersedes the original specification above wherever the two differ (e.g. Vault/ephemeral keys instead of Barbican, /liveness and /readiness instead of /healthz, service-token authentication instead of the original user's Keystone context).
-
-## **Nova integration and request-context binding**
-
-This service operates as a Nova **DynamicJSON vendordata target**. It is invoked by nova-api-metadata on the instance's behalf, whenever the instance reads vendor\_data2.json (subject to Nova's own metadata caching).  
-**Registration** (Nova operator config):
-
-* api.vendordata\_providers must include DynamicJSON.  
-* api.vendordata\_dynamic\_targets includes an entry named openstack\_iid, e.g., openstack\_iid@\[https://vendordata-signer.internal:8443/attest\](https://vendordata-signer.internal:8443/attest).
-
-**Request shape** (Nova → this service, JSON POST):
-
-* project-id: The project that owns the instance.  
-* instance-id: The instance UUID.  
-* image-id: The boot image ID.  
-* hostname: The instance hostname.  
-* metadata: User-supplied key/value pairs at boot time.  
-* user-data: The instance user data. Ignored: never decoded into the request model, never copied into a token, and redacted whenever a payload is logged.  
-* boot-roles: The roles of the booting user. Ignored.
-
-**Request validation** (400 on failure, no token issued):
-
-* The body must be well-formed JSON of at most max\_body\_bytes (default 256 KiB: Nova forwards user-data, up to 64 KiB base64-encoded, together with metadata); duplicate member names are rejected, so a second instance-id cannot be smuggled in.  
-* project-id: required, at most 64 characters from \[A-Za-z0-9\_-\].  
-* instance-id: required, a canonical lowercase UUID; other forms (uppercase, braces, urn: prefix) are rejected so that an instance can never appear under two different "sub" values.  
-* hostname: required, at most 255 characters, no control characters.  
-* image-id: optional (empty for instances booted from volume).
-
-**The Authorization Binding (Service-to-Service):**  
-The request is made by nova-api-metadata, not by the user who booted the instance, so it does *not* carry the original user's Keystone token. Instead, Nova authenticates to this service with the credentials of its \[vendordata\_dynamic\_auth\] section and sends the resulting token in the X-Auth-Token header. This service must:
-
-* reject a request without X-Auth-Token with 401;  
-* validate the token against Keystone (GET /v3/auth/tokens), using its own service credentials taken from the OS\_\* environment variables of a standard openrc file (never from the configuration file): OS\_AUTH\_URL (https only), then either OS\_USERNAME or OS\_USER\_ID with OS\_USER\_DOMAIN\_NAME/\_ID, OS\_PASSWORD and a project scope (OS\_PROJECT\_NAME with OS\_PROJECT\_DOMAIN\_NAME/\_ID, or OS\_PROJECT\_ID), or an application credential (OS\_APPLICATION\_CREDENTIAL\_ID or \_NAME, and \_SECRET); the service user needs the permission to validate other users' tokens (by default the service or admin role), and re-authenticates when its own token expires; an invalid or expired token is rejected with 401;  
-* require the token's user to be listed in keystone.allowed\_users **and** to carry keystone.required\_role (default "service"); otherwise reject with 403 and log the user ID (never the token). Each entry is a user ID (32 or 64 lowercase hex digits, as Keystone generates them) or name@domain, where domain is the domain's name or ID and the name may itself contain "@" (the domain follows the last one); bare names are configuration errors, since user names are only unique within a domain and a same-named user with the same role in another domain would otherwise be accepted;  
-* reject with 503 if Keystone cannot be reached;  
-* cache successful validations, keyed by the SHA-256 of the token, for at most keystone.validation\_cache\_ttl (default 60s) and never beyond the token's own expiry, in a bounded cache; failures are not cached, and concurrent validations of the same token (Nova reuses its token across requests) are merged into a single Keystone request.
-
-Trust in Nova's claims about project-id and instance-id is thus based on the authenticated identity of the compute control plane, and independently confirmed by the instance verification described below.  
-**Response shape**: The service must return {"openstack\_iid": {"jwt": "\<token\>"}} to match the target name expected by the agent plugin.
-
-## **Claim schema**
-
-JSON  
-{  
-  "header": {  
-    "alg": "RS256",  
-    "kid": "2026-09-29-signer-a-key-52331",  
-    "typ": "JWT"  
-  },  
-  "payload": {  
-    "iss": "nova-spire-plugin",  
-    "aud": "spire-node-attestation",  
-    "sub": "\<instance-id\>",  
-    "iat": 1758000000,  
-    "nbf": 1758000000,  
-    "exp": 1758000300,  
-    "jti": "\<uuid, freshly generated per token\>",  
-    "project\_id": "\<project-id from the Nova request\>",  
-    "instance\_id": "\<instance-id from the Nova request\>",  
-    "hostname": "\<hostname from the Nova request\>",  
-    "tags": { "\<key\>": "\<value\>", "...": "..." }  
-  }  
-}
-
-* **Payload Bloat Protection:** Users frequently abuse OpenStack instance metadata for large cloud-init scripts. To prevent JWT headers from exceeding standard HTTP limits (4KB-8KB) downstream, the tags claim is derived from the incoming metadata field as follows:  
-  * only string values are kept; other entries are dropped (not an error);  
-  * if tags.allowlist is configured, only the listed keys are kept (an empty allowlist keeps every string entry, and config check warns about it);  
-  * the JSON-serialized tags object never exceeds 1024 bytes (escaping included): entries are considered in sorted key order and any entry that would not fit is dropped, so the result is deterministic and later, smaller entries can still fit;  
-  * every dropped entry is logged with its key and the reason, never its value; the token is still issued.  
-* **TTL:** exp \- iat is a short, fixed window: token\_ttl\_seconds, default 300 (5 minutes), never more; the service refuses to start with a longer or non-positive value. iat and nbf are the issuance time.  
-* **Immutability:** Every claim value comes exclusively from the authorized Nova request, except for operator-configured custom claims (see below).
-* **Custom claims:** The operator can configure static string claims (e.g. "country": "italy") in the service configuration file (custom\_claims); they are added as top-level claims to every token. Custom claims must not use a reserved claim name (iss, aud, sub, iat, nbf, exp, jti, project\_id, instance\_id, hostname, tags, and the enrichment claims availability\_zone, flavor, user\_id, project\_name, domain\_id): the service refuses to start if they do, and re-checks the names right before signing, so it can never emit a token where a custom claim shadows a reserved one. Custom claim values are strings.
-* **Shared contract:** the header and claim definitions, the fixed values (iss, aud, target name, maximum TTL, tags size cap) and the reserved names live in a single Go package (pkg/iid) imported by this service and by the SPIRE plugins.
-
-## **Instance verification and claim enrichment**
-
-Nova's DynamicJSON request carries only project-id, instance-id, image-id, hostname, metadata, user-data and boot-roles. The availability zone and other control-plane attributes are not part of it, so the service looks them up itself, with its own service credentials, before signing.
-
-**Instance verification** (nova\_lookup.enabled, on by default): the service fetches the server record (GET /servers/{instance-id} on the Nova API) and checks, against this independent source, that:
-
-* the instance exists;
-* it belongs to the project-id stated in the request;
-* its status is one of nova\_lookup.allowed\_statuses (default: ACTIVE, BUILD, REBOOT, HARD\_REBOOT, REBUILD, RESIZE, VERIFY\_RESIZE, MIGRATING, PASSWORD).
-
-Any mismatch is rejected with 403 and logged; no token is issued.
-
-**Claim enrichment** (enrich, a list of attribute names, empty by default): each enabled attribute is added as an optional top-level claim:
-
-| Claim | Source | Notes |
-| :---- | :---- | :---- |
-| availability\_zone | Nova server record (OS-EXT-AZ:availability\_zone) | Requires nova\_lookup |
-| flavor | Nova server record (flavor original\_name, microversion ≥ 2.47) | Requires nova\_lookup |
-| user\_id | Nova server record (user\_id of the booting user) | Requires nova\_lookup |
-| project\_name | Keystone (GET /v3/projects/{project-id}) | |
-| domain\_id | Keystone (GET /v3/projects/{project-id}) | |
-
-* Only control-plane-authoritative attributes are offered; user-controlled server attributes (name, tags, key pair) are deliberately not, since they carry no more trust than metadata.
-* Compute host / hypervisor names are deliberately not offered: the token is readable from inside the guest (vendor\_data2.json) and would disclose the physical layout to tenants.
-* The enrichment claim names are reserved: custom claims cannot use them.
-* **Caching:** to protect nova-api and Keystone during boot storms, server records are cached per instance-id for at most nova\_lookup.cache\_ttl (default 60s, never more than the token TTL, since the availability zone can change on migration/resize); project records are cached for keystone.project\_cache\_ttl (default 10m).
-* **Failure:** if Nova or Keystone cannot be reached, the request is rejected with 503. The service never issues a token with missing or stale-beyond-TTL enrichment claims.
-
-## **Signing key management**
-
-To prevent thundering herd failures during cluster scale-ups, this service avoids routing per-token Sign requests to control-plane key managers like Barbican.  
-**Custody & Generation Architectures:**
-
-> 1. **Vault Transit Backend (Recommended for Enterprise Persistence):** Offload signing operations to a HashiCorp Vault REST API proxy. Utilizing dual-cluster token replication and DBOS durable workflows ensures the high-throughput, data-plane resilience required for instance boot storms without writing private keys to disk.  
-> 2. **Ephemeral In-Memory Keys (Recommended for Stateless Simplicity):** The Golang service generates an RSA 2048-bit (or ECDSA P-256) keypair entirely in memory at startup. The public half is published to the JWKS endpoint. If the pod restarts, it simply generates a new key.
-
-The ephemeral\_memory backend is implemented first; vault\_transit comes later behind the same key store interface (the configuration check reports it as not supported yet).
-
-**Algorithms:** RS256 with RSA 2048-bit keys (default) or ES256 with ECDSA P-256 keys (key\_store.algorithm).
-
-**Rotation & Retention:** Keys rotate on a fixed schedule (key\_store.rotation\_interval, default 24h, at least 5 minutes) or upon service restart. The previous key's public component remains in the JWKS response for at least one full token TTL past rotation to validate in-flight tokens.
-
-**Replica topology:** The service runs as multiple independent, share-nothing replicas, each with its own ephemeral key; a separate JWKS aggregator (see below) merges their public keys for the SPIRE Server.
-
-* **kid:** \<YYYY-MM-DD\>-\<replica-id\>-key-\<n\> (e.g. 2026-09-29-signer-a-key-52331), where the date is the UTC date the key was generated and n the number of seconds since UTC midnight at that moment, bumped when needed so that it strictly increases within a process; kids therefore never collide across replicas, nor across restarts of the same replica (a counter restarting from 1 would reuse a kid with different key material, which the aggregator would exclude). replica\_id is a lowercase DNS label; if not configured it is derived from the first label of the hostname (config check warns about it), and it must be unique across replicas.  
-* **Publication before use:** a token must never carry a kid the aggregated JWKS cannot serve yet. Each new key is generated and published in the replica's JWKS key\_store.publish\_ahead (default 2m) before it is used for signing; publish\_ahead must exceed the aggregator's poll\_interval plus fetch\_timeout. At startup, a replica reports not ready (/readiness 503) until its first key has been published for publish\_ahead.
-* **Signing:** only the active key signs, and the token header carries its kid. If a rotation lands while a token is being signed, signing is retried once with the new active key; if it fails again, the request is rejected with 503.
-
-## **JWKS endpoint**
-
-This service exposes the public half of trusted signing keys for the SPIRE Server-side plugin.
-
-* **Endpoint**: GET /.well-known/jwks.json, formatted as a standard RFC 7517 JWK Set.  
-* **Protection**: Served over TLS with a certificate the SPIRE Server operator can pin.  
-* **Caching headers**: a replica serves its JWKS with Cache-Control: no-cache. Its only consumer, the aggregator, polls it on its own schedule, and a cache in between could hide a key published ahead beyond publish\_ahead, breaking publication before use. Caching for the SPIRE Server is the aggregator's job (cache\_max\_age).  
-* **Content**: Includes the key about to become active (published ahead), the currently active key and any key retired within the last token TTL (5 minutes); each entry carries kid, kty, alg, use=sig and the public key material only.  
-* **Freshness**: The content is read live from the key store, so rotations are published automatically, without any manual step.
-* **Errors**: GET and HEAD only (405 otherwise); if the keys cannot be read the endpoint replies 503, and it never serves a partial set; error responses are not cacheable (Cache-Control: no-store).
-
-## **JWKS aggregator**
-
-Since every replica signs with its own key, the SPIRE Server-side plugin fetches keys from a JWKS aggregator rather than from individual replicas.
-
-* **Command:** openstack-spire-metadata jwks aggregate --config \<path\>; stateless, so it can itself run as multiple replicas behind a load balancer, served over TLS.  
-* **Discovery:** a static list of replica JWKS URLs (replicas, https only).  
-* **Polling:** every poll\_interval (default 30s) each replica is fetched concurrently, with fetch\_timeout (default 5s), a response size cap, and TLS verified against replica\_ca\_cert\_path (or the system roots).  
-* **Merging:** the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas publish the same kid with different key material, that kid is excluded and an error is logged (fail closed). Only public keys with use=sig and an allowed algorithm are passed through; private key material is rejected.  
-* **Unreachable replicas:** the keys from a replica's last successful fetch are kept for stale\_key\_retention (default and minimum: 5 minutes, the maximum token TTL), so in-flight tokens keep verifying during short outages; keys a reachable replica stops publishing are dropped on its next successful fetch.  
-* **Endpoints:** GET /.well-known/jwks.json (Cache-Control max-age = cache\_max\_age, default 30s), /liveness, /readiness (ready once at least one replica has been fetched successfully).
-
-**Requirements on the SPIRE Server-side plugin** (companion spec): fetch keys from the aggregator, select the verification key by the JWT header kid, and re-fetch the JWK Set (rate-limited) when it meets an unknown kid.
-
-## **Freshness and replay controls**
-
-* **Fresh jti**: Generate a new UUID for every token minted.  
-* **No Replay Tracking**: Enforcing jti reuse is the responsibility of the downstream SPIRE Server, not this service.  
-* **Two-stage Rate Limiting**: the instance ID is only available inside the JSON body, so rate limiting happens in two stages, both answering 429:  
-  1. **Before the body is read:** a per-source-IP token bucket (rate\_limit\_per\_source, default 200/1s) in the HTTP middleware, together with a cap on the body size (max\_body\_bytes), so spam is rejected cheaply without allocating memory for the payload.  
-  2. **Right after a size-capped decode:** the per-instance-ID token bucket (rate\_limit\_per\_instance, default 1/5s), before any lookup or signing operation.  
-  Limits are enforced per replica (replicas share nothing).
-
-## **API surface and configuration**
-
-**Endpoints**:
-
-| Method | Path | Purpose |
-| :---- | :---- | :---- |
-| POST | /attest | Issue a signed JWT for the requesting instance |
-| GET | /.well-known/jwks.json | Fetch current trusted public keys |
-| GET | /liveness | HTTP server process check (used by orchestrator to restart crashed pods) |
-| GET | /readiness | Dependency and KMS connectivity check (used by orchestrator to route traffic); also not ready until the first key has been published for publish\_ahead |
-
-**Command line** (object/verb convention):
-
-* openstack-spire-metadata service start --config \<path\>: run a signer replica.  
-* openstack-spire-metadata jwks aggregate --config \<path\>: run the JWKS aggregator.  
-* openstack-spire-metadata config check ...: validate configuration files (see below).
-
-**Signer config** (values shown are the defaults where one exists):
-
-YAML  
-listen\_addr: "0.0.0.0:8443"  
-tls\_cert\_path: "/etc/vendordata-signer/tls.crt"         \# required  
-tls\_key\_path: "/etc/vendordata-signer/tls.key"          \# required  
-replica\_id: "signer-a"                                  \# default: first label of the hostname  
-key\_store:  
-  backend: "ephemeral\_memory"                            \# or "vault\_transit" (later)  
-  algorithm: "RS256"                                     \# or "ES256"  
-  rotation\_interval: "24h"  
-  publish\_ahead: "2m"  
-  vault\_proxy\_endpoint: "https://vault-proxy.internal:8200"  \# vault\_transit only  
-token\_ttl\_seconds: 300  
-rate\_limit\_per\_instance: "1/5s"  
-rate\_limit\_per\_source: "200/1s"  
-max\_body\_bytes: 262144  
-custom\_claims:  
-  country: "italy"  
-tags:  
-  allowlist: \["role", "env"\]  
-keystone:  
-  allowed\_users: \["nova@Default"\]                       \# required: user IDs or name@domain  
-  required\_role: "service"  
-  validation\_cache\_ttl: "60s"  
-  project\_cache\_ttl: "10m"  
-  ca\_cert\_path: "/etc/ssl/openstack-ca.pem"             \# optional  
-nova\_lookup:  
-  enabled: true  
-  cache\_ttl: "60s"  
-  allowed\_statuses: \["ACTIVE", "BUILD", "REBOOT", "HARD\_REBOOT", "REBUILD", "RESIZE", "VERIFY\_RESIZE", "MIGRATING", "PASSWORD"\]  
-enrich: \["availability\_zone", "flavor", "user\_id", "project\_name", "domain\_id"\]
-
-**Aggregator config**:
-
-YAML  
-listen\_addr: "0.0.0.0:8444"  
-tls\_cert\_path: "/etc/jwks-aggregator/tls.crt"          \# required  
-tls\_key\_path: "/etc/jwks-aggregator/tls.key"           \# required  
-replicas:                                               \# required, https only  
-  \- "https://signer-a.internal:8443/.well-known/jwks.json"  
-  \- "https://signer-b.internal:8443/.well-known/jwks.json"  
-poll\_interval: "30s"  
-fetch\_timeout: "5s"  
-replica\_ca\_cert\_path: "/etc/ssl/signer-ca.pem"          \# optional  
-stale\_key\_retention: "5m"  
-cache\_max\_age: "30s"
-
-Unknown keys are errors in both files, so that typos are never silently ignored.
-
-## **Configuration validation**
-
-The binary provides a command to validate configuration files before deployment (e.g. in CI or a pre-rollout hook), with the same rules the services apply at startup:
-
-    openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--format text|json|yaml] [--strict] [--skip-files] [--print-effective]
-
-* **Complete report:** all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.
-* **Unknown keys** are errors and carry a "did you mean ...?" suggestion when a known key is close (e.g. rate\_limt\_per\_instance).
-* **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring nova\_lookup, ...) are errors.
-* **Cross-file consistency:** when an aggregator file is given, each signer's key\_store.publish\_ahead must exceed the aggregator's poll\_interval plus fetch\_timeout (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's stale\_key\_retention must be at least each signer's token TTL (always true, since the aggregator itself requires at least the maximum token TTL); replica\_id must be unique across all signer files.
-* **File checks** (skippable): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles parse. A certificate expiring within 30 days and a private key readable by group/others are warnings.
-* **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, replica\_id derived from the hostname, a per-instance rate limit looser than 1/5s.
-* **Exit codes:** 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with --strict), 2 when a file cannot be read or the command line is invalid.
-* The services refuse to start on any error and log warnings at startup.
-
-## **Error handling and failure modes**
-
-| Failure | Behavior |
-| :---- | :---- |
-| Missing X-Auth-Token, or invalid/expired token | Reject with 401, do not sign |
-| Token user not in keystone.allowed\_users or lacking keystone.required\_role | Reject with 403, do not sign, log the user ID (never the token) |
-| Keystone unreachable while authenticating the caller | Reject with 503 |
-| Key store / Proxy unreachable | Reject with 503; Nova omits metadata response |
-| Signing fails for any other reason (e.g. a custom claim colliding with a reserved name) | Reject with 500, never issue an unsigned or partial token |
-| Instance not found, owned by another project, or in a disallowed status | Reject with 403, do not sign, log mismatch |
-| Nova API / Keystone unreachable during verification or enrichment | Reject with 503 |
-| Per-source rate limit exceeded | Reject with 429 *before* the body is read |
-| Per-instance rate limit exceeded | Reject with 429 before any lookup or signing |
-| Malformed, oversized or invalid request body | Reject with 400, log the payload truncated and with user-data redacted |
-
-**Operational Warning:** While an instance will retry a missing metadata target on its next poll, cloud-init configures the host during the initial local boot sequence. If a 503 KMS failure causes the JWT to be omitted during this exact window, downstream SPIRE-dependent systemd units will crash. Operators must monitor /readiness strictly, as transient failures will break attestation for newly booting instances.
-
-## **Testing and validation**
-
-**Unit tests**:
-
-* Claim construction verifying the strict size limits/allowlist on the tags field.  
-* Instance verification rejects unknown instances, project mismatches and disallowed statuses; enrichment claims appear only when enabled; lookups are served from cache within the TTL.  
-* kid accurately reflects the active in-memory or Vault-backed signing key.  
-* JWKS response correctly manages the retention window for rotated keys.
-
-* Request validation rejects malformed bodies, duplicate members and non-canonical instance IDs.  
-* kid format and uniqueness across replicas; a new key is published before it is used; readiness stays false until the first key has been published for publish\_ahead.  
-* The aggregator merges replica key sets, excludes conflicting kids, retains an unreachable replica's keys for stale\_key\_retention and then drops them.  
-* The configuration check reports every finding of a broken file in one run, with correct lines.
-
-**Integration tests**:
-
-* Keystone token validation accepts the allowlisted service user carrying the required role and rejects arbitrary user tokens (401/403).  
-* **Required negative test:** a well-formed request without X-Auth-Token is rejected with 401 and nothing is signed.  
-* Rate limiting middleware triggers 429 without reading the body; a burst from one instance gets 429 while another instance is unaffected.  
-* End-to-end with two signer replicas and one aggregator: a token from either replica verifies against the aggregated JWKS by kid; after a rotation, tokens signed before it still verify and new tokens carry the new kid, which the aggregate publishes before its first use.
-
-## **Build, packaging, deployment**
-
-* Developed as a standalone HTTP service in Golang.  
-* Deployed adjacent to the Nova control plane network segment, as several share-nothing signer replicas behind a load balancer (target of Nova's DynamicJSON configuration), plus one or more JWKS aggregator instances behind their own load balancer (endpoint of the SPIRE Server-side plugin).  
-* Utilizes separate /liveness and /readiness probes to ensure orchestrators gracefully remove the service from the load balancer rotation during backend KMS disruptions without crash-looping the pods.
+- The SPIRE agent and server-side `openstack_iid` plugins that consume this service's output (companion spec), beyond the requirements stated above.
+- Nova operator configuration (`vendordata_providers`, `vendordata_dynamic_targets`, `[vendordata_dynamic_auth]`) beyond the values this service must match.
+- Setup and operation of the key management infrastructure itself (Vault clusters and their replication).
