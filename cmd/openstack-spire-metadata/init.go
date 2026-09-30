@@ -22,8 +22,10 @@ var (
 func init() {
 	const LevelNone = slog.Level(1000)
 
+	// info by default: a running signer must report security-relevant
+	// events (rejected callers, verification failures) without any setup
 	options := &slog.HandlerOptions{
-		Level:     LevelNone,
+		Level:     slog.LevelInfo,
 		AddSource: true,
 	}
 
@@ -61,8 +63,10 @@ func init() {
 		case "error", "err", "e", "fatal", "ftl", "f":
 			options.Level = slog.LevelError
 		case "off", "none", "null", "nil", "no", "n":
+			// still install the handler below: returning here would leave
+			// slog's built-in default, which commands must not wrap (see
+			// slog.SetDefault)
 			options.Level = LevelNone
-			return
 		}
 	}
 

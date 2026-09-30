@@ -21,10 +21,11 @@ type OpenStack struct {
 var _ Backend = (*OpenStack)(nil)
 
 // NewOpenStack creates a backend from a compute client (with microversion
-// 2.47 or later, see osclient.Client.Compute) and an identity v3 client.
+// 2.47 or later, see osclient.Client.Compute; nil when instance verification
+// is disabled) and an identity v3 client.
 func NewOpenStack(compute, identity *gophercloud.ServiceClient) (*OpenStack, error) {
-	if compute == nil || identity == nil {
-		return nil, errors.New("creating OpenStack lookup backend: missing compute or identity client")
+	if identity == nil {
+		return nil, errors.New("creating OpenStack lookup backend: missing identity client")
 	}
 	return &OpenStack{compute: compute, identity: identity}, nil
 }
@@ -43,6 +44,9 @@ type serverRecord struct {
 
 // Server implements Backend (GET /servers/{id}).
 func (o *OpenStack) Server(ctx context.Context, instanceID string) (Server, error) {
+	if o.compute == nil {
+		return Server{}, errors.New("no compute client: instance verification is disabled")
+	}
 	// ExtractInto unwraps the "server" envelope itself
 	var s serverRecord
 	if err := servers.Get(ctx, o.compute, instanceID).ExtractInto(&s); err != nil {

@@ -2,7 +2,11 @@ package osclient
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/pem"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,5 +229,48 @@ func TestDependencyChecks(t *testing.T) {
 	}
 	if err := c.CheckCompute(ctx); err == nil {
 		t.Fatal("CheckCompute passed with Nova down")
+	}
+}
+
+// TestNewFailsWhenKeystoneIsDown: authenticating is part of the service's
+// pre-flight checks, so a Keystone outage at startup prevents it.
+func TestNewFailsWhenKeystoneIsDown(t *testing.T) {
+	ks := openstacktest.New(t)
+	creds, err := CredentialsFromEnv(getenv(ks.Env()))
+	if err != nil {
+		t.Fatalf("CredentialsFromEnv: %v", err)
+	}
+	ks.SetDown(true)
+	if _, err := New(context.Background(), creds, ks.CAFile(t)); err == nil || !strings.Contains(err.Error(), "authenticating with Keystone") {
+		t.Fatalf("New with Keystone down: %v, want an authentication error", err)
+	}
+
+	unreachable := creds
+	unreachable.AuthURL = "https://127.0.0.1:1/v3"
+	if _, err := New(context.Background(), unreachable, ks.CAFile(t)); err == nil {
+		t.Fatal("New succeeded with Keystone unreachable")
+	}
+}
+
+// TestRefusesTLS12Endpoints: the service connects to OpenStack with TLS 1.3
+// or later only.
+func TestRefusesTLS12Endpoints(t *testing.T) {
+	legacy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	legacy.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
+	legacy.StartTLS()
+	t.Cleanup(legacy.Close)
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	creds, err := CredentialsFromEnv(getenv(map[string]string{
+		"OS_AUTH_URL": legacy.URL + "/v3", "OS_USER_ID": "u", "OS_PASSWORD": "p", "OS_PROJECT_ID": "p1",
+	}))
+	if err != nil {
+		t.Fatalf("CredentialsFromEnv: %v", err)
+	}
+	_, err = New(context.Background(), creds, ca)
+	if err == nil || !strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("New against a TLS 1.2-only Keystone: %v, want a protocol version error", err)
 	}
 }

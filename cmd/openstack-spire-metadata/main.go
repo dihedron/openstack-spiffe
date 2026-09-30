@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 
@@ -14,8 +15,8 @@ import (
 func main() {
 	defer cleanup()
 
-	err := godotenv.Load()
-	if err != nil {
+	// a .env file in the working directory is optional
+	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("error loading .env file", "error", err)
 	}
 

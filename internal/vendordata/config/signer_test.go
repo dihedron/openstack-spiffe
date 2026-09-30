@@ -263,11 +263,25 @@ func TestSignerReportsAllProblems(t *testing.T) {
 	}
 }
 
-func TestLoadSigner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "signer.yaml")
-	if err := os.WriteFile(path, []byte(minimalSigner), 0o600); err != nil {
+// writeSigner writes a signer configuration file referencing a fresh,
+// valid TLS key pair, plus extra, and returns its path.
+func writeSigner(t *testing.T, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cert, key := writeKeyPair(t, dir, "signer", time.Now().Add(365*24*time.Hour), 0o600)
+	doc := strings.NewReplacer(
+		"/etc/vendordata-signer/tls.crt", cert,
+		"/etc/vendordata-signer/tls.key", key,
+	).Replace(minimalSigner) + extra
+	path := filepath.Join(dir, "signer.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
+
+func TestLoadSigner(t *testing.T) {
+	path := writeSigner(t, "")
 	cfg, warnings, err := LoadSigner(path)
 	if err != nil {
 		t.Fatalf("LoadSigner: %v", err)
@@ -281,12 +295,63 @@ func TestLoadSigner(t *testing.T) {
 	if _, _, err := LoadSigner(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatalf("LoadSigner on a missing file succeeded")
 	}
-	bad := filepath.Join(t.TempDir(), "bad.yaml")
-	if err := os.WriteFile(bad, []byte(minimalSigner+"token_ttl_seconds: 0\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := LoadSigner(bad); !errors.Is(err, ErrInvalidConfig) {
+	if _, _, err := LoadSigner(writeSigner(t, "token_ttl_seconds: 0\n")); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("LoadSigner on an invalid file: err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// TestLoadSignerPreflight checks that the service refuses a configuration
+// whose referenced files are not sane, and reports risky ones as warnings.
+func TestLoadSignerPreflight(t *testing.T) {
+	dir := t.TempDir()
+	valid := func() (string, string) {
+		return writeKeyPair(t, t.TempDir(), "signer", time.Now().Add(365*24*time.Hour), 0o600)
+	}
+	write := func(cert, key, extra string) string {
+		doc := strings.NewReplacer("/etc/vendordata-signer/tls.crt", cert, "/etc/vendordata-signer/tls.key", key).Replace(minimalSigner) + extra
+		path := filepath.Join(t.TempDir(), "signer.yaml")
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	expiredCert, expiredKey := writeKeyPair(t, dir, "expired", time.Now().Add(-time.Hour), 0o600)
+	cert, _ := valid()
+	_, otherKey := valid()
+	notPEM := filepath.Join(dir, "ca.pem")
+	os.WriteFile(notPEM, []byte("not a certificate"), 0o600)
+	goodCert, goodKey := valid()
+
+	for _, tt := range []struct {
+		name, cert, key, extra, want string
+	}{
+		{"missing certificate", filepath.Join(dir, "missing.crt"), goodKey, "", "tls_cert_path"},
+		{"missing key", goodCert, filepath.Join(dir, "missing.key"), "", "tls_key_path"},
+		{"expired certificate", expiredCert, expiredKey, "", "tls_cert_path"},
+		{"mismatched key", cert, otherKey, "", "tls_key_path"},
+		{"unparseable CA bundle", goodCert, goodKey, "  ca_cert_path: " + notPEM + "\n", "keystone.ca_cert_path"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := LoadSigner(write(tt.cert, tt.key, tt.extra))
+			if !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want ErrInvalidConfig mentioning %q", err, tt.want)
+			}
+		})
+	}
+
+	// risky but usable: warnings, not errors
+	soonCert, soonKey := writeKeyPair(t, dir, "soon", time.Now().Add(10*24*time.Hour), 0o644)
+	_, warnings, err := LoadSigner(write(soonCert, soonKey, ""))
+	if err != nil {
+		t.Fatalf("LoadSigner: %v", err)
+	}
+	paths := map[string]bool{}
+	for _, w := range warnings {
+		paths[w.Path] = true
+	}
+	if !paths["tls_cert_path"] || !paths["tls_key_path"] {
+		t.Fatalf("warnings %+v, want the expiring certificate and the readable key", warnings)
 	}
 }
 

@@ -44,9 +44,12 @@ func (o CheckOptions) withDefaults() CheckOptions {
 	return o
 }
 
-// LoadSigner reads and checks the signer configuration file at path, without
-// file checks (the server loads those files itself). It fails if there is any
-// error finding; otherwise it returns the configuration and the warnings.
+// LoadSigner reads and checks the signer configuration file at path, with
+// the same rules as "config check", file checks included: it is the
+// pre-flight check of the service, which must not start with a configuration
+// that is not sane. It fails if there is any error finding (e.g. an expired
+// or mismatched TLS certificate); otherwise it returns the configuration and
+// the warnings, for the service to log.
 func LoadSigner(path string) (*Signer, []Finding, error) {
 	return load(path, CheckSigner)
 }
@@ -62,7 +65,7 @@ func load[T any](path string, check func(string, []byte, CheckOptions) *Result[T
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading configuration file: %w", err)
 	}
-	result := check(path, data, CheckOptions{SkipFiles: true})
+	result := check(path, data, CheckOptions{})
 	if err := result.Err(); err != nil {
 		return nil, nil, fmt.Errorf("loading %s: %w", path, err)
 	}

@@ -166,7 +166,7 @@ type Client struct {
 // optional PEM bundle that replaces the system roots for every OpenStack
 // endpoint (keystone.ca_cert_path).
 func New(ctx context.Context, creds Credentials, caCertPath string) (*Client, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
 	if caCertPath != "" {
 		pem, err := os.ReadFile(caCertPath)
 		if err != nil {

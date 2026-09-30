@@ -84,11 +84,23 @@ func TestAggregatorInvalid(t *testing.T) {
 }
 
 func TestLoadAggregator(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "aggregator.yaml")
-	if err := os.WriteFile(path, []byte(minimalAggregator), 0o600); err != nil {
+	dir := t.TempDir()
+	cert, key := writeKeyPair(t, dir, "aggregator", time.Now().Add(365*24*time.Hour), 0o600)
+	doc := strings.NewReplacer("/tls.crt", cert, "/tls.key", key).Replace(minimalAggregator)
+	path := filepath.Join(dir, "aggregator.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := LoadAggregator(path); err != nil {
 		t.Fatalf("LoadAggregator: %v", err)
+	}
+
+	// pre-flight: the referenced files must be sane
+	broken := filepath.Join(dir, "broken.yaml")
+	if err := os.WriteFile(broken, []byte(minimalAggregator), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadAggregator(broken); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), "tls_cert_path") {
+		t.Fatalf("missing TLS files: err = %v, want ErrInvalidConfig mentioning tls_cert_path", err)
 	}
 }
