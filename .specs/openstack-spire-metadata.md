@@ -222,7 +222,8 @@ JSON
 {  
   "header": {  
     "alg": "RS256",  
-    "kid": "2026-09-29-signer-a-key-52331"  
+    "kid": "2026-09-29-signer-a-key-52331",  
+    "typ": "JWT"  
   },  
   "payload": {  
     "iss": "nova-spire-plugin",  
@@ -295,6 +296,7 @@ The ephemeral\_memory backend is implemented first; vault\_transit comes later b
 
 * **kid:** \<YYYY-MM-DD\>-\<replica-id\>-key-\<n\> (e.g. 2026-09-29-signer-a-key-52331), where the date is the UTC date the key was generated and n the number of seconds since UTC midnight at that moment, bumped when needed so that it strictly increases within a process; kids therefore never collide across replicas, nor across restarts of the same replica (a counter restarting from 1 would reuse a kid with different key material, which the aggregator would exclude). replica\_id is a lowercase DNS label; if not configured it is derived from the first label of the hostname (config check warns about it), and it must be unique across replicas.  
 * **Publication before use:** a token must never carry a kid the aggregated JWKS cannot serve yet. Each new key is generated and published in the replica's JWKS key\_store.publish\_ahead (default 2m) before it is used for signing; publish\_ahead must exceed the aggregator's poll\_interval plus fetch\_timeout. At startup, a replica reports not ready (/readiness 503) until its first key has been published for publish\_ahead.
+* **Signing:** only the active key signs, and the token header carries its kid. If a rotation lands while a token is being signed, signing is retried once with the new active key; if it fails again, the request is rejected with 503.
 
 ## **JWKS endpoint**
 
@@ -418,6 +420,7 @@ The binary provides a command to validate configuration files before deployment 
 | Token user not in keystone.allowed\_users or lacking keystone.required\_role | Reject with 403, do not sign, log the user ID (never the token) |
 | Keystone unreachable while authenticating the caller | Reject with 503 |
 | Key store / Proxy unreachable | Reject with 503; Nova omits metadata response |
+| Signing fails for any other reason (e.g. a custom claim colliding with a reserved name) | Reject with 500, never issue an unsigned or partial token |
 | Instance not found, owned by another project, or in a disallowed status | Reject with 403, do not sign, log mismatch |
 | Nova API / Keystone unreachable during verification or enrichment | Reject with 503 |
 | Per-source rate limit exceeded | Reject with 429 *before* the body is read |
