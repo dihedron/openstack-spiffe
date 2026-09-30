@@ -16,7 +16,7 @@ tls_cert_path: /etc/vendordata-signer/tls.crt
 tls_key_path: /etc/vendordata-signer/tls.key
 replica_id: signer-a
 keystone:
-  allowed_users: ["nova"]
+  allowed_users: ["nova@Default"]
 `
 
 // parseSigner checks doc without file checks and fails on any error finding.
@@ -95,7 +95,7 @@ custom_claims:
 tags:
   allowlist: [role, env]
 keystone:
-  allowed_users: [nova, nova-metadata]
+  allowed_users: [nova@Default, nova-metadata@Default]
   required_role: admin
   validation_cache_ttl: 30s
   project_cache_ttl: 5m
@@ -115,7 +115,7 @@ enrich: [availability_zone, flavor, user_id, project_name, domain_id]
 		cfg.TokenTTLSeconds != 120 || cfg.RateLimitPerInstance != (Rate{2, 10 * time.Second}) ||
 		cfg.RateLimitPerSource != (Rate{50, time.Second}) || cfg.MaxBodyBytes != 131072 ||
 		cfg.CustomClaims["country"] != "italy" || !slices.Equal(cfg.Tags.Allowlist, []string{"role", "env"}) ||
-		!slices.Equal(cfg.Keystone.AllowedUsers, []string{"nova", "nova-metadata"}) || cfg.Keystone.RequiredRole != "admin" ||
+		!slices.Equal(cfg.Keystone.AllowedUsers, []string{"nova@Default", "nova-metadata@Default"}) || cfg.Keystone.RequiredRole != "admin" ||
 		cfg.Keystone.ValidationCacheTTL != 30*time.Second || cfg.Keystone.ProjectCacheTTL != 5*time.Minute ||
 		cfg.Keystone.CACertPath != "/etc/ssl/keystone-ca.pem" || cfg.NovaLookup.CacheTTL != 30*time.Second ||
 		!slices.Equal(cfg.NovaLookup.AllowedStatuses, []string{"ACTIVE"}) || len(cfg.Enrich) != 5 {
@@ -170,10 +170,12 @@ func TestSignerInvalid(t *testing.T) {
 		{"custom claim uses enrichment name", [2]string{}, "custom_claims:\n  availability_zone: nova\n", "custom_claims"},
 		{"empty allowlist entry", [2]string{}, "tags:\n  allowlist: [\"\"]\n", "tags.allowlist"},
 		{"duplicate allowlist entry", [2]string{}, "tags:\n  allowlist: [a, a]\n", "tags.allowlist"},
-		{"no allowed users", [2]string{"  allowed_users: [\"nova\"]\n", ""}, "", "keystone.allowed_users"},
-		{"empty allowed user", [2]string{"allowed_users: [\"nova\"]", "allowed_users: [\"\"]"}, "", "keystone.allowed_users"},
-		{"empty required role", [2]string{"  allowed_users: [\"nova\"]\n", "  allowed_users: [\"nova\"]\n  required_role: \"\"\n"}, "", "keystone.required_role"},
-		{"validation cache too long", [2]string{"  allowed_users: [\"nova\"]\n", "  allowed_users: [\"nova\"]\n  validation_cache_ttl: 11m\n"}, "", "keystone.validation_cache_ttl"},
+		{"no allowed users", [2]string{"  allowed_users: [\"nova@Default\"]\n", ""}, "", "keystone.allowed_users"},
+		{"empty allowed user", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"\"]"}, "", "keystone.allowed_users"},
+		{"bare allowed user name", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova\"]"}, "", "keystone.allowed_users[0]"},
+		{"allowed user without domain", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova@\"]"}, "", "keystone.allowed_users[0]"},
+		{"empty required role", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  required_role: \"\"\n"}, "", "keystone.required_role"},
+		{"validation cache too long", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  validation_cache_ttl: 11m\n"}, "", "keystone.validation_cache_ttl"},
 		{"nova cache longer than ttl", [2]string{}, "nova_lookup:\n  cache_ttl: 6m\n", "nova_lookup.cache_ttl"},
 		{"nova cache longer than custom ttl", [2]string{}, "token_ttl_seconds: 60\nnova_lookup:\n  cache_ttl: 61s\n", "nova_lookup.cache_ttl"},
 		{"empty statuses", [2]string{}, "nova_lookup:\n  allowed_statuses: []\n", "nova_lookup.allowed_statuses"},
@@ -200,6 +202,14 @@ func TestSignerInvalid(t *testing.T) {
 				t.Fatalf("error %q does not mention %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestSignerAllowedUsersByIDOrQualifiedName(t *testing.T) {
+	doc := strings.Replace(minimalSigner, "allowed_users: [\"nova@Default\"]",
+		"allowed_users: [\"0123456789abcdef0123456789abcdef\", \"svc@example.com@ldap\"]", 1)
+	if _, err := parseSignerString(t, doc); err != nil {
+		t.Fatalf("user ID and qualified name rejected: %v", err)
 	}
 }
 

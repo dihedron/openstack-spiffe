@@ -175,7 +175,7 @@ key_store:
   vault_proxy_endpoint: https://vault.internal:8200
 rate_limit_per_instance: "1/s"
 keystone:
-  allowed_users: [nova]
+  allowed_users: [nova@Default]
 nova_lookup:
   enabled: false
 `

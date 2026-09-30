@@ -208,10 +208,10 @@ This service operates as a Nova **DynamicJSON vendordata target**. It is invoked
 The request is made by nova-api-metadata, not by the user who booted the instance, so it does *not* carry the original user's Keystone token. Instead, Nova authenticates to this service with the credentials of its \[vendordata\_dynamic\_auth\] section and sends the resulting token in the X-Auth-Token header. This service must:
 
 * reject a request without X-Auth-Token with 401;  
-* validate the token against Keystone (GET /v3/auth/tokens), using its own service credentials taken from the OS\_\* environment variables (never from the configuration file); an invalid or expired token is rejected with 401;  
-* require the token's user to be listed in keystone.allowed\_users (by ID or name) **and** to carry keystone.required\_role (default "service"); otherwise reject with 403 and log the user ID (never the token);  
+* validate the token against Keystone (GET /v3/auth/tokens), using its own service credentials taken from the OS\_\* environment variables of a standard openrc file (never from the configuration file): OS\_AUTH\_URL (https only), then either OS\_USERNAME or OS\_USER\_ID with OS\_USER\_DOMAIN\_NAME/\_ID, OS\_PASSWORD and a project scope (OS\_PROJECT\_NAME with OS\_PROJECT\_DOMAIN\_NAME/\_ID, or OS\_PROJECT\_ID), or an application credential (OS\_APPLICATION\_CREDENTIAL\_ID or \_NAME, and \_SECRET); the service user needs the permission to validate other users' tokens (by default the service or admin role), and re-authenticates when its own token expires; an invalid or expired token is rejected with 401;  
+* require the token's user to be listed in keystone.allowed\_users **and** to carry keystone.required\_role (default "service"); otherwise reject with 403 and log the user ID (never the token). Each entry is a user ID (32 or 64 lowercase hex digits, as Keystone generates them) or name@domain, where domain is the domain's name or ID and the name may itself contain "@" (the domain follows the last one); bare names are configuration errors, since user names are only unique within a domain and a same-named user with the same role in another domain would otherwise be accepted;  
 * reject with 503 if Keystone cannot be reached;  
-* cache successful validations, keyed by the SHA-256 of the token, for at most keystone.validation\_cache\_ttl (default 60s) and never beyond the token's own expiry.
+* cache successful validations, keyed by the SHA-256 of the token, for at most keystone.validation\_cache\_ttl (default 60s) and never beyond the token's own expiry, in a bounded cache; failures are not cached, and concurrent validations of the same token (Nova reuses its token across requests) are merged into a single Keystone request.
 
 Trust in Nova's claims about project-id and instance-id is thus based on the authenticated identity of the compute control plane, and independently confirmed by the instance verification described below.  
 **Response shape**: The service must return {"openstack\_iid": {"jwt": "\<token\>"}} to match the target name expected by the agent plugin.
@@ -370,7 +370,7 @@ custom\_claims:
 tags:  
   allowlist: \["role", "env"\]  
 keystone:  
-  allowed\_users: \["nova"\]                               \# required  
+  allowed\_users: \["nova@Default"\]                       \# required: user IDs or name@domain  
   required\_role: "service"  
   validation\_cache\_ttl: "60s"  
   project\_cache\_ttl: "10m"  

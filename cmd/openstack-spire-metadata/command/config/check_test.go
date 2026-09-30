@@ -18,7 +18,7 @@ replica_id: signer-a
 tags:
   allowlist: [role]
 keystone:
-  allowed_users: [nova]
+  allowed_users: [nova@Default]
 `
 
 const aggregator = `tls_cert_path: /tls.crt

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
@@ -104,8 +105,9 @@ type Tags struct {
 
 // Keystone configures caller authentication and project lookups.
 type Keystone struct {
-	// AllowedUsers lists the IDs or names of the Keystone users (e.g. Nova's
-	// vendordata service user) allowed to request tokens.
+	// AllowedUsers lists the Keystone users (e.g. Nova's vendordata service
+	// user) allowed to request tokens, each as a user ID or name@domain
+	// (see auth.ParseAllowedUser).
 	AllowedUsers []string `yaml:"allowed_users"`
 	// RequiredRole is the role the caller's token must carry.
 	RequiredRole string `yaml:"required_role"`
@@ -244,6 +246,11 @@ func (s *Signer) validate(r *Result[Signer]) {
 		r.errorf(KindRuleViolation, "keystone.allowed_users", "must list at least one user")
 	}
 	checkList(r, "keystone.allowed_users", s.Keystone.AllowedUsers)
+	for i, entry := range s.Keystone.AllowedUsers {
+		if _, err := auth.ParseAllowedUser(entry); entry != "" && err != nil {
+			r.errorf(KindRuleViolation, fmt.Sprintf("keystone.allowed_users[%d]", i), "%v", err)
+		}
+	}
 	if s.Keystone.RequiredRole == "" {
 		r.errorf(KindRuleViolation, "keystone.required_role", "is required")
 	}

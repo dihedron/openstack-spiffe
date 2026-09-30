@@ -63,7 +63,7 @@ func fileCheckOptions() CheckOptions {
 
 func signerDoc(certPath, keyPath, caPath string) string {
 	doc := "tls_cert_path: " + certPath + "\ntls_key_path: " + keyPath + "\nreplica_id: a\n" +
-		"tags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova]\n"
+		"tags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n"
 	if caPath != "" {
 		doc += "  ca_cert_path: " + caPath + "\n"
 	}
