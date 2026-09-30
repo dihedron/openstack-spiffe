@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
 )
 
 var testNow = time.Date(2026, 9, 29, 14, 32, 11, 0, time.UTC)
@@ -284,7 +286,9 @@ func TestSourceKey(t *testing.T) {
 		{"not-an-address", "not-an-address"},
 	}
 	for _, tt := range tests {
-		if got := sourceKey(tt.remoteAddr); got != tt.want {
+		r := httptest.NewRequest(http.MethodPost, "/attest", nil)
+		r.RemoteAddr = tt.remoteAddr
+		if got := sourceKey(r); got != tt.want {
 			t.Fatalf("sourceKey(%q) = %q, want %q", tt.remoteAddr, got, tt.want)
 		}
 	}
@@ -299,6 +303,48 @@ func TestIPv6SourcesShareTheirSlash64(t *testing.T) {
 	request(t, h, "[2001:db8:1:2::1]:1", io.NopCloser(strings.NewReader("")), 0)
 	if resp := request(t, h, "[2001:db8:1:2::2]:1", explodingBody{t}, 0); resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("address rotation within a /64: status %d, want 429", resp.StatusCode)
+	}
+}
+
+func TestSourceKeyUsesTheResolvedClientAddress(t *testing.T) {
+	resolver, err := clientaddr.NewResolver([]string{"10.0.10.0/24"}, "")
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	clock := &testClock{now: testNow}
+	h, err := SourceMiddleware(newLimiter(t, 1, time.Minute, clock), 1024, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err != nil {
+		t.Fatalf("SourceMiddleware: %v", err)
+	}
+	h = resolver.Middleware(h)
+	send := func(peer, forwarded string) int {
+		r := httptest.NewRequest(http.MethodPost, "/attest", strings.NewReader(""))
+		r.RemoteAddr = peer
+		if forwarded != "" {
+			r.Header.Set("X-Forwarded-For", forwarded)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// behind the trusted proxy, forwarded clients get separate buckets
+	if code := send("10.0.10.3:1", "198.51.100.7"); code != http.StatusOK {
+		t.Fatalf("first client: status %d", code)
+	}
+	if code := send("10.0.10.3:1", "198.51.100.8"); code != http.StatusOK {
+		t.Fatalf("second client behind the same proxy: status %d, want 200", code)
+	}
+	// addresses the client prepends itself do not buy a fresh bucket
+	if code := send("10.0.10.3:1", "203.0.113.1, 198.51.100.7"); code != http.StatusTooManyRequests {
+		t.Fatalf("client-prepended address: status %d, want 429", code)
+	}
+	// a direct, untrusted peer cannot choose its key with a forged header
+	if code := send("192.0.2.10:1", "198.51.100.9"); code != http.StatusOK {
+		t.Fatalf("direct client: status %d", code)
+	}
+	if code := send("192.0.2.10:1", "198.51.100.10"); code != http.StatusTooManyRequests {
+		t.Fatalf("forged header from an untrusted peer: status %d, want 429", code)
 	}
 }
 

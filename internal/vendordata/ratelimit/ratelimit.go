@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
 )
 
 type bucket struct {
@@ -139,8 +139,9 @@ func (l *Limiter) size() int {
 // the request body, answering 429 with Retry-After when the source's bucket
 // is empty. It rejects a declared body larger than maxBodyBytes with 400 and
 // caps the body of the requests it lets through with http.MaxBytesReader.
-// IPv6 sources are keyed by their /64 prefix, which a single host usually
-// controls entirely.
+// The source is the client address (see clientaddr: the address stored by
+// clientaddr's middleware, else the TCP peer address); IPv6 sources are keyed
+// by their /64 prefix, which a single host usually controls entirely.
 func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (http.Handler, error) {
 	switch {
 	case limiter == nil:
@@ -151,7 +152,7 @@ func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (
 		return nil, errors.New("creating source rate limiter: no handler")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		source := sourceKey(r.RemoteAddr)
+		source := sourceKey(r)
 		if ok, retryAfter := limiter.Allow(source); !ok {
 			// debug level: a flood must not turn into a logging flood
 			slog.DebugContext(r.Context(), "per-source rate limit exceeded", "source", source)
@@ -169,25 +170,20 @@ func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (
 	}), nil
 }
 
-// sourceKey returns the rate-limiting key of a remote address: the IPv4
-// address, or the /64 prefix of an IPv6 address; the address as given if it
-// cannot be parsed.
-func sourceKey(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
+// sourceKey returns the rate-limiting key of a request's client address:
+// the IPv4 address, or the /64 prefix of an IPv6 address; the raw peer
+// address if it cannot be parsed.
+func sourceKey(r *http.Request) string {
+	addr, ok := clientaddr.From(r)
+	if !ok {
+		return r.RemoteAddr
 	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return remoteAddr
-	}
-	addr = addr.Unmap()
 	if addr.Is4() {
 		return addr.String()
 	}
-	prefix, err := addr.WithZone("").Prefix(64)
+	prefix, err := addr.Prefix(64)
 	if err != nil {
-		return remoteAddr
+		return r.RemoteAddr
 	}
 	return prefix.String()
 }

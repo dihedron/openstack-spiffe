@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
@@ -67,6 +68,8 @@ type Signer struct {
 	RateLimitPerSource Rate `yaml:"rate_limit_per_source"`
 	// MaxBodyBytes caps the size of the Nova request body.
 	MaxBodyBytes int64 `yaml:"max_body_bytes"`
+	// ClientAddress configures how the client address is determined.
+	ClientAddress ClientAddress `yaml:"client_address"`
 	// CustomClaims are static claims added to every token.
 	CustomClaims map[string]string `yaml:"custom_claims"`
 	// Tags configures the "tags" claim.
@@ -94,6 +97,18 @@ type KeyStore struct {
 	PublishAhead time.Duration `yaml:"publish_ahead"`
 	// VaultProxyEndpoint is the Vault proxy URL (vault_transit only).
 	VaultProxyEndpoint string `yaml:"vault_proxy_endpoint"`
+}
+
+// ClientAddress configures how the client address, which keys the
+// per-source rate limit, is determined.
+type ClientAddress struct {
+	// TrustedProxies lists the IP addresses or CIDR ranges of the reverse
+	// proxies or load balancers in front of the replicas; empty means the
+	// service is not proxied and the TCP peer address is the client's.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// Header carries the client address set by the trusted proxies
+	// (default: X-Forwarded-For); ignored without trusted proxies.
+	Header string `yaml:"header"`
 }
 
 // Tags configures the "tags" claim.
@@ -183,6 +198,11 @@ func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
 	}
 	cfg.validate(result)
 	cfg.warn(result)
+	if len(cfg.ClientAddress.TrustedProxies) > 0 && cfg.ClientAddress.Header == "" {
+		// defaulted here rather than in defaultSigner, so that warn can tell
+		// an explicitly set (and ignored) header apart
+		cfg.ClientAddress.Header = clientaddr.DefaultHeader
+	}
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
@@ -231,6 +251,17 @@ func (s *Signer) validate(r *Result[Signer]) {
 	}
 	if s.MaxBodyBytes < minMaxBodyBytes || s.MaxBodyBytes > maxMaxBodyBytes {
 		r.errorf(KindRuleViolation, "max_body_bytes", "%d must be between %d and %d", s.MaxBodyBytes, minMaxBodyBytes, maxMaxBodyBytes)
+	}
+	checkList(r, "client_address.trusted_proxies", s.ClientAddress.TrustedProxies)
+	for i, entry := range s.ClientAddress.TrustedProxies {
+		if _, err := clientaddr.ParseTrustedProxy(entry); entry != "" && err != nil {
+			r.errorf(KindRuleViolation, fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%v", err)
+		}
+	}
+	if s.ClientAddress.Header != "" {
+		if err := clientaddr.ValidateHeaderName(s.ClientAddress.Header); err != nil {
+			r.errorf(KindRuleViolation, "client_address.header", "%v", err)
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(s.CustomClaims)) {
 		switch {
@@ -294,6 +325,14 @@ func (s *Signer) warn(r *Result[Signer]) {
 	}
 	if s.KeyStore.VaultProxyEndpoint != "" && s.KeyStore.Backend != BackendVaultTransit {
 		r.warnf("key_store.vault_proxy_endpoint", "ignored by the %q backend", s.KeyStore.Backend)
+	}
+	if s.ClientAddress.Header != "" && len(s.ClientAddress.TrustedProxies) == 0 {
+		r.warnf("client_address.header", "ignored without client_address.trusted_proxies: the TCP peer address is used")
+	}
+	for i, entry := range s.ClientAddress.TrustedProxies {
+		if p, err := clientaddr.ParseTrustedProxy(entry); err == nil && p.Bits() == 0 {
+			r.warnf(fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%q trusts every address: any client can choose its own rate-limiting key", entry)
+		}
 	}
 	if limit := s.RateLimitPerInstance; limit.Events > 0 && time.Duration(limit.Events)*recommendedInstanceRate.Per > limit.Per*time.Duration(recommendedInstanceRate.Events) {
 		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)

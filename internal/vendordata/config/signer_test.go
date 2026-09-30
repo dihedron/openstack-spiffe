@@ -174,6 +174,10 @@ func TestSignerInvalid(t *testing.T) {
 		{"empty allowed user", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"\"]"}, "", "keystone.allowed_users"},
 		{"bare allowed user name", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova\"]"}, "", "keystone.allowed_users[0]"},
 		{"allowed user without domain", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova@\"]"}, "", "keystone.allowed_users[0]"},
+		{"trusted proxy host name", [2]string{}, "client_address:\n  trusted_proxies: [proxy.internal]\n", "client_address.trusted_proxies[0]"},
+		{"trusted proxy bad range", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.0/33]\n", "client_address.trusted_proxies[0]"},
+		{"duplicate trusted proxy", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.1, 10.0.0.1]\n", "client_address.trusted_proxies"},
+		{"invalid client address header", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.1]\n  header: \"X Forwarded\"\n", "client_address.header"},
 		{"empty required role", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  required_role: \"\"\n"}, "", "keystone.required_role"},
 		{"validation cache too long", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  validation_cache_ttl: 11m\n"}, "", "keystone.validation_cache_ttl"},
 		{"nova cache longer than ttl", [2]string{}, "nova_lookup:\n  cache_ttl: 6m\n", "nova_lookup.cache_ttl"},
@@ -210,6 +214,32 @@ func TestSignerAllowedUsersByIDOrQualifiedName(t *testing.T) {
 		"allowed_users: [\"0123456789abcdef0123456789abcdef\", \"svc@example.com@ldap\"]", 1)
 	if _, err := parseSignerString(t, doc); err != nil {
 		t.Fatalf("user ID and qualified name rejected: %v", err)
+	}
+}
+
+func TestSignerClientAddress(t *testing.T) {
+	cfg, err := parseSignerString(t, minimalSigner)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.ClientAddress.TrustedProxies) != 0 || cfg.ClientAddress.Header != "" {
+		t.Fatalf("not proxied by default, got %+v", cfg.ClientAddress)
+	}
+
+	cfg, err = parseSignerString(t, minimalSigner+"client_address:\n  trusted_proxies: [10.0.10.0/24, \"2001:db8::1\"]\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.ClientAddress.Header != "X-Forwarded-For" {
+		t.Fatalf("header %q, want the X-Forwarded-For default with trusted proxies", cfg.ClientAddress.Header)
+	}
+
+	cfg, err = parseSignerString(t, minimalSigner+"client_address:\n  trusted_proxies: [10.0.10.0/24]\n  header: X-Real-IP\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.ClientAddress.Header != "X-Real-IP" {
+		t.Fatalf("header %q, want X-Real-IP", cfg.ClientAddress.Header)
 	}
 }
 

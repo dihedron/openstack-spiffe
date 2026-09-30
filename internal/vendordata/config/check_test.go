@@ -207,6 +207,39 @@ nova_lookup:
 	}
 }
 
+func TestCheckSignerClientAddressWarnings(t *testing.T) {
+	ignored := `tls_cert_path: /tls.crt
+tls_key_path: /tls.key
+replica_id: signer-a
+tags:
+  allowlist: [role]
+keystone:
+  allowed_users: [nova@Default]
+client_address:
+  header: X-Real-IP
+`
+	result := CheckSigner("signer.yaml", []byte(ignored), checkOptions())
+	if len(result.Errors()) != 0 {
+		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
+	}
+	if got, want := keysOf(result.Warnings()), []findingKey{{9, "client_address.header", SeverityWarning, KindRisky}}; !slices.Equal(got, want) {
+		t.Fatalf("warnings %+v, want %+v", got, want)
+	}
+
+	wildcard := strings.Replace(ignored, "  header: X-Real-IP\n", "  trusted_proxies:\n    - 10.0.10.0/24\n    - 0.0.0.0/0\n    - \"::/0\"\n", 1)
+	result = CheckSigner("signer.yaml", []byte(wildcard), checkOptions())
+	if len(result.Errors()) != 0 {
+		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
+	}
+	want := []findingKey{
+		{11, "client_address.trusted_proxies[1]", SeverityWarning, KindRisky},
+		{12, "client_address.trusted_proxies[2]", SeverityWarning, KindRisky},
+	}
+	if got := keysOf(result.Warnings()); !slices.Equal(got, want) {
+		t.Fatalf("warnings %+v, want %+v", got, want)
+	}
+}
+
 func TestCheckAggregatorReportsEverything(t *testing.T) {
 	doc := `tls_cert_path: /c
 tls_key_path: /k

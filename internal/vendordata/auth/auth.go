@@ -15,6 +15,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
 )
 
 // TokenHeader is the header carrying the caller's Keystone token.
@@ -161,10 +163,10 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		case errors.Is(err, ErrMissingToken), errors.Is(err, ErrInvalidToken):
-			slog.WarnContext(ctx, "rejecting unauthenticated request", "remote_addr", r.RemoteAddr, "reason", err)
+			slog.WarnContext(ctx, "rejecting unauthenticated request", "client_address", clientaddr.String(r), "reason", err)
 			status = http.StatusUnauthorized
 		case errors.Is(err, ErrForbidden):
-			slog.WarnContext(ctx, "rejecting unauthorized caller", "user_id", identity.UserID, "reason", err)
+			slog.WarnContext(ctx, "rejecting unauthorized caller", "client_address", clientaddr.String(r), "user_id", identity.UserID, "reason", err)
 			status = http.StatusForbidden
 		default:
 			slog.ErrorContext(ctx, "cannot validate caller token", "error", err)
