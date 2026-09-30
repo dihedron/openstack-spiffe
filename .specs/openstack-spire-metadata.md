@@ -195,10 +195,21 @@ Because Nova calls this service whenever the instance reads its vendordata, the 
 - **Fresh jti**: a new UUID for every token, even for the same instance asking again seconds later; a jti is never reused.
 - **No replay tracking**: enforcing jti uniqueness is the responsibility of the downstream SPIRE Server-side plugin, if it chooses to track it. This service's job is to never issue two tokens with the same jti, not to police reuse downstream.
 - **Two-stage rate limiting**: limits blunt any attempt to use this endpoint to exhaust the signing key store's request budget. The instance ID is only available inside the JSON body, so rate limiting happens in two stages, both answering `429`:
-  1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`: a larger declared `Content-Length` is rejected with `400` at once, and reading an undeclared body stops at the cap), so spam is rejected cheaply without allocating memory for the payload. IPv6 sources are keyed by their /64 prefix, since a single host usually controls a whole /64 and could otherwise bypass the limit by rotating addresses.
+  1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s, keyed by the client address described below) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`: a larger declared `Content-Length` is rejected with `400` at once, and reading an undeclared body stops at the cap), so spam is rejected cheaply without allocating memory for the payload. IPv6 sources are keyed by their /64 prefix, since a single host usually controls a whole /64 and could otherwise bypass the limit by rotating addresses.
   2. **Right after a size-capped decode**: a per-instance-ID token bucket (`rate_limit_per_instance`, default 1/5s: no more than one token every few seconds per instance), before any lookup or signing operation.
 
   A `429` carries a `Retry-After` header. A rate `N/period` allows bursts of up to N requests and refills N tokens per period. Limits are enforced per replica, since replicas share nothing. The number of tracked keys is bounded: buckets that have refilled completely are forgotten, and if the bound is still reached, an arbitrary bucket is evicted (its key starts over with a full bucket), so a flood of distinct sources can neither exhaust memory nor lock out every new source.
+
+### Client address
+
+The client address keys the per-source rate limit and identifies the caller in logs. How it is determined depends on the deployment:
+
+- **Not proxied** (`client_address.trusted_proxies` empty, the default): replicas are reached directly, or through a load balancer that preserves the client's address (e.g. layer-4 pass-through). The client address is the TCP peer address; forwarding headers are ignored, so a client cannot choose its own rate-limiting key.
+- **Proxied** (`client_address.trusted_proxies` lists the addresses or CIDR ranges of the reverse proxies or load balancers in front of the replicas): for a request whose TCP peer is a trusted proxy, the client address is taken from the `client_address.header` header (default `X-Forwarded-For`); for any other peer, the header is ignored and the peer address is used, exactly as when not proxied.
+  - `X-Forwarded-For`, and any header holding a comma-separated list of addresses, is read from the right, skipping the addresses of trusted proxies: the first address that is not a trusted proxy is the client address. Entries further left were supplied by the client and are never trusted. Several `X-Forwarded-For` headers count as one list, in order.
+  - Any other header (e.g. `X-Real-IP`) must hold a single address, set by the trusted proxy.
+  - If the header is missing, empty or malformed, or holds only trusted proxies, the client address is the proxy's own address (logged at debug level), so such requests share the proxy's bucket instead of escaping the limit.
+  - The proxies must set or append the header themselves, and the replicas must only be reachable through them; otherwise the per-source limit can be bypassed.
 
 ## API surface
 
@@ -238,6 +249,9 @@ token_ttl_seconds: 300                                  # at most 300
 rate_limit_per_instance: "1/5s"
 rate_limit_per_source: "200/1s"
 max_body_bytes: 262144
+client_address:
+  trusted_proxies: ["10.0.10.0/24"]                     # default: none (not proxied)
+  header: "X-Forwarded-For"                             # used only for trusted proxies
 custom_claims:                                          # static string claims, no reserved names
   country: "italy"
 tags:
@@ -285,10 +299,10 @@ openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--
 
 - **Complete report**: all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.
 - **Unknown keys** are errors and carry a "did you mean ...?" suggestion when a known key is close (e.g. `rate_limt_per_instance`).
-- **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring `nova_lookup`, `allowed_users` entries that are neither user IDs nor `name@domain`, ...) are errors.
+- **Invalid values** (wrong types, malformed durations or rates) and **rule violations** (ranges, required values, reserved custom claim names, enrichment requiring `nova_lookup`, `allowed_users` entries that are neither user IDs nor `name@domain`, `trusted_proxies` entries that are neither IP addresses nor CIDR ranges, an empty or invalid `client_address.header`, ...) are errors.
 - **Cross-file consistency**: when an aggregator file is given, each signer's `key_store.publish_ahead` must exceed the aggregator's `poll_interval` plus `fetch_timeout` (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's `stale_key_retention` must be at least each signer's token TTL (always true, since the aggregator itself requires at least the maximum token TTL). `replica_id` must be unique across all signer files.
 - **File checks** (skippable with `--skip-files`): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles parse. A certificate expiring within 30 days and a private key readable by group or others are warnings.
-- **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s.
+- **Warnings** flag valid but risky settings: instance verification disabled, no tags allowlist, keys ignored by the selected backend, `client_address.header` set without `trusted_proxies` (ignored), `trusted_proxies` covering every address (e.g. `0.0.0.0/0` or `::/0`, which lets any client choose its rate-limiting key), `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s.
 - **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
 - The services refuse to start on any error and log warnings at startup.
 
@@ -330,12 +344,13 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 - Keystone token validation accepts the allowlisted service user carrying the required role and rejects arbitrary user tokens (`401`/`403`).
 - Full request against the key store backend (real or fully mocked): request in, valid signed JWT out, signature verifiable against the JWKS endpoint's own output.
 - Rate limiting: the middleware answers `429` without reading the body; a burst from one instance ID gets `429` after the configured threshold, while a different instance ID is unaffected.
+- Client address: without trusted proxies, a forged `X-Forwarded-For` does not change the rate-limiting key; behind a trusted proxy, clients with different forwarded addresses get separate buckets, while addresses prepended by the client itself are ignored.
 - End-to-end with two signer replicas and one aggregator: a token from either replica verifies against the aggregated JWKS by kid. Key rotation drill: after a rotation, tokens signed just before it still verify, and new tokens carry the new kid, which the aggregate publishes before its first use.
 
 ## Build, packaging, deployment
 
 - A standalone HTTP service written in Go, for consistency with the SPIRE plugins of the companion specs.
-- Deployed close to the Nova control plane's network segment, since `nova-api-metadata` must reach it on every vendordata request; its availability is coupled to that of the metadata service. It runs as several share-nothing signer replicas behind a load balancer (the target of Nova's DynamicJSON configuration), plus one or more JWKS aggregator instances behind their own load balancer (the endpoint of the SPIRE Server-side plugin).
+- Deployed close to the Nova control plane's network segment, since `nova-api-metadata` must reach it on every vendordata request; its availability is coupled to that of the metadata service. It runs as several share-nothing signer replicas behind a load balancer (the target of Nova's DynamicJSON configuration), plus one or more JWKS aggregator instances behind their own load balancer (the endpoint of the SPIRE Server-side plugin). The signer's load balancer either preserves client addresses, or is listed in `client_address.trusted_proxies` and forwards them in `client_address.header` (see client address).
 - No private key material is ever written to the deployment host's disk. The only secrets the service holds locally are its client credentials (Keystone `OS_*` variables, and the Vault credentials once `vault_transit` exists); they come from the platform's standard secret-injection mechanism, never baked into the image.
 - Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
 
