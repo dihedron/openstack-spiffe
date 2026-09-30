@@ -31,6 +31,8 @@ A complete solution providing all needed components to implement SPIFFE on OpenS
 make                       # or: go build ./cmd/openstack-spire-vendordata
 ```
 
+`make go-snapshot` builds release artifacts in `dist/` with goreleaser. Each application gets its own archive and its own `deb`, `rpm` and `apk` packages: `openstack-spire-vendordata` (which also installs the sample configurations under `/etc/openstack-spire-vendordata/`), `openstack-server-plugin` and `openstack-agent-plugin`.
+
 ### Configure
 
 Annotated samples are in [examples/](examples): [signer.yaml](examples/signer.yaml), [aggregator.yaml](examples/aggregator.yaml), [signer.env](examples/signer.env) (credentials) and [nova.conf](examples/nova.conf). Unknown keys are errors, so typos never go unnoticed. Validate the files before every rollout:

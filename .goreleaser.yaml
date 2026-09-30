@@ -148,16 +148,51 @@ builds:
       - -X '{{.Env._GO_MK_VARS_METADATA_PACKAGE}}.GoReleaserVersion={{.Env._GORELEASER_VERSION}}'
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+# one archive per application
 archives:
-  - id: openstack-spiffe
+  - id: openstack-spire-vendordata
     ids:
       - openstack-spire-vendordata
-      - openstack-agent-plugin
+    formats:
+      - tar.gz
+    name_template: >-
+      openstack-spire-vendordata_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}{{ .Arm }}{{ end }}
+      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+  - id: openstack-server-plugin
+    ids:
       - openstack-server-plugin
     formats:
       - tar.gz
     name_template: >-
-      {{ .ProjectName }}_
+      openstack-server-plugin_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}{{ .Arm }}{{ end }}
+      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+  - id: openstack-agent-plugin
+    ids:
+      - openstack-agent-plugin
+    formats:
+      - tar.gz
+    name_template: >-
+      openstack-agent-plugin_
       {{- .Version }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
@@ -198,23 +233,30 @@ upx:
     # Whether to try all methods and filters (slow).
     #brute: true
 
+# one system package per application, each installing only its own binary
+# (and, for the vendordata issuer, its sample configurations)
 nfpms:
-  - id: openstack-spiffe
-    package_name: openstack-spiffe
-    homepage: "https://github.com/dihedron"
-    maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
+  - id: openstack-spire-vendordata
+    package_name: openstack-spire-vendordata
+    ids:
+      - openstack-spire-vendordata
     description: |
-      openstack-spiffe implements SPIFFE for OpenStack workloads: the
-      openstack-spire-vendordata instance identity token issuer and JWKS
-      aggregator, and the openstack_iid SPIRE agent and server plugins.
+      Instance identity token issuer for SPIFFE on OpenStack: a Nova
+      DynamicJSON vendordata target minting short-lived signed JWTs that
+      prove an instance's project and ID, and the JWKS aggregator serving
+      their verification keys to SPIRE Server.
+    homepage: "https://github.com/dihedron/openstack-spiffe"
+    maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
     vendor: "Andrea Funtò"
     license: "AGPL-3.0"
     formats:
       - rpm
       - deb
       - apk
-    ids:
-      - openstack-spiffe
+    epoch: "1"
+    release: "1"
+    section: default
+    priority: "optional"
     contents:
       - src: ./examples/signer.yaml
         dst: /etc/openstack-spire-vendordata/signer.yaml
@@ -222,6 +264,40 @@ nfpms:
       - src: ./examples/aggregator.yaml
         dst: /etc/openstack-spire-vendordata/aggregator.yaml
         type: config|noreplace
+  - id: openstack-server-plugin
+    package_name: openstack-server-plugin
+    ids:
+      - openstack-server-plugin
+    description: |
+      SPIRE Server node attestor plugin (openstack_iid) verifying the
+      instance identity tokens issued by openstack-spire-vendordata.
+    homepage: "https://github.com/dihedron/openstack-spiffe"
+    maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
+    vendor: "Andrea Funtò"
+    license: "AGPL-3.0"
+    formats:
+      - rpm
+      - deb
+      - apk
+    epoch: "1"
+    release: "1"
+    section: default
+    priority: "optional"
+  - id: openstack-agent-plugin
+    package_name: openstack-agent-plugin
+    ids:
+      - openstack-agent-plugin
+    description: |
+      SPIRE Agent node attestor plugin (openstack_iid) presenting the
+      instance identity token found in the OpenStack vendor data.
+    homepage: "https://github.com/dihedron/openstack-spiffe"
+    maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
+    vendor: "Andrea Funtò"
+    license: "AGPL-3.0"
+    formats:
+      - rpm
+      - deb
+      - apk
     epoch: "1"
     release: "1"
     section: default
@@ -244,7 +320,8 @@ nfpms:
 
 source:
   enabled: true
-  name_template: "{{ .ProjectName }}_{{ .Version }}_source.tar.gz"
+  # the archive extension is appended by goreleaser
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
 
 changelog:
   sort: asc
