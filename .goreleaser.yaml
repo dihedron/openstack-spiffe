@@ -150,7 +150,7 @@ builds:
 
 archives:
   - id: openstack-spiffe
-    builds:
+    ids:
       - openstack-spire-vendordata
       - openstack-agent-plugin
       - openstack-server-plugin
@@ -177,7 +177,7 @@ upx:
     enabled: false
 
     # Filter by build ID.
-    ids: [midpoint]
+    ids: [openstack-spire-vendordata, openstack-agent-plugin, openstack-server-plugin]
 
     # Filter by GOOS.
     goos: [linux, windows]
@@ -204,9 +204,11 @@ nfpms:
     homepage: "https://github.com/dihedron"
     maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
     description: |
-      openstack-spiffe is a command line tool to manage OpenStack SPIFFE identities.
+      openstack-spiffe implements SPIFFE for OpenStack workloads: the
+      openstack-spire-vendordata instance identity token issuer and JWKS
+      aggregator, and the openstack_iid SPIRE agent and server plugins.
     vendor: "Andrea Funtò"
-    license: "MIT"
+    license: "AGPL-3.0"
     formats:
       - rpm
       - deb
@@ -214,12 +216,12 @@ nfpms:
     ids:
       - openstack-spiffe
     contents:
-      - src: ./{{.ProjectName}}.conf
-        dst: /etc/{{.ProjectName}}.conf
-        type: config
-        expand: true
-    scripts:
-      postinstall: ./postinstall.sh
+      - src: ./examples/signer.yaml
+        dst: /etc/openstack-spire-vendordata/signer.yaml
+        type: config|noreplace
+      - src: ./examples/aggregator.yaml
+        dst: /etc/openstack-spire-vendordata/aggregator.yaml
+        type: config|noreplace
     epoch: "1"
     release: "1"
     section: default
@@ -228,16 +230,17 @@ nfpms:
 # MSI packaging is a GoReleaser Pro feature.
 # If you have GoReleaser Pro, you can uncomment the following section.
 # packagers:
-#   - id: midpoint-msi
+#   - id: openstack-spiffe-msi
 #     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 #     builds:
-#       - midpoint
+#       - openstack-spire-vendordata
 #     extra_files:
-#       - src: ./midpoint.conf
+#       - src: ./examples/signer.yaml
+#       - src: ./examples/aggregator.yaml
 #     upgrade_code: "53c6e944-a35a-4e67-b3b9-8c9e7a8a0a3a"
 #     msi:
-#       component_id: midpoint
-#       directory_id: midpoint
+#       component_id: openstack-spiffe
+#       directory_id: openstack-spiffe
 
 source:
   enabled: true
