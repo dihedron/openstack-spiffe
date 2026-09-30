@@ -9,6 +9,7 @@ import (
 
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/novalookup"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
@@ -165,12 +166,9 @@ func defaultSigner() *Signer {
 			ProjectCacheTTL:    10 * time.Minute,
 		},
 		NovaLookup: NovaLookup{
-			Enabled:  true,
-			CacheTTL: time.Minute,
-			AllowedStatuses: []string{
-				"ACTIVE", "BUILD", "REBOOT", "HARD_REBOOT", "REBUILD", "RESIZE",
-				"VERIFY_RESIZE", "MIGRATING", "PASSWORD",
-			},
+			Enabled:         true,
+			CacheTTL:        time.Minute,
+			AllowedStatuses: novalookup.DefaultAllowedStatuses(),
 		},
 	}
 }

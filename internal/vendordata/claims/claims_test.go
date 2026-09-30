@@ -268,7 +268,7 @@ func TestBuilderBuild(t *testing.T) {
 
 	req := validRequest()
 	req.Metadata["count"] = 3.0
-	claims, err := b.Build(context.Background(), req)
+	claims, err := b.Build(context.Background(), req, Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestBuilderFreshJTIPerToken(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for range 100 {
-		claims, err := b.Build(context.Background(), validRequest())
+		claims, err := b.Build(context.Background(), validRequest(), Enrichment{})
 		if err != nil {
 			t.Fatalf("Build: %v", err)
 		}
@@ -321,7 +321,7 @@ func TestBuilderRejectsInvalidRequest(t *testing.T) {
 	b := fixedBuilder(t, time.Now())
 	req := validRequest()
 	req.InstanceID = "bogus"
-	if _, err := b.Build(context.Background(), req); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := b.Build(context.Background(), req, Enrichment{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Build error = %v, want ErrInvalidRequest", err)
 	}
 }
@@ -329,7 +329,7 @@ func TestBuilderRejectsInvalidRequest(t *testing.T) {
 func TestBuilderDoesNotAliasRequestMetadata(t *testing.T) {
 	b := fixedBuilder(t, time.Now())
 	req := validRequest()
-	claims, err := b.Build(context.Background(), req)
+	claims, err := b.Build(context.Background(), req, Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestBuilderAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBuilder: %v", err)
 	}
-	claims, err := b.Build(context.Background(), validRequest())
+	claims, err := b.Build(context.Background(), validRequest(), Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestBuilderCustomClaims(t *testing.T) {
 	}
 	custom["country"] = "changed" // the builder must hold its own copy
 
-	claims, err := b.Build(context.Background(), validRequest())
+	claims, err := b.Build(context.Background(), validRequest(), Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestBuilderCustomClaims(t *testing.T) {
 		t.Fatalf("custom claims = %v, want country=italy", claims.Custom)
 	}
 	claims.Custom["country"] = "tampered" // tokens must not share the map
-	again, err := b.Build(context.Background(), validRequest())
+	again, err := b.Build(context.Background(), validRequest(), Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestBuilderCustomClaims(t *testing.T) {
 }
 
 func TestBuilderWithoutCustomClaims(t *testing.T) {
-	claims, err := fixedBuilder(t, time.Now()).Build(context.Background(), validRequest())
+	claims, err := fixedBuilder(t, time.Now()).Build(context.Background(), validRequest(), Enrichment{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -415,5 +415,25 @@ func TestNewBuilderRejectsReservedCustomClaims(t *testing.T) {
 	}
 	if _, err := NewBuilder(WithCustomClaims(map[string]string{"": "x"})); !errors.Is(err, iid.ErrInvalidCustomClaim) {
 		t.Errorf("NewBuilder with empty custom claim name: err = %v, want ErrInvalidCustomClaim", err)
+	}
+}
+
+func TestBuildAddsEnrichment(t *testing.T) {
+	b := fixedBuilder(t, time.Now())
+	enrichment := Enrichment{AvailabilityZone: "az-1", Flavor: "m1.small", UserID: "u1", ProjectName: "web", DomainID: "default"}
+	claims, err := b.Build(context.Background(), validRequest(), enrichment)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if claims.AvailabilityZone != "az-1" || claims.Flavor != "m1.small" || claims.UserID != "u1" ||
+		claims.ProjectName != "web" || claims.DomainID != "default" {
+		t.Fatalf("enrichment not applied: %+v", claims)
+	}
+	plain, err := b.Build(context.Background(), validRequest(), Enrichment{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if plain.AvailabilityZone != "" || plain.Flavor != "" || plain.UserID != "" || plain.ProjectName != "" || plain.DomainID != "" {
+		t.Fatalf("enrichment claims set without enrichment: %+v", plain)
 	}
 }

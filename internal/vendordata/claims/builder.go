@@ -87,10 +87,22 @@ func NewBuilder(options ...Option) (*Builder, error) {
 	return b, nil
 }
 
+// Enrichment holds the optional enrichment claims, looked up from Nova and
+// Keystone after the request has been verified; empty fields are omitted
+// from the token.
+type Enrichment struct {
+	AvailabilityZone string
+	Flavor           string
+	UserID           string
+	ProjectName      string
+	DomainID         string
+}
+
 // Build validates the request and returns the corresponding claims. Every
-// claim value comes from the request, the clock, the ID generator or the
-// operator-configured custom claims; nothing else can influence the result.
-func (b *Builder) Build(ctx context.Context, req NovaRequest) (iid.Claims, error) {
+// claim value comes from the request, the clock, the ID generator, the
+// operator-configured custom claims or the enrichment looked up from Nova
+// and Keystone; nothing else can influence the result.
+func (b *Builder) Build(ctx context.Context, req NovaRequest, enrichment Enrichment) (iid.Claims, error) {
 	if err := req.Validate(); err != nil {
 		slog.WarnContext(ctx, "rejecting invalid nova request", "project_id", req.ProjectID, "instance_id", req.InstanceID, "error", err)
 		return iid.Claims{}, fmt.Errorf("building claims: %w", err)
@@ -115,5 +127,11 @@ func (b *Builder) Build(ctx context.Context, req NovaRequest) (iid.Claims, error
 		Hostname:   req.Hostname,
 		Tags:       tags,
 		Custom:     maps.Clone(b.custom),
+
+		AvailabilityZone: enrichment.AvailabilityZone,
+		Flavor:           enrichment.Flavor,
+		UserID:           enrichment.UserID,
+		ProjectName:      enrichment.ProjectName,
+		DomainID:         enrichment.DomainID,
 	}, nil
 }

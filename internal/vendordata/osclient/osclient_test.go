@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dihedron/openstack-spiffe/internal/vendordata/keystonetest"
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/openstacktest"
 )
 
 func getenv(env map[string]string) func(string) string {
@@ -94,7 +94,7 @@ func TestCredentialsFromEnvRejects(t *testing.T) {
 }
 
 func TestNewAuthenticatesWithPassword(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	creds, err := CredentialsFromEnv(getenv(ks.Env()))
 	if err != nil {
 		t.Fatalf("CredentialsFromEnv: %v", err)
@@ -115,8 +115,42 @@ func TestNewAuthenticatesWithPassword(t *testing.T) {
 	}
 }
 
+func TestComputeFromCatalog(t *testing.T) {
+	ks := openstacktest.New(t)
+	env := ks.Env()
+	env["OS_REGION_NAME"] = openstacktest.Region
+	creds, err := CredentialsFromEnv(getenv(env))
+	if err != nil {
+		t.Fatalf("CredentialsFromEnv: %v", err)
+	}
+	c, err := New(context.Background(), creds, ks.CAFile(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	compute, err := c.Compute()
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if want := ks.URL + "/compute/v2.1/"; compute.Endpoint != want {
+		t.Fatalf("compute endpoint %q, want %q", compute.Endpoint, want)
+	}
+	if compute.Microversion != "2.47" {
+		t.Fatalf("microversion %q, want 2.47", compute.Microversion)
+	}
+
+	env["OS_REGION_NAME"] = "RegionTwo"
+	creds, _ = CredentialsFromEnv(getenv(env))
+	c, err = New(context.Background(), creds, ks.CAFile(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Compute(); err == nil {
+		t.Fatal("found a compute endpoint in a region without one")
+	}
+}
+
 func TestNewAuthenticatesWithApplicationCredential(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	creds, err := CredentialsFromEnv(getenv(ks.AppCredentialEnv()))
 	if err != nil {
 		t.Fatalf("CredentialsFromEnv: %v", err)
@@ -127,7 +161,7 @@ func TestNewAuthenticatesWithApplicationCredential(t *testing.T) {
 }
 
 func TestNewFailures(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	creds, err := CredentialsFromEnv(getenv(ks.Env()))
 	if err != nil {
 		t.Fatalf("CredentialsFromEnv: %v", err)

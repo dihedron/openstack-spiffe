@@ -10,22 +10,22 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
-	"github.com/dihedron/openstack-spiffe/internal/vendordata/keystonetest"
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/openstacktest"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/osclient"
 )
 
 var (
-	novaUser = keystonetest.User{
+	novaUser = openstacktest.User{
 		ID: "0123456789abcdef0123456789abcdef", Name: "nova", DomainID: "default", DomainName: "Default",
 		Roles: []string{"service"},
 	}
-	aliceUser = keystonetest.User{
+	aliceUser = openstacktest.User{
 		ID: "fedcba9876543210fedcba9876543210", Name: "alice", DomainID: "default", DomainName: "Default",
 		Roles: []string{"member"},
 	}
 )
 
-func newKeystoneValidator(t *testing.T, ks *keystonetest.Server) *auth.KeystoneValidator {
+func newKeystoneValidator(t *testing.T, ks *openstacktest.Server) *auth.KeystoneValidator {
 	t.Helper()
 	env := ks.Env()
 	creds, err := osclient.CredentialsFromEnv(func(name string) string { return env[name] })
@@ -48,7 +48,7 @@ func newKeystoneValidator(t *testing.T, ks *keystonetest.Server) *auth.KeystoneV
 }
 
 func TestKeystoneValidatorReportsIdentity(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	v := newKeystoneValidator(t, ks)
 	expires := time.Now().Add(time.Hour).Truncate(time.Microsecond)
 	token := ks.IssueToken(novaUser, expires)
@@ -64,7 +64,7 @@ func TestKeystoneValidatorReportsIdentity(t *testing.T) {
 }
 
 func TestKeystoneValidatorErrors(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	v := newKeystoneValidator(t, ks)
 	ctx := context.Background()
 
@@ -92,7 +92,7 @@ func TestKeystoneValidatorErrors(t *testing.T) {
 }
 
 func TestKeystoneValidatorReauthenticates(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	v := newKeystoneValidator(t, ks)
 	token := ks.IssueToken(novaUser, time.Now().Add(time.Hour))
 
@@ -109,7 +109,7 @@ func TestKeystoneValidatorReauthenticates(t *testing.T) {
 // the allowlisted service user carrying the required role is accepted, and
 // arbitrary user tokens are rejected.
 func TestMiddlewareAgainstKeystone(t *testing.T) {
-	ks := keystonetest.New(t)
+	ks := openstacktest.New(t)
 	a, err := auth.NewAuthenticator(newKeystoneValidator(t, ks), []string{"nova@Default"}, "service")
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)

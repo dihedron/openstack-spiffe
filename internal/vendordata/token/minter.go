@@ -27,7 +27,7 @@ const signAttempts = 2
 
 // ClaimsBuilder builds the claim set of a token; *claims.Builder implements it.
 type ClaimsBuilder interface {
-	Build(ctx context.Context, req claims.NovaRequest) (iid.Claims, error)
+	Build(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (iid.Claims, error)
 }
 
 // Minter issues signed openstack_iid tokens. It holds no key material: every
@@ -50,12 +50,13 @@ func NewMinter(keys keystore.KeyStore, builder ClaimsBuilder) (*Minter, error) {
 	return &Minter{keys: keys, builder: builder}, nil
 }
 
-// Mint builds the claims for the request and returns them as a compact JWS
+// Mint builds the claims for the request (with the enrichment claims looked
+// up for it, if any) and returns them as a compact JWS
 // signed with the key store's active key, whose kid is in the header. It
 // never returns a token alongside an error: invalid requests fail with
 // claims.ErrInvalidRequest, key store failures with ErrKeyStoreUnavailable.
-func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest) (string, error) {
-	c, err := m.builder.Build(ctx, req)
+func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (string, error) {
+	c, err := m.builder.Build(ctx, req, enrichment)
 	if err != nil {
 		return "", fmt.Errorf("minting token: %w", err)
 	}

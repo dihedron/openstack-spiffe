@@ -69,7 +69,8 @@ The request is made by `nova-api-metadata`, not by the user who booted the insta
 
 - `OS_AUTH_URL`, https only;
 - either `OS_USERNAME` or `OS_USER_ID` with `OS_USER_DOMAIN_NAME`/`_ID`, `OS_PASSWORD` and a project scope (`OS_PROJECT_NAME` with `OS_PROJECT_DOMAIN_NAME`/`_ID`, or `OS_PROJECT_ID`);
-- or an application credential (`OS_APPLICATION_CREDENTIAL_ID` or `_NAME`, and `_SECRET`).
+- or an application credential (`OS_APPLICATION_CREDENTIAL_ID` or `_NAME`, and `_SECRET`);
+- optionally `OS_REGION_NAME` and `OS_INTERFACE` (`public`, `internal` or `admin`; default `public`), which select the catalog endpoints used for instance verification.
 
 The service user needs the permission to validate other users' tokens (by default the `service` or `admin` role), and re-authenticates when its own token expires.
 
@@ -136,8 +137,10 @@ Any mismatch is rejected with `403` and logged; no token is issued.
 - Only control-plane-authoritative attributes are offered. User-controlled server attributes (name, tags, key pair) are deliberately not, since they carry no more trust than metadata.
 - Compute host and hypervisor names are deliberately not offered: the token is readable from inside the guest (`vendor_data2.json`) and would disclose the physical layout to tenants.
 - The enrichment claim names are reserved: custom claims cannot use them.
-- **Caching**: to protect nova-api and Keystone during boot storms, server records are cached per instance ID for at most `nova_lookup.cache_ttl` (default 60s, never more than the token TTL, since the availability zone can change on migration or resize); project records are cached for `keystone.project_cache_ttl` (default 10m).
-- **Failure**: if Nova or Keystone cannot be reached, the request is rejected with `503`. The service never issues a token with missing enrichment claims, or with enrichment claims staler than the TTL.
+- **Lookups**: the Nova endpoint is taken from the service catalog (selected by `OS_REGION_NAME` and `OS_INTERFACE`, default `public`), and server records are requested with compute microversion 2.47, so that they embed the flavor's original name. Keystone is reached at `OS_AUTH_URL`. Each lookup is bounded by a timeout (5s).
+- **Caching**: to protect nova-api and Keystone during boot storms, server records are cached per instance ID for at most `nova_lookup.cache_ttl` (default 60s, never more than the token TTL, since the availability zone can change on migration or resize); project records are cached for `keystone.project_cache_ttl` (default 10m). The cached record is still checked against each request. Caches are bounded in size, failures are not cached, and concurrent lookups of the same record are merged into a single request.
+- **Unknown project**: if a Keystone lookup finds no project with the request's `project-id`, the request is rejected with `403`, like an instance mismatch.
+- **Failure**: if Nova or Keystone cannot be reached, the request is rejected with `503`. The service never issues a token with missing enrichment claims, or with enrichment claims staler than the TTL: an enabled attribute that is empty in the record (e.g. the availability zone of an instance not scheduled yet) is also rejected with `503`, so that Nova retries on the instance's next metadata read.
 
 ## Signing key management
 
@@ -316,8 +319,8 @@ openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--
 | Token user not in `keystone.allowed_users` or lacking `keystone.required_role` | Reject with `403`, do not sign, log the user ID (never the token) |
 | Keystone unreachable while authenticating the caller | Reject with `503` |
 | Per-instance rate limit exceeded | Reject with `429` before any lookup or signing |
-| Instance not found, owned by another project, or in a disallowed status | Reject with `403`, do not sign, log the mismatch |
-| Nova API / Keystone unreachable during verification or enrichment | Reject with `503` |
+| Instance not found, owned by another project, or in a disallowed status; project not found | Reject with `403`, do not sign, log the mismatch |
+| Nova API / Keystone unreachable during verification or enrichment, or an enabled enrichment attribute missing from the record | Reject with `503` |
 | Key store / Vault proxy unreachable | Reject with `503`; Nova omits this target from the metadata response, and the instance retries on its next metadata poll |
 | Signing fails for any other reason (e.g. a custom claim colliding with a reserved name) | Reject with `500` |
 

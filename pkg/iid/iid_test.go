@@ -208,3 +208,31 @@ func TestEnrichmentClaims(t *testing.T) {
 		t.Fatalf("EnrichmentClaims() exposes internal state")
 	}
 }
+
+func TestEnrichmentClaimsJSON(t *testing.T) {
+	claims := Claims{
+		Subject: "i", Tags: map[string]string{},
+		AvailabilityZone: "az-1", Flavor: "m1.small", UserID: "u1", ProjectName: "web", DomainID: "default",
+	}
+	data, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(data, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, name := range EnrichmentClaims() {
+		if _, ok := generic[name]; !ok {
+			t.Fatalf("enrichment claim %q missing from %s", name, data)
+		}
+	}
+	var back Claims
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal into Claims: %v", err)
+	}
+	if back.AvailabilityZone != "az-1" || back.Flavor != "m1.small" || back.UserID != "u1" ||
+		back.ProjectName != "web" || back.DomainID != "default" || len(back.Custom) != 0 {
+		t.Fatalf("round trip mismatch: %+v", back)
+	}
+}

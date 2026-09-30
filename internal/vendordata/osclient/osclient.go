@@ -196,6 +196,21 @@ func New(ctx context.Context, creds Credentials, caCertPath string) (*Client, er
 	}, nil
 }
 
+// ComputeMicroversion is the Nova API microversion the service requests:
+// 2.47 embeds the flavor's original name in server records.
+const ComputeMicroversion = "2.47"
+
+// Compute returns a Nova client for the catalog's compute endpoint (selected
+// by OS_REGION_NAME and OS_INTERFACE), using ComputeMicroversion.
+func (c *Client) Compute() (*gophercloud.ServiceClient, error) {
+	compute, err := openstack.NewComputeV2(c.provider, c.endpoints)
+	if err != nil {
+		return nil, fmt.Errorf("creating compute v2 client: %w", err)
+	}
+	compute.Microversion = ComputeMicroversion
+	return compute, nil
+}
+
 // Identity returns a Keystone v3 client for the endpoint the service
 // authenticated with (OS_AUTH_URL), not the catalog's.
 func (c *Client) Identity() (*gophercloud.ServiceClient, error) {

@@ -62,6 +62,21 @@ type Claims struct {
 	Hostname string `json:"hostname"`
 	// Tags holds the filtered, string-only instance metadata.
 	Tags map[string]string `json:"tags"`
+	// AvailabilityZone is the instance's availability zone (optional
+	// enrichment claim, from the Nova server record).
+	AvailabilityZone string `json:"availability_zone,omitempty"`
+	// Flavor is the name of the instance's flavor (optional enrichment
+	// claim, from the Nova server record).
+	Flavor string `json:"flavor,omitempty"`
+	// UserID is the ID of the user who booted the instance (optional
+	// enrichment claim, from the Nova server record).
+	UserID string `json:"user_id,omitempty"`
+	// ProjectName is the name of the project owning the instance (optional
+	// enrichment claim, from Keystone).
+	ProjectName string `json:"project_name,omitempty"`
+	// DomainID is the ID of the domain of the project owning the instance
+	// (optional enrichment claim, from Keystone).
+	DomainID string `json:"domain_id,omitempty"`
 	// Custom holds the operator-configured static claims, serialized as
 	// top-level claims. Custom claims must not use reserved names: issuers
 	// must check them with ValidateCustomClaims; in addition, marshaling
