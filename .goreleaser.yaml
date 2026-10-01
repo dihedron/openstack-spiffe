@@ -26,14 +26,14 @@ builds:
     binary: openstack-spire-vendordata
     goos:
       - linux
-      - windows
-      - darwin
+#      - windows
+#      - darwin
     goarch:
       - amd64
       - arm64
     goamd64:
-      - v1
-      - v2
+#      - v1
+#      - v2
       - v3
     tags:
       - osusergo
@@ -68,14 +68,14 @@ builds:
     binary: openstack-server-plugin
     goos:
       - linux
-      - windows
-      - darwin
+#      - windows
+#      - darwin
     goarch:
       - amd64
       - arm64
     goamd64:
-      - v1
-      - v2
+ #     - v1
+ #     - v2
       - v3
     tags:
       - osusergo
@@ -110,14 +110,14 @@ builds:
     binary: openstack-agent-plugin
     goos:
       - linux
-      - windows
-      - darwin
+#      - windows
+#      - darwin
     goarch:
       - amd64
       - arm64
     goamd64:
-      - v1
-      - v2
+ #     - v1
+ #     - v2
       - v3
     tags:
       - osusergo

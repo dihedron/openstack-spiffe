@@ -120,7 +120,7 @@ go-snapshot: ## perform a snapshot build using goreleaser
 	_GO_MK_VARS_METADATA_PACKAGE="${_GO_MK_VARS_METADATA_PACKAGE}" \
 	_GO_MK_VARS_DOTENV_VAR_NAME="${_GO_MK_VARS_DOTENV_VAR_NAME}" \
 	_GORELEASER_VERSION=${_GORELEASER_VERSION} \
-	goreleaser release --snapshot --clean
+	goreleaser release --snapshot --skip=publish --clean
 
 #
 # create a goreleaser development build (single platform)
