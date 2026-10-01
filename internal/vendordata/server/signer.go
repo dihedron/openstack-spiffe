@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/dihedron/openstack-spiffe/internal/vendordata/aggregator"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/attest"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/auth"
 	"github.com/dihedron/openstack-spiffe/internal/vendordata/claims"
@@ -30,6 +31,7 @@ import (
 type Signer struct {
 	cfg       *config.Signer
 	keys      *keystore.Ephemeral
+	peers     *aggregator.Aggregator // nil without peers
 	readiness *health.Readiness
 	handler   http.Handler
 }
@@ -38,9 +40,10 @@ type Signer struct {
 // service's authenticated OpenStack client, and generates its first key.
 //
 // Routes: POST /attest behind the per-source limit and body cap and the
-// Keystone authentication; GET /.well-known/jwks.json, /liveness and
-// /readiness unauthenticated. The client address is resolved, and a request
-// ID assigned, before anything else.
+// Keystone authentication; GET /jwks/local.json (the replica's own keys),
+// /.well-known/jwks.json (the own keys merged with the peers', or the own keys
+// alone without peers), /liveness and /readiness unauthenticated. The client
+// address is resolved, and a request ID assigned, before anything else.
 func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client) (*Signer, error) {
 	if cfg == nil || client == nil {
 		return nil, errors.New("creating signer: missing configuration or OpenStack client")
@@ -118,7 +121,11 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
-	jwksHandler, err := jwks.NewHandler(keys)
+	localHandler, err := jwks.NewHandler(keys)
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+	peers, mergedHandler, err := newPeerAggregation(cfg, keys, localHandler)
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
@@ -133,13 +140,15 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 
 	mux := http.NewServeMux()
 	mux.Handle("/attest", protected)
-	mux.Handle("/.well-known/jwks.json", jwksHandler)
+	mux.Handle("/jwks/local.json", localHandler)
+	mux.Handle("/.well-known/jwks.json", mergedHandler)
 	mux.Handle("/liveness", health.Liveness())
 	mux.Handle("/readiness", readiness)
 
 	return &Signer{
 		cfg:       cfg,
 		keys:      keys,
+		peers:     peers,
 		readiness: readiness,
 		handler:   requestid.Middleware(resolver.Middleware(mux)),
 	}, nil
@@ -150,10 +159,42 @@ func (s *Signer) Run(ctx context.Context) error {
 	return run(ctx, s.cfg.ListenAddr, s.Serve)
 }
 
-// Serve serves HTTPS on the listener (see serve) and runs the key rotation
-// and readiness loops, until the context ends.
+// Serve serves HTTPS on the listener (see serve) and runs the key rotation,
+// readiness and (with peers) peer polling loops, until the context ends.
 func (s *Signer) Serve(ctx context.Context, ln net.Listener) error {
+	loops := []func(context.Context) error{s.keys.Run, s.readiness.Run}
+	if s.peers != nil {
+		loops = append(loops, s.peers.Run)
+	}
 	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath, s.cfg.MinTLSVersion(),
 		[]any{"component", "signer", "replica_id", s.cfg.ReplicaID},
-		s.keys.Run, s.readiness.Run)
+		loops...)
+}
+
+// newPeerAggregation returns the peer aggregator and the handler of the
+// merged JWK Set. Without peers, there is no aggregator and the merged set is
+// the local one, served by the same handler. Peers are deliberately not a
+// readiness check: the merged set always holds the replica's own keys, and a
+// peer outage must not take the replica out of Nova's load balancer.
+func newPeerAggregation(cfg *config.Signer, keys jwks.KeySource, local http.Handler) (*aggregator.Aggregator, http.Handler, error) {
+	if !cfg.Peers.Enabled() {
+		return nil, local, nil
+	}
+	client, err := aggregator.NewHTTPClient(cfg.Peers.CACertPath, cfg.MinTLSVersion())
+	if err != nil {
+		return nil, nil, fmt.Errorf("peers: %w", err)
+	}
+	peers, err := aggregator.New(cfg.Peers.URLs, client,
+		aggregator.WithPollInterval(cfg.Peers.PollInterval),
+		aggregator.WithFetchTimeout(cfg.Peers.FetchTimeout),
+		aggregator.WithStaleKeyRetention(cfg.Peers.StaleKeyRetention),
+		aggregator.WithLocal(keys))
+	if err != nil {
+		return nil, nil, fmt.Errorf("peers: %w", err)
+	}
+	merged, err := jwks.NewHandler(peers, jwks.WithMaxAge(cfg.Peers.CacheMaxAge))
+	if err != nil {
+		return nil, nil, fmt.Errorf("peers: %w", err)
+	}
+	return peers, merged, nil
 }

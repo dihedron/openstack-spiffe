@@ -3,6 +3,10 @@
 // signs with its own keys, so the merged set must hold every replica's keys;
 // it fails closed on conflicts and keeps an unreachable replica's keys for a
 // while, so that in-flight tokens keep verifying during short outages.
+//
+// The same merging serves both the standalone JWKS aggregator and the peer
+// aggregation of a signer replica, which merges its own keys (a local key
+// source, see WithLocal) with those of its peers.
 package aggregator
 
 import (
@@ -32,6 +36,9 @@ import (
 // maxResponseBytes caps a replica's JWKS response: a replica publishes a
 // handful of keys, a few KiB at most.
 const maxResponseBytes = 1 << 20
+
+// localSourceName identifies the local key source in logs.
+const localSourceName = "local key store"
 
 // privateMembers are the JWK members holding private key material (RFC 7518,
 // sections 6.2.2, 6.3.2 and 6.4.1).
@@ -82,6 +89,7 @@ type Aggregator struct {
 	fetchTimeout time.Duration
 	retention    time.Duration
 	now          func() time.Time
+	local        jwks.KeySource
 
 	mu       sync.RWMutex
 	replicas []*replicaState
@@ -104,6 +112,14 @@ func WithFetchTimeout(d time.Duration) Option {
 // successful fetch are served (default: iid.TTL).
 func WithStaleKeyRetention(d time.Duration) Option {
 	return func(a *Aggregator) { a.retention = d }
+}
+
+// WithLocal merges the keys of a local source (a signer replica's own key
+// store) with the replicas' keys. They are read live on every call to
+// PublicKeys, never fetched over HTTP, and take part in conflict detection;
+// if the source fails, PublicKeys fails rather than serve a partial set.
+func WithLocal(source jwks.KeySource) Option {
+	return func(a *Aggregator) { a.local = source }
 }
 
 // WithClock sets the source of the current time (default: time.Now).
@@ -179,6 +195,14 @@ func (a *Aggregator) poll(ctx context.Context) {
 	}
 	wg.Wait()
 
+	var local []keystore.PublicKey
+	if a.local != nil {
+		var err error
+		if local, err = a.local.PublicKeys(ctx); err != nil {
+			slog.WarnContext(ctx, "cannot read the local keys to check them for conflicts", "error", err)
+		}
+	}
+
 	a.mu.Lock()
 	now := a.now()
 	for i, r := range a.replicas {
@@ -195,11 +219,11 @@ func (a *Aggregator) poll(ctx context.Context) {
 			r.keys, r.lastSuccess, r.fetched, r.failing = o.keys, now, true, false
 		}
 	}
-	_, conflicts := a.merge(now)
+	_, conflicts := a.merge(now, local)
 	a.mu.Unlock()
 
-	for kid, replicas := range conflicts {
-		slog.ErrorContext(ctx, "replicas publish different keys under the same kid: kid excluded", "kid", kid, "replicas", replicas)
+	for kid, sources := range conflicts {
+		slog.ErrorContext(ctx, "replicas publish different keys under the same kid: kid excluded", "kid", kid, "replicas", sources)
 	}
 }
 
@@ -263,16 +287,23 @@ func (a *Aggregator) fetch(ctx context.Context, replica string) ([]keystore.Publ
 	return keys, nil
 }
 
-// PublicKeys returns the merged keys of the replicas fetched successfully
-// within the stale key retention, sorted by kid, without any kid published
-// with different key material.
+// PublicKeys returns the merged keys of the local source, if any, and of the
+// replicas fetched successfully within the stale key retention, sorted by
+// kid, without any kid published with different key material.
 func (a *Aggregator) PublicKeys(ctx context.Context) ([]keystore.PublicKey, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var local []keystore.PublicKey
+	if a.local != nil {
+		var err error
+		if local, err = a.local.PublicKeys(ctx); err != nil {
+			return nil, fmt.Errorf("reading local keys: %w", err)
+		}
+	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	keys, _ := a.merge(a.now())
+	keys, _ := a.merge(a.now(), local)
 	return keys, nil
 }
 
@@ -300,11 +331,16 @@ func (a *Aggregator) current(r *replicaState, now time.Time) bool {
 	return r.fetched && now.Sub(r.lastSuccess) < a.retention
 }
 
-// merge returns the merged keys at now and the excluded kids, each with the
-// replicas publishing it; callers must hold the lock.
-func (a *Aggregator) merge(now time.Time) ([]keystore.PublicKey, map[string][]string) {
+// merge returns the merged keys at now, local ones included, and the
+// excluded kids, each with the sources publishing it; callers must hold the
+// lock.
+func (a *Aggregator) merge(now time.Time, local []keystore.PublicKey) ([]keystore.PublicKey, map[string][]string) {
 	byKid := map[string][]keystore.PublicKey{}
 	sources := map[string][]string{}
+	for _, k := range local {
+		byKid[k.ID] = append(byKid[k.ID], k)
+		sources[k.ID] = append(sources[k.ID], localSourceName)
+	}
 	for _, r := range a.replicas {
 		if !a.current(r, now) {
 			continue

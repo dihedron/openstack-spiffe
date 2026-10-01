@@ -75,7 +75,7 @@ func startAggregator(t *testing.T, extra string, replicas ...*fakeReplica) *aggr
 	}
 	doc := fmt.Sprintf("listen_addr: 127.0.0.1:0\ntls_cert_path: %s\ntls_key_path: %s\nreplica_ca_cert_path: %s\npoll_interval: 1s\nfetch_timeout: 500ms\nreplicas:\n", certPath, keyPath, ca)
 	for _, r := range replicas {
-		doc += "  - " + r.URL + "/.well-known/jwks.json\n"
+		doc += "  - " + r.URL + "/jwks/local.json\n"
 	}
 	doc += extra
 	result := config.CheckAggregator("aggregator.yaml", []byte(doc), config.CheckOptions{})

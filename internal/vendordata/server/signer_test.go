@@ -90,6 +90,12 @@ type harness struct {
 // OpenStack cloud.
 func start(t *testing.T, extra string) *harness {
 	t.Helper()
+	return startWith(t, extra, publishAhead)
+}
+
+// startWith is start with a given key_store.publish_ahead.
+func startWith(t *testing.T, extra string, publishAhead time.Duration) *harness {
+	t.Helper()
 	cloud := openstacktest.New(t)
 	cloud.AddInstance(openstacktest.Instance{
 		ID: instanceID, ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az-1", FlavorName: "m1.small",

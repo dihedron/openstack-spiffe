@@ -15,15 +15,20 @@ A complete solution providing all needed components to implement SPIFFE on OpenS
                             ▼                       ▼
                    signer replica A         signer replica B     ── Keystone (token validation, projects)
                    own in-memory keys       own in-memory keys   ── Nova API (instance verification)
-                            │ GET /.well-known/jwks.json │
-                            └──────────┬────────────────┘
-                                       ▼
-                               JWKS aggregator(s)  ◀── GET /.well-known/jwks.json ── SPIRE Server
+                            │◀── GET /jwks/local.json ─▶│   with peers: each replica polls the others
+                            │                          │
+      with peers: SPIRE Server ── GET /.well-known/jwks.json ──▶ any replica (own + peers' keys)
+   without peers: SPIRE Server ── GET /.well-known/jwks.json ──▶ JWKS aggregator(s),
+                                                                 polling every GET /jwks/local.json
 ```
 
 - **Signer replicas** (`service start`) are Nova's DynamicJSON vendordata target. For each request they authenticate Nova's service token against Keystone, verify the instance against the Nova API (it exists, belongs to the stated project, and is in an allowed status), and return `{"openstack_iid": {"jwt": "…"}}`. Nova places this in the instance's `vendor_data2.json`.
 - Each replica **signs with its own in-memory keys** (RSA-2048 or P-256), which are rotated on a schedule and on every restart and never written to disk. Key IDs have the form `<date>-<replica-id>-key-<n>`, so they never collide across replicas.
-- The **JWKS aggregator** (`jwks aggregate`) polls every replica's public keys and serves the merged set, which is what the SPIRE Server fetches. A replica publishes each new key `publish_ahead` before using it, so the aggregate always knows a kid before any token carries it.
+- Every replica serves its own public keys on `/jwks/local.json`. The SPIRE Server needs the **merged set** of all replicas' keys, which can be served in two ways:
+  - **Peered signers**: each replica lists the others under `peers` in its configuration, polls their `/jwks/local.json` and serves its own keys merged with theirs on `/.well-known/jwks.json`. Three replicas are then three token minters and three JWKS aggregators, with nothing else to deploy.
+  - **JWKS aggregator** (`jwks aggregate`): a separate service polls every replica's `/jwks/local.json` and serves the merged set. Use it when the SPIRE Server must not reach the Nova-facing network.
+
+  Without peers, a replica's `/.well-known/jwks.json` serves the same keys as its `/jwks/local.json`. A replica publishes each new key `publish_ahead` before using it, so every merged set knows a kid before any token carries it.
 
 ### Build
 
@@ -41,7 +46,7 @@ Annotated samples are in [examples/](examples): [signer.yaml](examples/signer.ya
 openstack-spire-vendordata config check --signer signer-a.yaml --signer signer-b.yaml --aggregator aggregator.yaml
 ```
 
-The command reports every problem in one run, each with its line, and applies the same rules the services apply at startup. That includes checks across files, such as unique `replica_id`s and `publish_ahead` against the aggregator's timing, and checks on the files referenced (certificates and keys exist, match and have not expired; CA bundles parse). It exits with 0 when the files are valid, 1 on errors (or on warnings with `--strict`), and 2 when a file cannot be read. Use `--format json|yaml` for CI and `--print-effective` to see the defaults applied.
+The command reports every problem in one run, each with its line, and applies the same rules the services apply at startup. That includes checks across files, such as unique `replica_id`s and `publish_ahead` against the aggregator's timing (and, within each signer file, against its peers' timing), and checks on the files referenced (certificates and keys exist, match and have not expired; CA bundles parse). It exits with 0 when the files are valid, 1 on errors (or on warnings with `--strict`), and 2 when a file cannot be read. Use `--format json|yaml` for CI and `--print-effective` to see the defaults applied.
 
 ### OpenStack setup
 
@@ -67,7 +72,7 @@ Like the other OpenStack service users, it typically gets the `admin` role in th
 ```bash
 set -a; . /run/secrets/signer.env; set +a      # or your platform's secret injection
 openstack-spire-vendordata service start --config /etc/openstack-spire-vendordata/signer.yaml
-openstack-spire-vendordata jwks aggregate --config /etc/openstack-spire-vendordata/aggregator.yaml
+openstack-spire-vendordata jwks aggregate --config /etc/openstack-spire-vendordata/aggregator.yaml   # only without peers
 ```
 
 Both services perform a pre-flight check at startup. They refuse to start (exit code 1) on any configuration error, on problems with the referenced files, and, for the signer, on missing credentials or a failed Keystone authentication. Both shut down gracefully on `SIGINT`/`SIGTERM`, giving in-flight requests up to 15 seconds.
@@ -75,7 +80,7 @@ Both services perform a pre-flight check at startup. They refuse to start (exit 
 **Probes.**
 - `/liveness` returns 200 while the process is serving.
 - `/readiness` returns 200 only when every dependency check passed recently. The checks run every 5 seconds and are:
-  - signer: `key_store`, `keystone`, and `nova` when instance verification is enabled;
+  - signer: `key_store`, `keystone`, and `nova` when instance verification is enabled (peers are deliberately not checked: a replica always serves its own keys, and a peer outage must not take it out of Nova's load balancer);
   - aggregator: `replicas`.
 - A freshly started signer stays not ready until its first key has been published for `publish_ahead`.
 - Route traffic on readiness. A missed token during an instance's first boot can break SPIRE-dependent units on that instance, so alert on readiness failures.
@@ -86,9 +91,9 @@ Both services perform a pre-flight check at startup. They refuse to start (exit 
 
 ### Tuning
 
-- **`publish_ahead` must exceed the aggregator's `poll_interval + fetch_timeout`.** The defaults are 2m against 30s + 5s. If it is too short, a token could carry a kid the aggregate does not serve yet, and SPIRE Server would reject the token until its next fetch. `config check --aggregator` enforces this rule.
+- **`publish_ahead` must exceed `poll_interval + fetch_timeout + cache_max_age`** of the peers and of the aggregator. The defaults are 2m against 30s + 5s + 30s. If it is too short, a token could carry a kid the merged set (or the SPIRE Server's cached copy of it) does not serve yet, and SPIRE Server would reject the token until its next fetch. `config check` enforces this rule: for the peers within each signer file, for the aggregator with `--aggregator`.
 - **`rotation_interval`** (default 24h) bounds how long any single key is used. Restarting a replica also replaces its key: that is the remedy if a key may have been compromised.
-- **`stale_key_retention`** (default 5m, at least the token TTL) keeps a briefly unreachable replica's keys in the aggregate, so its in-flight tokens keep verifying.
-- **`cache_max_age`** (default 30s) is how long consumers may cache the aggregate. The SPIRE Server-side plugin must select keys by the JWT header kid and re-fetch the set, rate-limited, when it meets an unknown kid.
+- **`stale_key_retention`** (default 5m, at least the token TTL; `peers.stale_key_retention` for peers) keeps a briefly unreachable replica's keys in the merged set, so its in-flight tokens keep verifying.
+- **`cache_max_age`** (default 30s; `peers.cache_max_age` for peers) is how long consumers may cache the merged set. The SPIRE Server-side plugin must select keys by the JWT header kid and re-fetch the set, rate-limited, when it meets an unknown kid.
 - **Rate limits** apply per replica: `rate_limit_per_source` (200/1s) is applied before the request body is read, and `rate_limit_per_instance` (1/5s) right after it is decoded. If the replicas sit behind a proxy or load balancer that hides client addresses, list it in `client_address.trusted_proxies` so that the per-source limit applies to the real client, which the proxy reports in `X-Forwarded-For`.
-- **Deployment.** Run several signer replicas, each with a unique `replica_id`, behind a load balancer close to the Nova control plane, and one or more aggregators behind their own load balancer.
+- **Deployment.** Run several signer replicas, each with a unique `replica_id`, behind a load balancer close to the Nova control plane. Either list every other replica under `peers.urls` in each replica's configuration (always their `/jwks/local.json`: `config check` rejects a peer's `/.well-known/jwks.json`, which would make keys circulate between replicas) and point the SPIRE Server at the replicas' `/.well-known/jwks.json`, or run one or more aggregators behind their own load balancer. A replica missing from a peer list is silently missing from that replica's merged set.

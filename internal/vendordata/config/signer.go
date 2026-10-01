@@ -86,6 +86,8 @@ type Signer struct {
 	// Enrich lists the optional enrichment claims to add (see
 	// iid.EnrichmentClaims).
 	Enrich []string `yaml:"enrich"`
+	// Peers configures peer aggregation of the replicas' keys.
+	Peers Peers `yaml:"peers"`
 }
 
 // KeyStore configures the signing keys.
@@ -97,7 +99,8 @@ type KeyStore struct {
 	// RotationInterval is how long a key stays active.
 	RotationInterval time.Duration `yaml:"rotation_interval"`
 	// PublishAhead is how long a new key is published before it is used; it
-	// must exceed the JWKS aggregator's poll interval.
+	// must exceed the poll interval, fetch timeout and cache max-age of the
+	// peers and of the JWKS aggregator combined.
 	PublishAhead time.Duration `yaml:"publish_ahead"`
 	// VaultProxyEndpoint is the Vault proxy URL (vault_transit only).
 	VaultProxyEndpoint string `yaml:"vault_proxy_endpoint"`
@@ -174,6 +177,7 @@ func defaultSigner() *Signer {
 			CacheTTL:        time.Minute,
 			AllowedStatuses: novalookup.DefaultAllowedStatuses(),
 		},
+		Peers: defaultPeers(),
 	}
 }
 
@@ -208,6 +212,7 @@ func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
+		checkCABundle(result, "peers.ca_cert_path", cfg.Peers.CACertPath)
 	}
 	return result
 }
@@ -319,6 +324,16 @@ func (s *Signer) validate(r *Result[Signer]) {
 			r.errorf(KindRuleViolation, path, "%q requires nova_lookup.enabled", claim)
 		}
 	}
+
+	s.Peers.validate(r)
+	if s.Peers.Enabled() {
+		window := publicationWindow(s.Peers.PollInterval, s.Peers.FetchTimeout, s.Peers.CacheMaxAge)
+		if s.KeyStore.PublishAhead <= window {
+			r.errorf(KindRuleViolation, "key_store.publish_ahead",
+				"%v must exceed peers.poll_interval + peers.fetch_timeout + peers.cache_max_age (%v): otherwise a peer's merged JWKS may not serve a kid before its first use",
+				s.KeyStore.PublishAhead, window)
+		}
+	}
 }
 
 // warn flags valid but risky settings.
@@ -343,4 +358,5 @@ func (s *Signer) warn(r *Result[Signer]) {
 	if limit := s.RateLimitPerInstance; limit.Events > 0 && time.Duration(limit.Events)*recommendedInstanceRate.Per > limit.Per*time.Duration(recommendedInstanceRate.Events) {
 		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)
 	}
+	s.Peers.warn(r)
 }

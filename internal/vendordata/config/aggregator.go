@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
@@ -20,10 +21,12 @@ type Aggregator struct {
 	// TLSMinVersion is the minimum TLS version ("1.2" or "1.3") of the HTTPS
 	// server and of the connections to the replicas.
 	TLSMinVersion string `yaml:"tls_min_version"`
-	// Replicas lists the JWKS URLs of the signer replicas.
+	// Replicas lists the local JWKS URLs (/jwks/local.json) of the signer
+	// replicas.
 	Replicas []string `yaml:"replicas"`
-	// PollInterval is how often each replica is polled; it must be shorter
-	// than the replicas' key_store.publish_ahead.
+	// PollInterval is how often each replica is polled; with fetch_timeout
+	// and cache_max_age, it must be shorter than the replicas'
+	// key_store.publish_ahead.
 	PollInterval time.Duration `yaml:"poll_interval"`
 	// FetchTimeout bounds each replica fetch.
 	FetchTimeout time.Duration `yaml:"fetch_timeout"`
@@ -58,6 +61,7 @@ func CheckAggregator(file string, data []byte, opts CheckOptions) *Result[Aggreg
 	}
 	result.Config = cfg
 	cfg.validate(result)
+	cfg.warn(result)
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "replica_ca_cert_path", cfg.ReplicaCACertPath)
@@ -82,27 +86,16 @@ func (a *Aggregator) validate(r *Result[Aggregator]) {
 	if len(a.Replicas) == 0 {
 		r.errorf(KindRuleViolation, "replicas", "must list at least one replica JWKS URL")
 	}
-	checkList(r, "replicas", a.Replicas)
+	checkJWKSURLs(r, "replicas", a.Replicas)
+	checkPolling(r, "", a.PollInterval, a.FetchTimeout, a.StaleKeyRetention, a.CacheMaxAge)
+}
+
+// warn flags valid but risky settings.
+func (a *Aggregator) warn(r *Result[Aggregator]) {
 	for i, replica := range a.Replicas {
-		path := fmt.Sprintf("replicas[%d]", i)
-		u, err := url.Parse(replica)
-		switch {
-		case err != nil:
-			r.errorf(KindRuleViolation, path, "%q is not a valid URL: %v", replica, err)
-		case u.Scheme != "https" || u.Host == "":
-			r.errorf(KindRuleViolation, path, "%q must be an https URL with a host", replica)
+		if u, err := url.Parse(replica); err == nil && strings.HasSuffix(u.Path, mergedJWKSPath) {
+			r.warnf(fmt.Sprintf("replicas[%d]", i),
+				"%q is a replica's merged JWKS: with peers it also carries the peers' keys, imported twice and dropped late; poll /jwks/local.json instead", replica)
 		}
-	}
-	if a.PollInterval <= 0 {
-		r.errorf(KindRuleViolation, "poll_interval", "%v must be positive", a.PollInterval)
-	}
-	if a.FetchTimeout <= 0 || a.FetchTimeout >= a.PollInterval {
-		r.errorf(KindRuleViolation, "fetch_timeout", "%v must be positive and shorter than poll_interval (%v)", a.FetchTimeout, a.PollInterval)
-	}
-	if a.StaleKeyRetention < iid.TTL {
-		r.errorf(KindRuleViolation, "stale_key_retention", "%v must be at least the maximum token TTL (%v)", a.StaleKeyRetention, iid.TTL)
-	}
-	if a.CacheMaxAge < 0 || a.CacheMaxAge%time.Second != 0 {
-		r.errorf(KindRuleViolation, "cache_max_age", "%v must be a non-negative whole number of seconds", a.CacheMaxAge)
 	}
 }

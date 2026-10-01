@@ -13,13 +13,13 @@ import (
 )
 
 // KeySource provides the public keys to serve; keystore.KeyStore implements
-// it, and so will the aggregator's merged set.
+// it, and so does the aggregator's merged set.
 type KeySource interface {
 	PublicKeys(ctx context.Context) ([]keystore.PublicKey, error)
 }
 
 // Handler serves a KeySource as a JSON Web Key Set, typically at
-// /.well-known/jwks.json. The content is read from the source on every
+// /jwks/local.json or /.well-known/jwks.json. The content is read from the source on every
 // request, so rotations are published without any further step.
 type Handler struct {
 	source       KeySource
@@ -31,8 +31,9 @@ type Option func(*Handler) error
 
 // WithMaxAge lets clients and intermediaries cache the set for the given
 // whole number of seconds ("Cache-Control: public, max-age=N"). Zero, the
-// default, sends "Cache-Control: no-cache", as signer replicas must: a cached
-// replica set could hide a key published ahead from the aggregator.
+// default, sends "Cache-Control: no-cache", as a replica's own key set must
+// be served: a cached copy could hide a key published ahead from its peers
+// and aggregators.
 func WithMaxAge(d time.Duration) Option {
 	return func(h *Handler) error {
 		if d < 0 || d%time.Second != 0 {

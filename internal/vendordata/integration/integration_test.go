@@ -1,9 +1,11 @@
-// Package integration runs the whole system end to end: two signer replicas
-// and one JWKS aggregator, over TLS on loopback listeners, against a fake
-// OpenStack control plane. It checks the acceptance criteria that only hold
-// for the system as a whole: tokens from either replica verify against the
-// aggregated JWKS by kid, every kid is published by the aggregator before
-// its first use, and tokens signed before a rotation keep verifying after it.
+// Package integration runs the whole system end to end, over TLS on loopback
+// listeners, against a fake OpenStack control plane, in both topologies: two
+// signer replicas and one JWKS aggregator, and three signer replicas listing
+// each other as peers, without aggregator. It checks the acceptance criteria
+// that only hold for the system as a whole: tokens from any replica verify by
+// kid against every merged JWKS the SPIRE Server may use, every kid is
+// published there before its first use, and tokens signed before a rotation
+// keep verifying after it.
 package integration
 
 import (
@@ -41,8 +43,9 @@ import (
 
 const (
 	projectID = "f3c9a1d2b4e54a6b8c7d9e0f1a2b3c4d"
-	// publishAhead exceeds the aggregator's poll_interval + fetch_timeout
-	// (300ms + 200ms), as the cross-file check requires.
+	// publishAhead exceeds the poll_interval + fetch_timeout + cache_max_age
+	// (300ms + 200ms + 0s) of the aggregator and of the peers, as the
+	// configuration checks require.
 	publishAhead = 1500 * time.Millisecond
 	// rotationInterval is far below the 5-minute minimum of the
 	// configuration, so that the drill completes in seconds; it is the only
@@ -55,12 +58,29 @@ var novaUser = openstacktest.User{
 	Roles: []string{"service"},
 }
 
+// topology selects how the replicas' keys are merged for the SPIRE Server.
+type topology struct {
+	name     string
+	replicas []string
+	// peers makes every replica list the others as peers; otherwise a
+	// standalone aggregator polls them.
+	peers bool
+}
+
+var topologies = []topology{
+	{name: "signers plus aggregator", replicas: []string{"signer-a", "signer-b"}},
+	{name: "peered signers", replicas: []string{"signer-a", "signer-b", "signer-c"}, peers: true},
+}
+
 // system is a running deployment.
 type system struct {
-	cloud      *openstacktest.Server
-	client     *http.Client
-	signers    map[string]string // replica ID -> base URL
-	aggregator string            // base URL
+	cloud   *openstacktest.Server
+	client  *http.Client
+	signers map[string]string // replica ID -> base URL
+	// merged lists the merged JWK Set URLs the SPIRE Server may fetch: the
+	// aggregator's, or every peered replica's.
+	merged     []string
+	aggregator string // base URL, empty without aggregator
 	novaToken  string
 }
 
@@ -115,19 +135,22 @@ func listen(t *testing.T) net.Listener {
 	return ln
 }
 
-// start deploys two signer replicas and an aggregator polling them.
-func start(t *testing.T) *system {
+// start deploys the topology's signer replicas, plus an aggregator polling
+// them unless they are peered.
+func start(t *testing.T, topo topology) *system {
 	t.Helper()
 	cloud := openstacktest.New(t)
 	cloud.AddProject(openstacktest.Project{ID: projectID, Name: "web", DomainID: "default"})
 	certPath, keyPath, pool := writeTLS(t)
 
-	replicaIDs := []string{"signer-a", "signer-b"}
-	listeners := map[string]net.Listener{"signer-a": listen(t), "signer-b": listen(t)}
-	aggListener := listen(t)
+	listeners := map[string]net.Listener{}
+	for _, id := range topo.replicas {
+		listeners[id] = listen(t)
+	}
+	localURL := func(id string) string { return "https://" + listeners[id].Addr().String() + "/jwks/local.json" }
 
 	var signerResults []*config.Result[config.Signer]
-	for _, id := range replicaIDs {
+	for _, id := range topo.replicas {
 		doc := fmt.Sprintf(`listen_addr: %s
 tls_cert_path: %s
 tls_key_path: %s
@@ -142,41 +165,62 @@ keystone:
   ca_cert_path: %s
 enrich: [availability_zone, project_name]
 `, listeners[id].Addr(), certPath, keyPath, id, publishAhead, cloud.CAFile(t))
+		if topo.peers {
+			doc += fmt.Sprintf("peers:\n  ca_cert_path: %s\n  poll_interval: 300ms\n  fetch_timeout: 200ms\n  cache_max_age: 0s\n  urls:\n", certPath)
+			for _, peer := range topo.replicas {
+				if peer != id {
+					doc += "    - " + localURL(peer) + "\n"
+				}
+			}
+		}
 		signerResults = append(signerResults, config.CheckSigner(id+".yaml", []byte(doc), config.CheckOptions{}))
 	}
-	aggDoc := fmt.Sprintf(`listen_addr: %s
+	var aggResult *config.Result[config.Aggregator]
+	var aggListener net.Listener
+	if !topo.peers {
+		aggListener = listen(t)
+		aggDoc := fmt.Sprintf(`listen_addr: %s
 tls_cert_path: %s
 tls_key_path: %s
 replica_ca_cert_path: %s
 poll_interval: 300ms
 fetch_timeout: 200ms
+cache_max_age: 0s
 replicas:
-  - https://%s/.well-known/jwks.json
-  - https://%s/.well-known/jwks.json
-`, aggListener.Addr(), certPath, keyPath, certPath, listeners["signer-a"].Addr(), listeners["signer-b"].Addr())
-	aggResult := config.CheckAggregator("aggregator.yaml", []byte(aggDoc), config.CheckOptions{})
+`, aggListener.Addr(), certPath, keyPath, certPath)
+		for _, id := range topo.replicas {
+			aggDoc += "  - " + localURL(id) + "\n"
+		}
+		aggResult = config.CheckAggregator("aggregator.yaml", []byte(aggDoc), config.CheckOptions{})
+		if err := aggResult.Err(); err != nil {
+			t.Fatalf("configuration: %v", err)
+		}
+	}
 	config.CrossCheck(signerResults, aggResult)
-	for _, r := range append([]error{aggResult.Err()}, signerResults[0].Err(), signerResults[1].Err()) {
-		if r != nil {
-			t.Fatalf("configuration: %v", r)
+	for _, r := range signerResults {
+		if err := r.Err(); err != nil {
+			t.Fatalf("configuration: %v", err)
+		}
+		if len(r.Findings) != 0 {
+			t.Fatalf("configuration warnings: %v", r.Findings)
 		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 3)
+	servers := len(topo.replicas)
+	done := make(chan error, servers+1)
 	sys := &system{
-		cloud:      cloud,
-		client:     &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: 10 * time.Second},
-		signers:    map[string]string{},
-		aggregator: "https://" + aggListener.Addr().String(),
-		novaToken:  cloud.IssueToken(novaUser, time.Now().Add(time.Hour)),
+		cloud:     cloud,
+		client:    &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: 10 * time.Second},
+		signers:   map[string]string{},
+		novaToken: cloud.IssueToken(novaUser, time.Now().Add(time.Hour)),
 	}
 	env := cloud.Env()
 	creds, err := osclient.CredentialsFromEnv(func(name string) string { return env[name] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, id := range replicaIDs {
+	for i, id := range topo.replicas {
 		cfg := signerResults[i].Config
 		cfg.KeyStore.RotationInterval = rotationInterval
 		client, err := osclient.New(ctx, creds, cfg.Keystone.CACertPath)
@@ -189,17 +233,25 @@ replicas:
 		}
 		ln := listeners[id]
 		sys.signers[id] = "https://" + ln.Addr().String()
+		if topo.peers {
+			sys.merged = append(sys.merged, sys.signers[id]+"/.well-known/jwks.json")
+		}
 		go func() { done <- signer.Serve(ctx, ln) }()
 	}
-	agg, err := server.NewAggregator(aggResult.Config)
-	if err != nil {
-		t.Fatalf("NewAggregator: %v", err)
+	if aggResult != nil {
+		agg, err := server.NewAggregator(aggResult.Config)
+		if err != nil {
+			t.Fatalf("NewAggregator: %v", err)
+		}
+		sys.aggregator = "https://" + aggListener.Addr().String()
+		sys.merged = append(sys.merged, sys.aggregator+"/.well-known/jwks.json")
+		servers++
+		go func() { done <- agg.Serve(ctx, aggListener) }()
 	}
-	go func() { done <- agg.Serve(ctx, aggListener) }()
 
 	t.Cleanup(func() {
 		cancel()
-		for range 3 {
+		for range servers {
 			select {
 			case err := <-done:
 				if err != nil {
@@ -248,27 +300,39 @@ func (s *system) attest(t *testing.T, replica, token, instance string) (int, str
 	return resp.StatusCode, vd.Target.JWT
 }
 
-// aggregated fetches the aggregator's JWK Set, by kid.
-func (s *system) aggregated(t *testing.T) map[string]keystore.PublicKey {
+// keysAt fetches the JWK Set at url, by kid.
+func (s *system) keysAt(t *testing.T, url string) map[string]keystore.PublicKey {
 	t.Helper()
-	resp, err := s.client.Get(s.aggregator + "/.well-known/jwks.json")
+	resp, err := s.client.Get(url)
 	if err != nil {
-		t.Fatalf("fetching the aggregated JWKS: %v", err)
+		t.Fatalf("fetching %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 	var set jwks.Set
 	if err := json.UnmarshalRead(resp.Body, &set); err != nil {
-		t.Fatalf("decoding the aggregated JWKS: %v", err)
+		t.Fatalf("decoding %s: %v", url, err)
 	}
 	keys := map[string]keystore.PublicKey{}
 	for _, k := range set.Keys {
 		pub, err := k.PublicKey()
 		if err != nil {
-			t.Fatalf("aggregated key %s: %v", k.KeyID, err)
+			t.Fatalf("key %s at %s: %v", k.KeyID, url, err)
 		}
 		keys[k.KeyID] = pub
 	}
 	return keys
+}
+
+// verifyEverywhere verifies the token against every merged JWK Set the SPIRE
+// Server may fetch, and returns its header and claims.
+func (s *system) verifyEverywhere(t *testing.T, jwt string) (iid.Header, iid.Claims) {
+	t.Helper()
+	var header iid.Header
+	var claims iid.Claims
+	for _, url := range s.merged {
+		header, claims = verify(t, jwt, s.keysAt(t, url))
+	}
+	return header, claims
 }
 
 // verify checks the token against the keys by its header kid, as the SPIRE
@@ -292,13 +356,13 @@ func verify(t *testing.T, jwt string, keys map[string]keystore.PublicKey) (iid.H
 	}
 	key, ok := keys[header.KeyID]
 	if !ok {
-		t.Fatalf("kid %q is not in the aggregated JWKS", header.KeyID)
+		t.Fatalf("kid %q is not in the merged JWKS", header.KeyID)
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	sig := decode(parts[2])
 	r, sVal := new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])
 	if !ecdsa.Verify(key.Key.(*ecdsa.PublicKey), digest[:], r, sVal) {
-		t.Fatalf("token signed with %s does not verify against the aggregated JWKS", header.KeyID)
+		t.Fatalf("token signed with %s does not verify against the merged JWKS", header.KeyID)
 	}
 	var c iid.Claims
 	if err := json.Unmarshal(decode(parts[1]), &c); err != nil {
@@ -308,8 +372,8 @@ func verify(t *testing.T, jwt string, keys map[string]keystore.PublicKey) (iid.H
 }
 
 // mint obtains a token from a replica for a fresh instance, waiting for the
-// replica's first key if needed, and checks that the aggregator already
-// publishes its kid: a token must never carry a kid the aggregated JWKS
+// replica's first key if needed, and checks that every merged JWK Set
+// already publishes its kid: a token must never carry a kid the merged JWKS
 // cannot serve yet.
 func (s *system) mint(t *testing.T, replica string) (string, iid.Header, iid.Claims) {
 	t.Helper()
@@ -317,7 +381,7 @@ func (s *system) mint(t *testing.T, replica string) (string, iid.Header, iid.Cla
 	for {
 		status, jwt := s.attest(t, replica, s.novaToken, s.newInstance())
 		if status == http.StatusOK {
-			header, claims := verify(t, jwt, s.aggregated(t))
+			header, claims := s.verifyEverywhere(t, jwt)
 			return jwt, header, claims
 		}
 		if status != http.StatusServiceUnavailable || time.Now().After(deadline) {
@@ -331,7 +395,13 @@ func TestEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end test with key rotation takes several seconds")
 	}
-	s := start(t)
+	for _, topo := range topologies {
+		t.Run(topo.name, func(t *testing.T) { testEndToEnd(t, topo) })
+	}
+}
+
+func testEndToEnd(t *testing.T, topo topology) {
+	s := start(t, topo)
 
 	t.Run("required negative test", func(t *testing.T) {
 		for replica := range s.signers {
@@ -343,11 +413,16 @@ func TestEndToEnd(t *testing.T) {
 
 	var tokenA string
 	var headerA iid.Header
-	t.Run("tokens from either replica verify against the aggregate", func(t *testing.T) {
+	t.Run("tokens from every replica verify against every merged set", func(t *testing.T) {
 		var hb iid.Header
 		var ca, cb iid.Claims
 		tokenA, headerA, ca = s.mint(t, "signer-a")
 		_, hb, cb = s.mint(t, "signer-b")
+		for _, id := range topo.replicas[2:] {
+			if _, h, _ := s.mint(t, id); !strings.Contains(h.KeyID, "-"+id+"-key-") {
+				t.Fatalf("kid %q does not name %s", h.KeyID, id)
+			}
+		}
 		if !strings.Contains(headerA.KeyID, "-signer-a-key-") || !strings.Contains(hb.KeyID, "-signer-b-key-") {
 			t.Fatalf("kids %q and %q do not name their replicas", headerA.KeyID, hb.KeyID)
 		}
@@ -392,11 +467,27 @@ func TestEndToEnd(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 		}
 		// the token signed before the rotation still verifies
-		verify(t, tokenA, s.aggregated(t))
+		s.verifyEverywhere(t, tokenA)
+	})
+
+	t.Run("local sets never carry peer keys", func(t *testing.T) {
+		for id, base := range s.signers {
+			for kid := range s.keysAt(t, base+"/jwks/local.json") {
+				if !strings.Contains(kid, "-"+id+"-key-") {
+					t.Fatalf("%s/jwks/local.json serves %s", id, kid)
+				}
+			}
+		}
 	})
 
 	t.Run("readiness", func(t *testing.T) {
-		urls := []string{s.signers["signer-a"], s.signers["signer-b"], s.aggregator}
+		var urls []string
+		for _, id := range topo.replicas {
+			urls = append(urls, s.signers[id])
+		}
+		if s.aggregator != "" {
+			urls = append(urls, s.aggregator)
+		}
 		deadline := time.Now().Add(15 * time.Second)
 		for _, u := range urls {
 			for {

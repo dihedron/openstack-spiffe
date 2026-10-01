@@ -14,7 +14,7 @@ key_store:
   backend: "ephemeral_memory"                            # "vault_transit" is not supported yet
   algorithm: "RS256"                                     # or "ES256"
   rotation_interval: "24h"                               # at least 5m
-  publish_ahead: "2m"                                    # > aggregator poll_interval + fetch_timeout
+  publish_ahead: "2m"                                    # > poll_interval + fetch_timeout + cache_max_age of peers and aggregator
 
 token_ttl_seconds: 300                                   # at most 300
 rate_limit_per_instance: "1/5s"
@@ -44,3 +44,18 @@ nova_lookup:
   allowed_statuses: ["ACTIVE", "BUILD", "REBOOT", "HARD_REBOOT", "REBUILD", "RESIZE", "VERIFY_RESIZE", "MIGRATING", "PASSWORD"]
 
 enrich: ["availability_zone", "project_name"]            # example; default: none
+
+# Peer aggregation: with peers, this replica also serves its peers' keys merged
+# with its own on /.well-known/jwks.json, so that every replica is a JWKS
+# aggregator for the SPIRE Server and no separate aggregator is needed. List
+# every other replica (this one may be listed too, so that all replicas share
+# the same list), always at /jwks/local.json, never at /.well-known/jwks.json.
+peers:                                                   # example; default: none (no peer aggregation)
+  urls:                                                  # https only
+    - "https://signer-b.internal:8443/jwks/local.json"
+    - "https://signer-c.internal:8443/jwks/local.json"
+  # ca_cert_path: "/etc/ssl/signer-ca.pem"               # CA bundle for the peers; default: system roots
+  poll_interval: "30s"
+  fetch_timeout: "5s"                                    # < poll_interval
+  stale_key_retention: "5m"                              # at least 5m
+  cache_max_age: "30s"                                   # whole seconds: Cache-Control of the merged set

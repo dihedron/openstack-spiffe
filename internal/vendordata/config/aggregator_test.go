@@ -14,8 +14,8 @@ const minimalAggregator = `
 tls_cert_path: /tls.crt
 tls_key_path: /tls.key
 replicas:
-  - https://signer-a.internal:8443/.well-known/jwks.json
-  - https://signer-b.internal:8443/.well-known/jwks.json
+  - https://signer-a.internal:8443/jwks/local.json
+  - https://signer-b.internal:8443/jwks/local.json
 `
 
 // parseAggregator checks the document without file checks and fails on any

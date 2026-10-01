@@ -286,8 +286,8 @@ func TestCrossCheck(t *testing.T) {
 	}
 
 	a := signer("a.yaml", "signer-a", "2m")
-	b := signer("b.yaml", "signer-b", "70s") // == poll + fetch: too short
-	c := signer("c.yaml", "signer-a", "5m")  // duplicate replica_id
+	b := signer("b.yaml", "signer-b", "100s") // == poll + fetch + cache_max_age: too short
+	c := signer("c.yaml", "signer-a", "5m")   // duplicate replica_id
 	CrossCheck([]*Result[Signer]{a, b, c}, aggregator)
 
 	if len(a.Findings) != 0 {
@@ -304,7 +304,7 @@ func TestCrossCheck(t *testing.T) {
 	}
 
 	// without an aggregator only the replica_id uniqueness is checked
-	b2, c2 := signer("b.yaml", "signer-b", "70s"), signer("c.yaml", "signer-a", "5m")
+	b2, c2 := signer("b.yaml", "signer-b", "100s"), signer("c.yaml", "signer-a", "5m")
 	CrossCheck([]*Result[Signer]{signer("a.yaml", "signer-a", "2m"), b2, c2}, nil)
 	if len(b2.Findings) != 0 || len(c2.Errors()) != 1 {
 		t.Errorf("without aggregator: b=%+v c=%+v", b2.Findings, c2.Findings)
