@@ -21,9 +21,9 @@ before:
     - go generate ./...
 
 builds:
-  - id: openstack-spire-vendordata
-    main: ./cmd/openstack-spire-vendordata
-    binary: openstack-spire-vendordata
+  - id: openstack-spire-metadata
+    main: ./cmd/openstack-spire-metadata
+    binary: openstack-spire-metadata
     goos:
       - linux
 #      - windows
@@ -150,13 +150,13 @@ builds:
 
 # one archive per application
 archives:
-  - id: openstack-spire-vendordata
+  - id: openstack-spire-metadata
     ids:
-      - openstack-spire-vendordata
+      - openstack-spire-metadata
     formats:
       - tar.gz
     name_template: >-
-      openstack-spire-vendordata_
+      openstack-spire-metadata_
       {{- .Version }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
@@ -212,7 +212,7 @@ upx:
     enabled: false
 
     # Filter by build ID.
-    ids: [openstack-spire-vendordata, openstack-agent-plugin, openstack-server-plugin]
+    ids: [openstack-spire-metadata, openstack-agent-plugin, openstack-server-plugin]
 
     # Filter by GOOS.
     goos: [linux, windows]
@@ -234,12 +234,12 @@ upx:
     #brute: true
 
 # one system package per application, each installing only its own binary
-# (and, for the vendordata issuer, its sample configurations)
+# (and, for the OpenStack metadata JWT issuer, its sample configurations)
 nfpms:
-  - id: openstack-spire-vendordata
-    package_name: openstack-spire-vendordata
+  - id: openstack-spire-metadata
+    package_name: openstack-spire-metadata
     ids:
-      - openstack-spire-vendordata
+      - openstack-spire-metadata
     description: |
       Instance identity token issuer for SPIFFE on OpenStack: a Nova
       DynamicJSON vendordata target minting short-lived signed JWTs that
@@ -259,10 +259,10 @@ nfpms:
     priority: "optional"
     contents:
       - src: ./examples/signer.yaml
-        dst: /etc/openstack-spire-vendordata/signer.yaml
+        dst: /etc/openstack-spire-metadata/signer.yaml
         type: config|noreplace
       - src: ./examples/aggregator.yaml
-        dst: /etc/openstack-spire-vendordata/aggregator.yaml
+        dst: /etc/openstack-spire-metadata/aggregator.yaml
         type: config|noreplace
   - id: openstack-server-plugin
     package_name: openstack-server-plugin
@@ -270,7 +270,7 @@ nfpms:
       - openstack-server-plugin
     description: |
       SPIRE Server node attestor plugin (openstack_iid) verifying the
-      instance identity tokens issued by openstack-spire-vendordata.
+      instance identity tokens issued by openstack-spire-metadata.
     homepage: "https://github.com/dihedron/openstack-spiffe"
     maintainer: "Andrea Funtò <dihedron.dev@gmail.com>"
     vendor: "Andrea Funtò"
@@ -309,7 +309,7 @@ nfpms:
 #   - id: openstack-spiffe-msi
 #     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 #     builds:
-#       - openstack-spire-vendordata
+#       - openstack-spire-metadata
 #     extra_files:
 #       - src: ./examples/signer.yaml
 #       - src: ./examples/aggregator.yaml
