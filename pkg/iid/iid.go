@@ -6,10 +6,14 @@
 package iid
 
 import (
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -26,6 +30,28 @@ const (
 	TTL = 5 * time.Minute
 	// MaxTagsBytes is the maximum size of the JSON-serialized "tags" claim.
 	MaxTagsBytes = 1024
+	// MaxCustomClaimsBytes is the maximum size of the operator-configured
+	// custom claims, serialized as a JSON object.
+	MaxCustomClaimsBytes = 2048
+	// MaxTokenBytes is the maximum size of a compact-serialized token: the
+	// issuer never mints a larger one, and the SPIRE plugins reject it.
+	MaxTokenBytes = 16 << 10
+	// MaxJWKSKeys is the maximum number of keys in a JWK Set: a larger set
+	// is a failed fetch, never truncated.
+	MaxJWKSKeys = 100
+)
+
+const (
+	maxProjectIDLength = 64
+	maxHostnameLength  = 255
+)
+
+var (
+	// canonical, lowercase UUID form as produced by Nova; alternative forms
+	// (braces, URN prefix, uppercase) are rejected so that the same instance
+	// can never appear under two different "sub" values.
+	instanceIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	projectIDPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
 // Header is the JOSE header of an issued token.
@@ -86,8 +112,65 @@ type Claims struct {
 }
 
 // ErrInvalidCustomClaim is returned (wrapped) when a custom claim has an
-// empty or reserved name.
+// empty or reserved name, or when the custom claims are too large.
 var ErrInvalidCustomClaim = errors.New("invalid custom claim")
+
+// ErrInvalidClaim is returned (wrapped) by the field validators. Their
+// messages describe the problem without naming the field, so that callers
+// can name it in their own terms (e.g. "project-id" in a Nova request,
+// "project_id" in a token).
+var ErrInvalidClaim = errors.New("invalid claim")
+
+// ValidateProjectID checks a project ID: 1 to 64 characters from
+// [A-Za-z0-9_-]. Project IDs end up in SPIFFE ID paths.
+func ValidateProjectID(id string) error {
+	switch {
+	case id == "":
+		return fmt.Errorf("%w: missing", ErrInvalidClaim)
+	case len(id) > maxProjectIDLength:
+		return fmt.Errorf("%w: longer than %d characters", ErrInvalidClaim, maxProjectIDLength)
+	case !projectIDPattern.MatchString(id):
+		return fmt.Errorf("%w: contains invalid characters", ErrInvalidClaim)
+	}
+	return nil
+}
+
+// ValidateInstanceID checks an instance ID: a canonical lowercase UUID.
+func ValidateInstanceID(id string) error {
+	switch {
+	case id == "":
+		return fmt.Errorf("%w: missing", ErrInvalidClaim)
+	case !instanceIDPattern.MatchString(id):
+		return fmt.Errorf("%w: not a canonical lowercase UUID", ErrInvalidClaim)
+	}
+	return nil
+}
+
+// ValidateHostname checks a hostname: non-empty, at most 255 characters,
+// without control characters.
+func ValidateHostname(hostname string) error {
+	switch {
+	case hostname == "":
+		return fmt.Errorf("%w: missing", ErrInvalidClaim)
+	case len(hostname) > maxHostnameLength:
+		return fmt.Errorf("%w: longer than %d characters", ErrInvalidClaim, maxHostnameLength)
+	case strings.ContainsFunc(hostname, unicode.IsControl):
+		return fmt.Errorf("%w: contains control characters", ErrInvalidClaim)
+	}
+	return nil
+}
+
+// ValidateTagKey checks the key of a "tags" entry: non-empty and without
+// ':', which would make the "tag:<key>:<value>" selector ambiguous.
+func ValidateTagKey(key string) error {
+	switch {
+	case key == "":
+		return fmt.Errorf("%w: empty tag key", ErrInvalidClaim)
+	case strings.Contains(key, ":"):
+		return fmt.Errorf("%w: tag key contains ':'", ErrInvalidClaim)
+	}
+	return nil
+}
 
 // Names of the optional enrichment claims, looked up from Nova and Keystone
 // when enabled in the issuer configuration.
@@ -131,7 +214,8 @@ func IsReservedClaim(name string) bool {
 }
 
 // ValidateCustomClaims checks that no custom claim has an empty or reserved
-// name.
+// name, and that the custom claims, serialized as a JSON object, do not
+// exceed MaxCustomClaimsBytes.
 func ValidateCustomClaims(custom map[string]string) error {
 	for name := range custom {
 		if name == "" {
@@ -141,7 +225,27 @@ func ValidateCustomClaims(custom map[string]string) error {
 			return fmt.Errorf("%w: %q is a reserved claim", ErrInvalidCustomClaim, name)
 		}
 	}
+	size, err := CustomClaimsSize(custom)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidCustomClaim, err)
+	}
+	if size > MaxCustomClaimsBytes {
+		return fmt.Errorf("%w: %d bytes once serialized, at most %d allowed", ErrInvalidCustomClaim, size, MaxCustomClaimsBytes)
+	}
 	return nil
+}
+
+// CustomClaimsSize returns the size of the custom claims serialized as a
+// JSON object, escaping included.
+func CustomClaimsSize(custom map[string]string) (int, error) {
+	if len(custom) == 0 {
+		return 0, nil
+	}
+	data, err := json.Marshal(custom)
+	if err != nil {
+		return 0, fmt.Errorf("encoding custom claims: %w", err)
+	}
+	return len(data), nil
 }
 
 // VendorDataResponse is the body returned to Nova; its only key must match

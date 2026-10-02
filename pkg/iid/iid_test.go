@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,6 +28,15 @@ func TestConstants(t *testing.T) {
 	}
 	if Algorithm != "RS256" {
 		t.Errorf("Algorithm = %q, want %q", Algorithm, "RS256")
+	}
+	if MaxTokenBytes != 16*1024 {
+		t.Errorf("MaxTokenBytes = %d, want 16384", MaxTokenBytes)
+	}
+	if MaxJWKSKeys != 100 {
+		t.Errorf("MaxJWKSKeys = %d, want 100", MaxJWKSKeys)
+	}
+	if MaxCustomClaimsBytes != 2048 {
+		t.Errorf("MaxCustomClaimsBytes = %d, want 2048", MaxCustomClaimsBytes)
 	}
 }
 
@@ -193,6 +203,82 @@ func TestValidateCustomClaims(t *testing.T) {
 	} {
 		if err := ValidateCustomClaims(bad); !errors.Is(err, ErrInvalidCustomClaim) {
 			t.Errorf("ValidateCustomClaims(%v) = %v, want ErrInvalidCustomClaim", bad, err)
+		}
+	}
+}
+
+func TestValidateCustomClaimsSize(t *testing.T) {
+	// {"c":"<value>"} serializes to len(value) + 8 bytes
+	fits := map[string]string{"c": strings.Repeat("x", MaxCustomClaimsBytes-8)}
+	if err := ValidateCustomClaims(fits); err != nil {
+		t.Fatalf("custom claims of exactly %d bytes rejected: %v", MaxCustomClaimsBytes, err)
+	}
+	tooLarge := map[string]string{"c": strings.Repeat("x", MaxCustomClaimsBytes-7)}
+	if err := ValidateCustomClaims(tooLarge); !errors.Is(err, ErrInvalidCustomClaim) {
+		t.Fatalf("custom claims over %d bytes: error = %v, want ErrInvalidCustomClaim", MaxCustomClaimsBytes, err)
+	}
+	// escaping counts: each '"' takes two bytes once serialized
+	escaped := map[string]string{"c": strings.Repeat(`"`, (MaxCustomClaimsBytes-8)/2+1)}
+	if err := ValidateCustomClaims(escaped); !errors.Is(err, ErrInvalidCustomClaim) {
+		t.Fatalf("escaped custom claims over %d bytes: error = %v, want ErrInvalidCustomClaim", MaxCustomClaimsBytes, err)
+	}
+}
+
+const testInstanceID = "8f7c1b6e-6a0e-4d4b-9a51-3f0e8b1d2c3a"
+
+func TestValidateProjectID(t *testing.T) {
+	for _, valid := range []string{"f3c9a1d2b4e54a6b8c7d9e0f1a2b3c4d", "a", "my_project-01", strings.Repeat("a", 64)} {
+		if err := ValidateProjectID(valid); err != nil {
+			t.Errorf("ValidateProjectID(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "abc/def", "a b", "ü", strings.Repeat("a", 65)} {
+		if err := ValidateProjectID(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateProjectID(%q) = %v, want ErrInvalidClaim", invalid, err)
+		}
+	}
+}
+
+func TestValidateInstanceID(t *testing.T) {
+	if err := ValidateInstanceID(testInstanceID); err != nil {
+		t.Errorf("ValidateInstanceID(%q) = %v, want nil", testInstanceID, err)
+	}
+	for _, invalid := range []string{
+		"",
+		"not-a-uuid",
+		strings.ToUpper(testInstanceID),
+		"{" + testInstanceID + "}",
+		"urn:uuid:" + testInstanceID,
+		strings.ReplaceAll(testInstanceID, "-", ""),
+	} {
+		if err := ValidateInstanceID(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateInstanceID(%q) = %v, want ErrInvalidClaim", invalid, err)
+		}
+	}
+}
+
+func TestValidateHostname(t *testing.T) {
+	for _, valid := range []string{"vm-01", "web.example.org", strings.Repeat("h", 255)} {
+		if err := ValidateHostname(valid); err != nil {
+			t.Errorf("ValidateHostname(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", strings.Repeat("h", 256), "vm\n01", "vm\x0001", "vm\u008501"} {
+		if err := ValidateHostname(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateHostname(%q) = %v, want ErrInvalidClaim", invalid, err)
+		}
+	}
+}
+
+func TestValidateTagKey(t *testing.T) {
+	for _, valid := range []string{"role", "env", "a.b", "a/b", "a=b"} {
+		if err := ValidateTagKey(valid); err != nil {
+			t.Errorf("ValidateTagKey(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", ":", "a:b", "role:"} {
+		if err := ValidateTagKey(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateTagKey(%q) = %v, want ErrInvalidClaim", invalid, err)
 		}
 	}
 }
