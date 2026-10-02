@@ -5,11 +5,25 @@ import (
 	"os"
 
 	"github.com/dihedron/openstack-spiffe/cmd/openstack-agent-plugin/command"
+	"github.com/dihedron/openstack-spiffe/internal/plugin/agent/openstackiid"
 	"github.com/jessevdk/go-flags"
 	"github.com/joho/godotenv"
+	"github.com/spiffe/spire-plugin-sdk/pluginmain"
+	nodeattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/nodeattestor/v1"
+	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 )
 
 func main() {
+	// SPIRE Agent starts the plugin without arguments
+	if len(os.Args) == 1 {
+		plugin := openstackiid.New()
+		pluginmain.Serve(
+			nodeattestorv1.NodeAttestorPluginServer(plugin),
+			configv1.ConfigServiceServer(plugin),
+		)
+		return
+	}
+
 	defer cleanup()
 
 	err := godotenv.Load()
