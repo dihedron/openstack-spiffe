@@ -227,9 +227,10 @@ func (a *Aggregator) poll(ctx context.Context) {
 	}
 }
 
-// fetch reads and validates a replica's JWK Set. Invalid keys are left out
-// and logged; any key carrying private key material is left out and logged
-// as an error.
+// fetch reads and validates a replica's JWK Set. A set with more than
+// iid.MaxJWKSKeys keys fails the fetch. Invalid keys are left out and
+// logged; any key carrying private key material is left out and logged as
+// an error.
 func (a *Aggregator) fetch(ctx context.Context, replica string) ([]keystore.PublicKey, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.fetchTimeout)
 	defer cancel()
@@ -258,6 +259,11 @@ func (a *Aggregator) fetch(ctx context.Context, replica string) ([]keystore.Publ
 	}
 	if err := json.Unmarshal(body, &set); err != nil {
 		return nil, fmt.Errorf("decoding JWK Set: %w", err)
+	}
+	// a replica publishes a handful of keys: a larger set fails the whole
+	// fetch rather than being truncated to an arbitrary subset
+	if len(set.Keys) > iid.MaxJWKSKeys {
+		return nil, fmt.Errorf("JWK Set has %d keys, at most %d allowed", len(set.Keys), iid.MaxJWKSKeys)
 	}
 
 	var keys []keystore.PublicKey

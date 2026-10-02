@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json/v2"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/dihedron/openstack-spiffe/internal/metadata/jwks"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
+	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
 var testNow = time.Date(2026, 9, 29, 14, 32, 11, 0, time.UTC)
@@ -300,6 +302,7 @@ func TestFetchFailuresKeepPreviousKeys(t *testing.T) {
 		{"malformed JSON", http.StatusOK, `{"keys":[`},
 		{"not a key set", http.StatusOK, `[]`},
 		{"oversized", http.StatusOK, `{"keys":[],"pad":"` + strings.Repeat("x", maxResponseBytes) + `"}`},
+		{"too many keys", http.StatusOK, `{"keys":[` + strings.Repeat(`{},`, iid.MaxJWKSKeys) + `{}]}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ra := newReplica(t)
@@ -318,6 +321,29 @@ func TestFetchFailuresKeepPreviousKeys(t *testing.T) {
 				t.Fatal("failure not recorded")
 			}
 		})
+	}
+}
+
+func TestKeyCountLimit(t *testing.T) {
+	keys := make([]keystore.PublicKey, iid.MaxJWKSKeys)
+	for i := range keys {
+		keys[i] = ecKey(t, fmt.Sprintf("k%03d", i))
+	}
+	ra := newReplica(t)
+	ra.publish(t, keys...)
+	a := newAggregator(t, &testClock{now: testNow}, ra)
+	a.poll(context.Background())
+	if got := kids(t, a); len(got) != iid.MaxJWKSKeys {
+		t.Fatalf("%d keys served, want all %d", len(got), iid.MaxJWKSKeys)
+	}
+
+	// one key more fails the whole fetch: never truncated to an arbitrary
+	// subset, and the previous keys are kept
+	ra.publish(t, append(keys, ecKey(t, "k-extra"))...)
+	a.poll(context.Background())
+	got := kids(t, a)
+	if len(got) != iid.MaxJWKSKeys || slices.Contains(got, "k-extra") {
+		t.Fatalf("after an oversized set: %d keys served (extra included: %v), want the previous %d", len(got), slices.Contains(got, "k-extra"), iid.MaxJWKSKeys)
 	}
 }
 
