@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/hashicorp/hcl"
 	"github.com/hashicorp/hcl/hcl/ast"
+	"github.com/hashicorp/hcl/hcl/printer"
 )
 
 // ErrInvalid is returned (wrapped) for any configuration error; messages
@@ -64,4 +66,43 @@ func Duration(key, value string, def, min, max time.Duration) (time.Duration, er
 		return 0, fmt.Errorf("%w: %s: %v exceeds the maximum %v", ErrInvalid, key, d, max)
 	}
 	return d, nil
+}
+
+// PluginData returns the plugin_data block of a plugin in a SPIRE Agent or
+// Server configuration file, e.g. NodeAttestor "openstack_iid", as the HCL
+// that SPIRE hands to the plugin's Configure.
+func PluginData(spireConfig []byte, pluginType, name string) (string, error) {
+	file, err := hcl.ParseBytes(spireConfig)
+	if err != nil {
+		return "", fmt.Errorf("parsing SPIRE configuration: %w", err)
+	}
+	var data *ast.ObjectList
+	ast.Walk(file.Node, func(n ast.Node) (ast.Node, bool) {
+		item, ok := n.(*ast.ObjectItem)
+		if !ok || data != nil || len(item.Keys) != 2 || keyText(item.Keys[0]) != pluginType || keyText(item.Keys[1]) != name {
+			return n, data == nil
+		}
+		if plugin, ok := item.Val.(*ast.ObjectType); ok {
+			for _, member := range plugin.List.Items {
+				if len(member.Keys) == 1 && keyText(member.Keys[0]) == "plugin_data" {
+					if block, ok := member.Val.(*ast.ObjectType); ok {
+						data = block.List
+					}
+				}
+			}
+		}
+		return n, false
+	})
+	if data == nil {
+		return "", fmt.Errorf("no plugin_data for %s %q", pluginType, name)
+	}
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, data); err != nil {
+		return "", fmt.Errorf("printing plugin_data: %w", err)
+	}
+	return buf.String(), nil
+}
+
+func keyText(k *ast.ObjectKey) string {
+	return strings.Trim(k.Token.Text, `"`)
 }

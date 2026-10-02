@@ -97,3 +97,41 @@ Both services perform a pre-flight check at startup. They refuse to start (exit 
 - **`cache_max_age`** (default 30s; `peers.cache_max_age` for peers) is how long consumers may cache the merged set. The SPIRE Server-side plugin must select keys by the JWT header kid and re-fetch the set, rate-limited, when it meets an unknown kid.
 - **Rate limits** apply per replica: `rate_limit_per_source` (200/1s) is applied before the request body is read, and `rate_limit_per_instance` (1/5s) right after it is decoded. If the replicas sit behind a proxy or load balancer that hides client addresses, list it in `client_address.trusted_proxies` so that the per-source limit applies to the real client, which the proxy reports in `X-Forwarded-For`.
 - **Deployment.** Run several signer replicas, each with a unique `replica_id`, behind a load balancer close to the Nova control plane. Either list every other replica under `peers.urls` in each replica's configuration (always their `/jwks/local.json`: `config check` rejects a peer's `/.well-known/jwks.json`, which would make keys circulate between replicas) and point the SPIRE Server at the replicas' `/.well-known/jwks.json`, or run one or more aggregators behind their own load balancer. A replica missing from a peer list is silently missing from that replica's merged set.
+
+## openstack_iid: the SPIRE node attestor plugins
+
+The `openstack_iid` plugin pair attests an OpenStack instance to SPIRE Server using the token issued by `openstack-spire-metadata`. The full design is in [.specs/openstack-spire-plugins.md](.specs/openstack-spire-plugins.md).
+
+- **`openstack-agent-plugin`** runs inside SPIRE Agent on the instance. It reads the token from `http://169.254.169.254/openstack/latest/vendor_data2.json` and sends it to SPIRE Server. It does not verify the token.
+- **`openstack-server-plugin`** runs inside SPIRE Server. It verifies the token against the issuer's merged JWK Set and returns the agent's identity:
+  - the SPIFFE ID is `spiffe://<trust_domain>/spire/agent/openstack_iid/<project_id>/<instance_id>`;
+  - the selectors are `openstack_iid:project_id:<id>`, `openstack_iid:instance_id:<id>`, `openstack_iid:hostname:<name>` and one `openstack_iid:tag:<key>:<value>` per tag;
+  - when the issuer enables the matching claims, there are also `openstack_iid:availability_zone:<az>`, `openstack_iid:flavor:<name>`, `openstack_iid:user_id:<id>`, `openstack_iid:project_name:<name>` and `openstack_iid:domain_id:<id>`.
+
+### Install
+
+The `openstack-agent-plugin` and `openstack-server-plugin` packages install their binary in `/usr/bin` and a sample configuration in `/usr/share/doc/<package>/`.
+
+- **Agent plugin:** bake it into every instance image that runs SPIRE Agent, or install it during provisioning, so that it is present before SPIRE Agent starts.
+- **Server plugin:** install it wherever SPIRE Server runs.
+
+Set `plugin_checksum` to the SHA-256 of the installed binary; `make checksum` prints it for the binaries in `dist/`. SPIRE refuses to load a plugin whose hash does not match.
+
+### Configure
+
+Merge [examples/agent.conf](examples/agent.conf) and [examples/server.conf](examples/server.conf) into the `plugins` blocks of SPIRE Agent and SPIRE Server. Unknown keys are errors.
+
+- **Agent.** `vendordata_url` defaults to Nova's metadata service. Config drives are not supported: their token is frozen at boot and expires minutes later.
+- **Server: `jwks_url`.** Point it at the merged JWK Set, never at a single replica's `/jwks/local.json`. That is either the JWKS aggregator's `/.well-known/jwks.json`, or the peered signer replicas' `/.well-known/jwks.json` behind their load balancer.
+- **Server: `jwks_ca_cert_path`.** Pin the endpoint's CA with it: whoever can tamper with the JWK Set can add a key.
+- **Server: trust domain.** It comes from SPIRE Server's own configuration.
+- **Server: `allowed_project_ids`.** Optionally restricts attestation to the listed projects.
+
+### Replay protection
+
+Each token is accepted once by a given SPIRE Server.
+
+- **Repeated attestations.** Nova's metadata cache (`[api] metadata_cache_expiration`, 15s by default) can serve the same token again. In that case the agent plugin waits, for up to `fresh_token_timeout` (30s), until Nova serves a fresh one.
+- **After a SPIRE Server restart.** The server plugin rejects tokens minted before its process started. Agents attesting right after a restart may be refused once, and succeed on SPIRE Agent's next attempt.
+- **Clock skew.** `clock_skew_tolerance` (30s, at most 60s) absorbs clock differences between the issuer and SPIRE Server. A token is accepted for at most 5 minutes plus twice the tolerance; keep both clocks synchronized.
+- **Limitation.** The replay cache is local to each SPIRE Server instance. In an HA deployment, a token intercepted within its acceptance window could be presented once to each other SPIRE Server instance. Tokens travel only from the instance's metadata service to SPIRE Agent and then over SPIRE's TLS channel, and they are never logged.

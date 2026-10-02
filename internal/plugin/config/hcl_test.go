@@ -101,3 +101,42 @@ func TestDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestPluginData(t *testing.T) {
+	conf := `
+agent {
+  data_dir = "/opt/spire/data/agent"
+}
+plugins {
+  KeyManager "disk" {
+    plugin_data {
+      directory = "/opt/spire/data/agent"
+    }
+  }
+  NodeAttestor "openstack_iid" {
+    plugin_cmd = "/usr/bin/openstack-agent-plugin"
+    plugin_data {
+      vendordata_url = "http://169.254.169.254/openstack/latest/vendor_data2.json"
+      http_timeout   = "5s"
+    }
+  }
+}
+`
+	data, err := PluginData([]byte(conf), "NodeAttestor", "openstack_iid")
+	if err != nil {
+		t.Fatalf("PluginData: %v", err)
+	}
+	var s struct {
+		URL     string `hcl:"vendordata_url"`
+		Timeout string `hcl:"http_timeout"`
+	}
+	if err := Decode(data, &s, []string{"vendordata_url", "http_timeout"}); err != nil {
+		t.Fatalf("Decode(%q): %v", data, err)
+	}
+	if s.URL != "http://169.254.169.254/openstack/latest/vendor_data2.json" || s.Timeout != "5s" {
+		t.Fatalf("decoded %+v from %q", s, data)
+	}
+	if _, err := PluginData([]byte(conf), "NodeAttestor", "aws_iid"); err == nil {
+		t.Fatal("PluginData found a plugin that is not configured")
+	}
+}

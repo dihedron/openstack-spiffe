@@ -283,6 +283,9 @@ nfpms:
     release: "1"
     section: default
     priority: "optional"
+    contents:
+      - src: ./examples/server.conf
+        dst: /usr/share/doc/openstack-server-plugin/server.conf
   - id: openstack-agent-plugin
     package_name: openstack-agent-plugin
     ids:
@@ -302,6 +305,9 @@ nfpms:
     release: "1"
     section: default
     priority: "optional"
+    contents:
+      - src: ./examples/agent.conf
+        dst: /usr/share/doc/openstack-agent-plugin/agent.conf
 
 # MSI packaging is a GoReleaser Pro feature.
 # If you have GoReleaser Pro, you can uncomment the following section.
