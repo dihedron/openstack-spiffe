@@ -322,3 +322,37 @@ func TestEnrichmentClaimsJSON(t *testing.T) {
 		t.Fatalf("round trip mismatch: %+v", back)
 	}
 }
+
+func TestParseClaims(t *testing.T) {
+	payload := `{"iss":"nova-spire-plugin","aud":"spire-node-attestation","sub":"i","iat":1,"nbf":1,"exp":2,"jti":"j",` +
+		`"project_id":"p","instance_id":"i","hostname":"h","tags":{"role":"web"},"flavor":"m1.small",` +
+		`"country":"italy","future_number":5,"future_object":{"a":[1,2]},"future_null":null}`
+	c, err := ParseClaims([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseClaims: %v", err)
+	}
+	if c.Subject != "i" || c.Expiry != 2 || c.Tags["role"] != "web" || c.Flavor != "m1.small" {
+		t.Fatalf("parsed %+v", c)
+	}
+	// unknown string claims are kept, unknown claims of other types skipped
+	if want := map[string]string{"country": "italy"}; !maps.Equal(c.Custom, want) {
+		t.Fatalf("Custom = %v, want %v", c.Custom, want)
+	}
+}
+
+func TestParseClaimsRejects(t *testing.T) {
+	for name, payload := range map[string]string{
+		"not an object":          `[]`,
+		"malformed":              `{"sub":`,
+		"duplicate claim":        `{"sub":"a","sub":"b"}`,
+		"duplicate unknown":      `{"x":"a","x":"b"}`,
+		"non-string tag":         `{"tags":{"count":3}}`,
+		"wrong type":             `{"iat":"yesterday"}`,
+		"empty enrichment claim": `{"flavor":""}`,
+		"non-string enrichment":  `{"availability_zone":3}`,
+	} {
+		if _, err := ParseClaims([]byte(payload)); err == nil {
+			t.Errorf("%s: ParseClaims(%s) succeeded", name, payload)
+		}
+	}
+}

@@ -6,6 +6,7 @@
 package iid
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -246,6 +247,38 @@ func CustomClaimsSize(custom map[string]string) (int, error) {
 		return 0, fmt.Errorf("encoding custom claims: %w", err)
 	}
 	return len(data), nil
+}
+
+// ParseClaims decodes a token payload. Unlike a plain decode into Claims, it
+// skips claims it does not model whose values are not strings, so that a
+// claim added later by the issuer never breaks parsing; unknown string claims
+// are collected into Custom. Duplicate claim names are rejected, and an
+// enrichment claim, when present, must be a non-empty string: the issuer
+// never emits an empty one.
+func ParseClaims(payload []byte) (Claims, error) {
+	var members map[string]jsontext.Value
+	if err := json.Unmarshal(payload, &members); err != nil {
+		return Claims{}, fmt.Errorf("decoding claims: %w", err)
+	}
+	for name, value := range members {
+		switch {
+		case slices.Contains(enrichmentClaims, name):
+			if value.Kind() != '"' || string(value) == `""` {
+				return Claims{}, fmt.Errorf("decoding claims: %q must be a non-empty string", name)
+			}
+		case !IsReservedClaim(name) && value.Kind() != '"':
+			delete(members, name)
+		}
+	}
+	filtered, err := json.Marshal(members)
+	if err != nil {
+		return Claims{}, fmt.Errorf("decoding claims: %w", err)
+	}
+	var c Claims
+	if err := json.Unmarshal(filtered, &c); err != nil {
+		return Claims{}, fmt.Errorf("decoding claims: %w", err)
+	}
+	return c, nil
 }
 
 // VendorDataResponse is the body returned to Nova; its only key must match
