@@ -5,7 +5,8 @@
 // that only hold for the system as a whole: tokens from any replica verify by
 // kid against every merged JWKS the SPIRE Server may use, every kid is
 // published there before its first use, and tokens signed before a rotation
-// keep verifying after it.
+// keep verifying after it. The openstack_iid SPIRE plugins run against the
+// same deployments (plugins_test.go), as SPIRE Agent and Server load them.
 package integration
 
 import (
@@ -82,6 +83,8 @@ type system struct {
 	merged     []string
 	aggregator string // base URL, empty without aggregator
 	novaToken  string
+	// caPath is the CA bundle trusted by every server's certificate.
+	caPath string
 }
 
 // writeTLS writes a self-signed certificate for 127.0.0.1, shared by every
@@ -214,6 +217,7 @@ replicas:
 		client:    &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: 10 * time.Second},
 		signers:   map[string]string{},
 		novaToken: cloud.IssueToken(novaUser, time.Now().Add(time.Hour)),
+		caPath:    certPath,
 	}
 	env := cloud.Env()
 	creds, err := osclient.CredentialsFromEnv(func(name string) string { return env[name] })
