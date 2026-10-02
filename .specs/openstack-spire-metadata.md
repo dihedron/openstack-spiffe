@@ -114,7 +114,7 @@ The schema must match the companion `openstack_iid` node attestor spec exactly: 
 - **TTL**: `exp - iat` is a short, fixed window: `token_ttl_seconds`, default 300 (5 minutes), never more. This service enforces it, not just documents it: it refuses to start with a longer or non-positive value. `iat` and `nbf` are the issuance time.
 - **Tags and payload bloat protection**: users frequently abuse instance metadata for large cloud-init scripts. To keep JWT-bearing headers within standard HTTP limits (4–8 KB) downstream, the `tags` claim is derived from the incoming `metadata` field as follows:
   - only string values are kept; other entries are dropped (not an error);
-  - keys containing `:` are dropped, since they would make the `openstack_iid:tag:<key>:<value>` selector of the SPIRE plugins ambiguous (the SPIRE Server-side plugin rejects a token carrying one);
+  - empty keys and keys containing `:` are dropped, since they would make the `openstack_iid:tag:<key>:<value>` selector of the SPIRE plugins ambiguous (the SPIRE Server-side plugin rejects a token carrying one);
   - if `tags.allowlist` is configured, only the listed keys are kept (an empty allowlist keeps every string entry, and `config check` warns about it);
   - the JSON-serialized `tags` object never exceeds 1024 bytes (escaping included): entries are considered in sorted key order and any entry that would not fit is dropped, so the result is deterministic and later, smaller entries can still fit;
   - every dropped entry is logged with its key and the reason, never its value; the token is still issued.

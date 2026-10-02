@@ -43,7 +43,7 @@ The JWT is the shared contract defined once, in `pkg/iid`, and imported by both 
 - **Lifetime**: `nbf <= iat < exp` and `exp - iat` at most `iid.TTL` (5 minutes), both checked on the token's own values, without any tolerance; then, against the server's clock, `nbf` and `iat` not later than now + `clock_skew_tolerance`, and `exp` later than now - `clock_skew_tolerance`. The tolerance (at most 60s) only absorbs clock differences between the issuer and the SPIRE Server; since it applies at both ends, the **maximum acceptance window** of a token is `iid.TTL + 2 × clock_skew_tolerance`: 6 minutes by default, 7 minutes at most. The issuer and the SPIRE Server hosts should keep their clocks synchronized (NTP).
 - **Subject**: `sub` must equal `instance_id`.
 - **Field formats** (the issuer's request validation rules, part of the shared contract): `instance_id` is a canonical lowercase UUID; `project_id` is 1 to 64 characters from `[A-Za-z0-9_-]`; `hostname` is non-empty, at most 255 characters, without control characters. Both IDs end up in the SPIFFE ID path, so this check also guarantees well-formed path segments.
-- **Tags**: a flat map of string values (a non-string value is rejected, never silently dropped), at most `iid.MaxTagsBytes` once serialized, and no key containing `:` (the issuer drops such keys, see selectors below; a token carrying one is a contract violation).
+- **Tags**: a flat map of string values (a non-string value is rejected, never silently dropped), at most `iid.MaxTagsBytes` once serialized, and no empty key or key containing `:` (the issuer drops such keys, see selectors below; a token carrying one is a contract violation).
 - **Enrichment claims**: when present, each is a non-empty string.
 
 ## Agent-side plugin

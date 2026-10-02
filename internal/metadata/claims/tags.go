@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
 // Reason tells why a metadata entry is left out of the "tags" claim.
@@ -22,6 +24,10 @@ const (
 	ReasonTooLarge
 	// ReasonNotEncodable marks an entry that cannot be serialized to JSON.
 	ReasonNotEncodable
+	// ReasonInvalidKey marks an empty key or a key containing ':', which
+	// would make the "tag:<key>:<value>" selector of the SPIRE plugins
+	// ambiguous (see iid.ValidateTagKey).
+	ReasonInvalidKey
 )
 
 // String returns a human-readable description of the reason.
@@ -35,6 +41,8 @@ func (r Reason) String() string {
 		return "tags size cap exceeded"
 	case ReasonNotEncodable:
 		return "not encodable"
+	case ReasonInvalidKey:
+		return "invalid key (empty or containing ':')"
 	default:
 		return fmt.Sprintf("unknown reason (%d)", int8(r))
 	}
@@ -48,8 +56,10 @@ type DroppedTag struct {
 	Reason Reason
 }
 
-// FilterTags derives the "tags" claim from the instance metadata. Only string
-// values are kept; if allowlist is not empty, only the listed keys are kept.
+// FilterTags derives the "tags" claim from the instance metadata. Keys that
+// are empty or contain ':' are dropped (see iid.ValidateTagKey), even when
+// allowlisted; only string values are kept; if allowlist is not empty, only
+// the listed keys are kept.
 // The JSON serialization of the result never exceeds maxBytes: entries are
 // considered in sorted key order and any entry that would not fit is dropped,
 // so the outcome is deterministic for a given input. The returned map is never
@@ -60,6 +70,10 @@ func FilterTags(metadata map[string]any, allowlist []string, maxBytes int) (map[
 
 	size := len("{}")
 	for _, key := range slices.Sorted(maps.Keys(metadata)) {
+		if iid.ValidateTagKey(key) != nil {
+			dropped = append(dropped, DroppedTag{Key: key, Reason: ReasonInvalidKey})
+			continue
+		}
 		if len(allowlist) > 0 && !slices.Contains(allowlist, key) {
 			dropped = append(dropped, DroppedTag{Key: key, Reason: ReasonNotAllowed})
 			continue

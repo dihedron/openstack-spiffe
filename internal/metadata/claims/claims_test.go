@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -130,6 +131,32 @@ func TestFilterTagsDropsNonStringValues(t *testing.T) {
 	}
 }
 
+func TestFilterTagsDropsInvalidKeys(t *testing.T) {
+	tags, dropped := FilterTags(map[string]any{
+		"a:b":   "c",
+		":":     "x",
+		"":      "empty",
+		"role":  "web",
+		"url":   "https://example.org:8443/",
+		"zone:": "1",
+	}, []string{"a:b", "role", "url"}, iid.MaxTagsBytes)
+
+	// keys containing ':' would make the "tag:<key>:<value>" selector
+	// ambiguous; values may contain ':'
+	if want := map[string]string{"role": "web", "url": "https://example.org:8443/"}; !maps.Equal(tags, want) {
+		t.Fatalf("tags = %v, want %v", tags, want)
+	}
+	if got, want := droppedKeys(dropped), []string{"", ":", "a:b", "zone:"}; !slices.Equal(got, want) {
+		t.Fatalf("dropped = %v, want %v", got, want)
+	}
+	for _, d := range dropped {
+		// checked before the allowlist: "a:b" is allowed but still invalid
+		if d.Reason != ReasonInvalidKey {
+			t.Errorf("dropped %q reason = %q, want %q", d.Key, d.Reason, ReasonInvalidKey)
+		}
+	}
+}
+
 func TestFilterTagsAllowlist(t *testing.T) {
 	tags, dropped := FilterTags(map[string]any{
 		"role":    "web",
@@ -239,6 +266,7 @@ func TestReasonString(t *testing.T) {
 		ReasonNotAllowed:   "key not in allowlist",
 		ReasonTooLarge:     "tags size cap exceeded",
 		ReasonNotEncodable: "not encodable",
+		ReasonInvalidKey:   "invalid key (empty or containing ':')",
 		Reason(0):          "unknown reason (0)",
 		Reason(-1):         "unknown reason (-1)",
 	}
