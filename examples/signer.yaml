@@ -25,7 +25,7 @@ max_body_bytes: 262144
 #   trusted_proxies: ["10.0.10.0/24"]
 #   header: "X-Forwarded-For"
 
-custom_claims:                                           # example; default: none
+custom_claims:                                           # example; default: none; at most 2048 bytes as JSON
   region: "eu-south-1"
 
 tags:

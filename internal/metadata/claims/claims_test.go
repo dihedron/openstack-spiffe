@@ -444,6 +444,10 @@ func TestNewBuilderRejectsReservedCustomClaims(t *testing.T) {
 	if _, err := NewBuilder(WithCustomClaims(map[string]string{"": "x"})); !errors.Is(err, iid.ErrInvalidCustomClaim) {
 		t.Errorf("NewBuilder with empty custom claim name: err = %v, want ErrInvalidCustomClaim", err)
 	}
+	large := map[string]string{"c": strings.Repeat("x", iid.MaxCustomClaimsBytes)}
+	if _, err := NewBuilder(WithCustomClaims(large)); !errors.Is(err, iid.ErrInvalidCustomClaim) {
+		t.Errorf("NewBuilder with oversized custom claims: err = %v, want ErrInvalidCustomClaim", err)
+	}
 }
 
 func TestBuildAddsEnrichment(t *testing.T) {

@@ -21,6 +21,10 @@ import (
 // transport layer maps it to 503.
 var ErrKeyStoreUnavailable = errors.New("key store unavailable")
 
+// ErrTokenTooLarge is returned (wrapped) when a signed token exceeds
+// iid.MaxTokenBytes, the most the SPIRE plugins accept; it is never issued.
+var ErrTokenTooLarge = errors.New("token too large")
+
 // signAttempts bounds how many times Mint asks for the active key: a second
 // attempt covers a rotation landing between Active and Sign.
 const signAttempts = 2
@@ -54,7 +58,8 @@ func NewMinter(keys keystore.KeyStore, builder ClaimsBuilder) (*Minter, error) {
 // up for it, if any) and returns them as a compact JWS
 // signed with the key store's active key, whose kid is in the header. It
 // never returns a token alongside an error: invalid requests fail with
-// claims.ErrInvalidRequest, key store failures with ErrKeyStoreUnavailable.
+// claims.ErrInvalidRequest, key store failures with ErrKeyStoreUnavailable,
+// and a token over iid.MaxTokenBytes with ErrTokenTooLarge.
 func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (string, error) {
 	c, err := m.builder.Build(ctx, req, enrichment)
 	if err != nil {
@@ -75,6 +80,12 @@ func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment cl
 
 	for attempt := 1; ; attempt++ {
 		token, kid, err := m.sign(ctx, encodedPayload)
+		if err == nil && len(token) > iid.MaxTokenBytes {
+			// cannot happen with the claims builder's own caps: refuse rather
+			// than hand out a token the SPIRE Server would reject
+			slog.ErrorContext(ctx, "refusing to issue an oversized token", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid, "bytes", len(token), "max_bytes", iid.MaxTokenBytes)
+			return "", fmt.Errorf("minting token: %w: %d bytes, at most %d allowed", ErrTokenTooLarge, len(token), iid.MaxTokenBytes)
+		}
 		if err == nil {
 			slog.InfoContext(ctx, "token issued", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid, "jti", c.ID)
 			return token, nil

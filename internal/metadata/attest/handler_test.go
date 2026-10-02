@@ -271,6 +271,7 @@ func TestMintFailures(t *testing.T) {
 		{"key store unavailable", fmt.Errorf("minting: %w: vault down", token.ErrKeyStoreUnavailable), http.StatusServiceUnavailable},
 		{"invalid request", fmt.Errorf("minting: %w", claims.ErrInvalidRequest), http.StatusBadRequest},
 		{"reserved claim", fmt.Errorf("minting: %w", iid.ErrInvalidCustomClaim), http.StatusInternalServerError},
+		{"token too large", fmt.Errorf("minting: %w", token.ErrTokenTooLarge), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

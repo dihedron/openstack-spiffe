@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
 const minimalSigner = `
@@ -168,6 +170,7 @@ func TestSignerInvalid(t *testing.T) {
 		{"reserved custom claim", [2]string{}, "custom_claims:\n  project_id: other\n", "custom_claims"},
 		{"empty custom claim", [2]string{}, "custom_claims:\n  \"\": x\n", "custom_claims"},
 		{"custom claim uses enrichment name", [2]string{}, "custom_claims:\n  availability_zone: nova\n", "custom_claims"},
+		{"custom claims too large", [2]string{}, "custom_claims:\n  c: " + strings.Repeat("x", iid.MaxCustomClaimsBytes) + "\n", "custom_claims"},
 		{"empty allowlist entry", [2]string{}, "tags:\n  allowlist: [\"\"]\n", "tags.allowlist"},
 		{"duplicate allowlist entry", [2]string{}, "tags:\n  allowlist: [a, a]\n", "tags.allowlist"},
 		{"no allowed users", [2]string{"  allowed_users: [\"nova@Default\"]\n", ""}, "", "keystone.allowed_users"},

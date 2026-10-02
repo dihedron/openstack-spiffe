@@ -442,6 +442,71 @@ func TestReservedCustomClaimsRejectedBeforeSigning(t *testing.T) {
 	}
 }
 
+// hugeBuilder returns claims whose tags push the token past
+// iid.MaxTokenBytes, which claims.Builder itself never produces.
+type hugeBuilder struct{}
+
+func (hugeBuilder) Build(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (iid.Claims, error) {
+	return iid.Claims{
+		Issuer: iid.Issuer, Audience: iid.Audience, Subject: req.InstanceID,
+		ProjectID: req.ProjectID, InstanceID: req.InstanceID, Hostname: req.Hostname,
+		Tags: map[string]string{"blob": strings.Repeat("x", iid.MaxTokenBytes)},
+	}, nil
+}
+
+func TestOversizedTokenNotIssued(t *testing.T) {
+	ks := newFakeStore()
+	ks.add(t, "k", "RS256")
+	ks.activate("k")
+	m, err := NewMinter(ks, hugeBuilder{})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+	token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	if !errors.Is(err, ErrTokenTooLarge) || errors.Is(err, ErrKeyStoreUnavailable) || token != "" {
+		t.Fatalf("Mint = %d-byte token, %v; want no token and ErrTokenTooLarge", len(token), err)
+	}
+}
+
+func TestTokenAtMaximumClaimSizesFitsTheLimit(t *testing.T) {
+	// the largest claims the builder can produce: full tags and custom
+	// claims caps, the longest hostname and every enrichment claim
+	tags := map[string]any{}
+	for i := 0; len(tags) < 200; i++ {
+		tags[fmt.Sprintf("key-%03d", i)] = strings.Repeat(`"`, 40)
+	}
+	custom := map[string]string{}
+	for i := 0; ; i++ {
+		custom[fmt.Sprintf("c%02d", i)] = strings.Repeat("x", 100)
+		if err := iid.ValidateCustomClaims(custom); err != nil {
+			delete(custom, fmt.Sprintf("c%02d", i))
+			break
+		}
+	}
+	ks := newFakeStore()
+	ks.add(t, "k", "RS256")
+	ks.activate("k")
+	m, err := NewMinter(ks, newBuilder(t, claims.WithCustomClaims(custom)))
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+	req := validRequest()
+	req.ProjectID = strings.Repeat("p", 64)
+	req.Hostname = strings.Repeat("h", 255)
+	req.Metadata = tags
+	enrichment := claims.Enrichment{
+		AvailabilityZone: strings.Repeat("z", 255), Flavor: strings.Repeat("f", 255), UserID: strings.Repeat("u", 64),
+		ProjectName: strings.Repeat("n", 64), DomainID: strings.Repeat("d", 64),
+	}
+	token, err := m.Mint(context.Background(), req, enrichment)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if len(token) > iid.MaxTokenBytes/2 {
+		t.Fatalf("largest token is %d bytes, want well below %d", len(token), iid.MaxTokenBytes)
+	}
+}
+
 func TestDistinctTokensPerCall(t *testing.T) {
 	ks := newFakeStore()
 	ks.add(t, "k", "ES256")

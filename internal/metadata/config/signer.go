@@ -282,6 +282,11 @@ func (s *Signer) validate(r *Result[Signer]) {
 			r.errorf(KindRuleViolation, "custom_claims."+name, "%q is a reserved claim", name)
 		}
 	}
+	if size, err := iid.CustomClaimsSize(s.CustomClaims); err != nil {
+		r.errorf(KindInvalidValue, "custom_claims", "%v", err)
+	} else if size > iid.MaxCustomClaimsBytes {
+		r.errorf(KindRuleViolation, "custom_claims", "%d bytes once serialized, at most %d allowed", size, iid.MaxCustomClaimsBytes)
+	}
 	checkList(r, "tags.allowlist", s.Tags.Allowlist)
 
 	if len(s.Keystone.AllowedUsers) == 0 {
