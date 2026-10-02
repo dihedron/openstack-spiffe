@@ -2,6 +2,8 @@
 
 Sep 20, 2026 (revised Oct 2, 2026) · @Andrea Funtò
 
+*Revision notes (Oct 2)*: aligned with the issuer spec and `pkg/iid`; then revised for the review observations on replay across restarts and Nova's metadata cache, replay across HA servers, payload and JWK Set size limits, and clock skew.
+
 ## Overview
 
 This spec defines a matched pair of SPIRE plugins, `openstack_iid`, that attest an OpenStack Nova instance's identity to a SPIRE Server using a short-lived signed JWT issued by the OpenStack metadata JWT issuer (`openstack-spire-metadata`, companion spec) and delivered to the instance through Nova's DynamicJSON vendordata (`vendor_data2.json`, under the `openstack_iid` target).
@@ -21,23 +23,24 @@ The entire security of this design reduces to the issuer's signing keys and to t
 - **Server trust anchor**: the server-side plugin learns the verification keys from a JWK Set URL (`jwks_url`) only, refreshed periodically, holding the keys of all signer replicas, selected by `kid`. The URL is either the peered signer replicas' `/.well-known/jwks.json` or a JWKS aggregator's `/.well-known/jwks.json`, never a replica's `/jwks/local.json` (which carries that replica's keys only). Since anyone able to tamper with the JWK Set could add a key, the endpoint's TLS identity is part of the trust chain: it is always reached over verified TLS, with a pinned CA (`jwks_ca_cert_path`) or the system roots, never with an insecure fallback.
 - **Rotation**: the JWT header carries the `kid` of the signing key (`<YYYY-MM-DD>-<replica-id>-key-<n>`, e.g. `2026-09-29-signer-a-key-52331`). The key store holds every key of the current JWK Set at once, so a rotation doesn't invalidate in-flight tokens: the issuer keeps a retired key published for at least one token TTL. The issuer also publishes every new key `publish_ahead` before it signs with it, so a token with a kid the plugin does not know yet is rare; when it happens, the plugin re-fetches the JWK Set (rate-limited) before rejecting.
 - **Binding to the real instance**: the issuer authenticates Nova's service token against Keystone and cross-checks `instance_id` and `project_id` against the Nova API before signing, so the claims are bound to the real instance by the compute control plane, never by client-supplied input. The plugins rely on this invariant without being able to enforce it, and document it in code comments.
+- **Replay protection and its limits**: a token is a bearer credential for its acceptance window (see lifetime below), so the server-side plugin accepts each `jti` at most once (a replay cache) and never accepts a token minted before its own process started (a startup watermark, which closes the gap of a cache emptied by a restart); see replay protection in the server-side plugin. **Known limitation**: the replay cache is local to each SPIRE Server instance. In an HA deployment, a token intercepted within its acceptance window could be presented once to *each* other SPIRE Server instance, yielding that instance's agent identity (lateral replay). This is accepted, and mitigated by keeping tokens hard to intercept, not by the cache: the token travels from the instance's own metadata service to the SPIRE Agent and then over SPIRE's TLS-protected agent-to-server channel, it is never logged by any component, and its acceptance window is at most 7 minutes. Sharing the cache across SPIRE Server instances (e.g. in a store every instance can reach) is out of scope and remains a possible future hardening.
 
 ## Claim schema
 
-The JWT is the shared contract defined once, in `pkg/iid`, and imported by both plugins and by the issuer, never hand-copied: the header (`iid.Header`) and claims (`iid.Claims`), the fixed values (`iid.Issuer` = `nova-spire-plugin`, `iid.Audience` = `spire-node-attestation`, `iid.TargetName` = `openstack_iid`, `iid.TTL` = 5 minutes, `iid.MaxTagsBytes` = 1024), the field validation rules, and the vendordata response shape (`iid.VendorDataResponse`). The authoritative example is in the issuer spec; in short:
+The JWT is the shared contract defined once, in `pkg/iid`, and imported by both plugins and by the issuer, never hand-copied: the header (`iid.Header`) and claims (`iid.Claims`), the fixed values (`iid.Issuer` = `nova-spire-plugin`, `iid.Audience` = `spire-node-attestation`, `iid.TargetName` = `openstack_iid`, `iid.TTL` = 5 minutes, `iid.MaxTagsBytes` = 1024, `iid.MaxTokenBytes` = 16 KiB, the largest compact-serialized token either side handles, and `iid.MaxJWKSKeys` = 100, the most keys a JWK Set may hold), the field validation rules, and the vendordata response shape (`iid.VendorDataResponse`). The authoritative example is in the issuer spec; in short:
 
 - header: `alg`, `kid`, `typ: "JWT"`;
 - payload: `iss`, `aud`, `sub` (the instance ID), `iat`, `nbf`, `exp`, `jti` (a fresh UUID per token), `project_id`, `instance_id`, `hostname`, `tags` (a flat string map);
 - optional enrichment claims, present only when the issuer enables them: `availability_zone`, `flavor`, `user_id`, `project_name`, `domain_id`;
 - optional operator-configured custom claims: static top-level string claims whose names never collide with the claims above.
 
-**Forward compatibility**: `iid.Claims` collects any claim it does not model into `Custom`, so a claim added later by the issuer never breaks parsing in an older plugin; the plugins ignore claims they do not use.
+**Forward compatibility**: claims are decoded with `iid.ParseClaims`, which collects any string claim it does not model into `Claims.Custom` and skips unmodelled claims of other JSON types, so a claim added later by the issuer never breaks parsing in an older plugin; the plugins ignore claims they do not use. Duplicate claim names are still rejected.
 
 **Verification rules** (server side, every one enforced, never trusted from the token):
 
 - **Algorithms**: an explicit allowlist of RS256 (RSA, at least 2048 bits) and ES256 (ECDSA P-256), the same as the issuer's and the JWKS aggregator's. `none`, HMAC algorithms and anything else are rejected, and so is a token whose `alg` differs from the `alg` of the JWK selected by its `kid` (no algorithm confusion). `typ`, when present, must be `JWT`.
 - **Issuer and audience**: `iss` must equal `iid.Issuer` and `aud` must equal `iid.Audience`, both exactly; this prevents a token minted for another consumer, or by another issuer sharing the keys, from being accepted here.
-- **Lifetime**: `nbf <= iat < exp`, `exp - iat` at most `iid.TTL` (5 minutes), `nbf` and `iat` not in the future and `exp` not in the past, each within `clock_skew_tolerance`.
+- **Lifetime**: `nbf <= iat < exp` and `exp - iat` at most `iid.TTL` (5 minutes), both checked on the token's own values, without any tolerance; then, against the server's clock, `nbf` and `iat` not later than now + `clock_skew_tolerance`, and `exp` later than now - `clock_skew_tolerance`. The tolerance (at most 60s) only absorbs clock differences between the issuer and the SPIRE Server; since it applies at both ends, the **maximum acceptance window** of a token is `iid.TTL + 2 × clock_skew_tolerance`: 6 minutes by default, 7 minutes at most. The issuer and the SPIRE Server hosts should keep their clocks synchronized (NTP).
 - **Subject**: `sub` must equal `instance_id`.
 - **Field formats** (the issuer's request validation rules, part of the shared contract): `instance_id` is a canonical lowercase UUID; `project_id` is 1 to 64 characters from `[A-Za-z0-9_-]`; `hostname` is non-empty, at most 255 characters, without control characters. Both IDs end up in the SPIFFE ID path, so this check also guarantees well-formed path segments.
 - **Tags**: a flat map of string values (a non-string value is rejected, never silently dropped), at most `iid.MaxTagsBytes` once serialized, and no key containing `:` (the issuer drops such keys, see selectors below; a token carrying one is a contract violation).
@@ -51,18 +54,20 @@ Package: `internal/plugin/agent/openstackiid`; binary `openstack-agent-plugin`, 
 
 1. On `AidAttestation`, HTTP GET the configured vendordata URL (default `http://169.254.169.254/openstack/latest/vendor_data2.json`). Only a `200` response of at most 1 MiB is accepted; redirects are not followed.
 2. Decode the body as `iid.VendorDataResponse` and extract `openstack_iid.jwt`. If the `openstack_iid` key is missing, return a distinct error saying so: Nova omits a DynamicJSON target whose call failed (`vendordata_dynamic_failure_fatal = False`), so this almost always means the issuer was unavailable (see its `/readiness`).
-3. Check that the token is a compact-serialized JWS (three non-empty, dot-separated segments). The agent does not verify the signature: it does not hold the keys, and the server verifies anyway.
-4. Marshal `{"jwt": "<token>"}` as the attestation payload and send it once via `stream.Send`.
-5. Drain the stream (`stream.Recv`) and return cleanly on `io.EOF` — this attestor never expects a server challenge.
+3. Check that the token is a compact-serialized JWS (three non-empty, dot-separated segments) of at most `iid.MaxTokenBytes`, the server's limit; a larger token is an error and nothing is sent. (The 1 MiB cap of step 1 bounds the whole `vendor_data2.json` document, which may carry other vendordata targets.) The agent does not verify the signature: it does not hold the keys, and the server verifies anyway.
+4. If the token is the one this plugin presented last (same `jti`), wait for a fresh one (see freshness below).
+5. Marshal `{"jwt": "<token>"}` as the attestation payload and send it once via `stream.Send`.
+6. Drain the stream (`stream.Recv`) and return cleanly on `io.EOF` — this attestor never expects a server challenge.
 
-**Freshness**: every attestation and re-attestation fetches a fresh token; the plugin never caches one. Nova itself may serve a cached `vendor_data2.json` for up to `[api] metadata_cache_expiration` (default 15s), so a token can be that old when fetched, well within its 5-minute TTL. A config drive is not supported as a source: its `vendor_data2.json` is written once at boot, so the token it holds expires minutes later.
+**Freshness**: every attestation and re-attestation fetches the token anew; the plugin never caches one. Nova itself may serve a cached `vendor_data2.json` for up to `[api] metadata_cache_expiration` (default 15s), so a token can be that old when fetched, well within its 5-minute TTL — but two attestations within that window would get the *same* token, and the server rejects the second as a replay. To avoid that, the plugin remembers, in memory, the `jti` of the last token it presented (reading it from the payload without verifying the signature, only for this purpose). When the vendordata serves that same token again, the plugin polls the vendordata URL every second until it serves a different token, bounded by `fresh_token_timeout` (default 30s: Nova's default cache window, plus the issuer's per-instance rate limit of one token every 5 seconds, plus a margin); past it, it returns a distinct error saying that Nova keeps serving an already presented token. This covers re-attestation by a running SPIRE Agent. A *restarted* SPIRE Agent normally does not run node attestation at all: it reuses the agent SVID persisted in its data directory while it is valid. An agent that lost its state and attests again within the cache window presents a token the server already accepted, is rejected with a distinct, transient "token already used" error, and succeeds on SPIRE Agent's next attempt, once Nova serves a fresh token. A config drive is not supported as a source: its `vendor_data2.json` is written once at boot, so the token it holds expires minutes later.
 
-**Failure handling**: if the HTTP GET fails, times out, or the response is malformed, return a wrapped error and do not send a payload. Retries/backoff are the SPIRE Agent's responsibility, not this plugin's — do not add a retry loop inside `AidAttestation`.
+**Failure handling**: if the HTTP GET fails, times out, or the response is malformed, return a wrapped error and do not send a payload. Retries/backoff are the SPIRE Agent's responsibility, not this plugin's — do not add a retry loop inside `AidAttestation`. The bounded wait for a fresh token is not a retry: it only runs after a successful fetch of an already presented token, and any error during it is returned at once.
 
 **Config** (`Configure` RPC), from `plugin_data`:
 
 - `vendordata_url` (string, optional, default above)
-- `http_timeout` (duration, default `5s`)
+- `http_timeout` (duration, default `5s`, bounds each fetch)
+- `fresh_token_timeout` (duration, default `30s`, at least `http_timeout`; bounds the wait for a fresh token)
 
 Unknown keys are errors, as in the issuer's configuration, so that typos are never silently ignored.
 
@@ -76,10 +81,10 @@ Package: `internal/plugin/server/openstackiid`; binary `openstack-server-plugin`
 
 **Flow**:
 
-1. `stream.Recv` the agent's payload (at most 16 KiB: a valid token is a few KiB, bounded by the issuer's tags cap); unmarshal the `jwt` field.
+1. `stream.Recv` the agent's payload (at most `iid.MaxTokenBytes` plus 1 KiB for the JSON envelope; the issuer never mints a token over `iid.MaxTokenBytes`, and a real one is about 6 KiB at most); unmarshal the `jwt` field.
 2. Verify the JWT: look up the key by the header `kid` in the key store (see JWK Set retrieval), verify the signature, and apply every verification rule of the claim schema.
 3. If `allowed_project_ids` is set, reject any `project_id` not listed.
-4. Reject a `jti` already used (see replay protection), then record it.
+4. Reject a token minted before this plugin process started, or whose `jti` was already used, then record the `jti` (see replay protection). These checks come last, so that only tokens passing every other check reach the replay cache.
 5. On any failure, return an error immediately. Never emit an agent identity for a token that fails any check.
 6. On success, build the SPIFFE ID `spiffe://<trust_domain>/spire/agent/openstack_iid/<project_id>/<instance_id>` and the selectors (see below), from verified claims only, never from anything outside the signed token.
 7. Return `AgentAttributes{SpiffeId, SelectorValues, CanReattest: true}`.
@@ -90,16 +95,18 @@ Claude should keep JWT verification in its own pure, testable function (token, k
 
 **JWK Set retrieval** (same rules as the issuer's peer aggregation and JWKS aggregator; the implementation reuses their code):
 
+- **Size**: a JWK Set holding more than `iid.MaxJWKSKeys` (100) entries is a failed fetch, never truncated (which would keep an arbitrary subset); the keys of the last successful fetch stay in use (see last known good). With each signer replica publishing a handful of keys, this allows about 25 replicas. Verification never tries several keys: the token's `kid` selects exactly one key, by map lookup, so the number of keys does not multiply the signature work of an attestation.
 - **Polling**: at startup and then every `jwks_refresh_interval` (default 30s, the issuer's default `cache_max_age`), each fetch bounded by `jwks_fetch_timeout` (default 5s).
 - **Fetch rules**: `jwks_url` is https only; TLS `tls_min_version` (`"1.2"` or `"1.3"`, default `"1.3"`) or later, verified against `jwks_ca_cert_path` or the system roots; `200` only, at most 1 MiB, a standard RFC 7517 JWK Set; redirects are never followed.
 - **Key filtering**: only public keys with `use=sig` and an allowed algorithm (RS256 with RSA of at least 2048 bits, ES256 on P-256) are kept; others are left out and logged. A key carrying private key material is rejected and logged as an error, without the material. Two keys with the same kid and different material exclude that kid (fail closed).
 - **Unknown kid**: the plugin re-fetches the JWK Set at once, at most once per `jwks_min_refetch_interval` (default 5s, so a flood of tokens with made-up kids cannot turn into a flood of fetches), then rejects the token if the kid is still unknown.
 - **Last known good**: when a fetch fails, the keys of the last successful fetch keep being used for `jwks_stale_key_retention` (default and minimum 5m, the maximum token TTL), so in-flight tokens keep verifying during short outages. Past that, every attestation is rejected until a fetch succeeds. A failing endpoint is logged when it starts failing and when it recovers, not on every poll.
 
-**Replay protection**: after a token passes every check, its `jti` is recorded in a bounded in-memory cache until `exp + clock_skew_tolerance`, and a token whose `jti` is already recorded is rejected. Only successful attestations are recorded, so a rejected attempt never burns a `jti`. Limits, documented in code and README:
+**Replay protection** (see the trust model for its limits):
 
-- protection is per SPIRE Server instance: HA servers do not share the cache, so a stolen token could still be replayed once against each other server within its TTL;
-- two attestations of the same agent within Nova's metadata cache window (default 15s) would present the same token, and the second is rejected; SPIRE Agent's re-attestation cadence is far longer.
+- **Replay cache**: after a token passes every other check, its `jti` is recorded in an in-memory cache until `exp + clock_skew_tolerance`, the end of its acceptance window, and a token whose `jti` is already recorded is rejected with a distinct error ("token already used"). Only successful attestations are recorded, so a rejected attempt never burns a `jti`. The cache is bounded (100,000 entries, far above any realistic attestation rate over 7 minutes); when it is full even after purging expired entries, attestations are rejected and the condition is logged as an error, rather than forgetting a `jti` early (fail closed).
+- **Startup watermark**: the cache is lost when the plugin process restarts, so a token accepted just before a restart could otherwise be replayed just after it. The plugin therefore records its process start time and rejects, with a distinct error ("token issued before this server started"), any token whose `iat` is earlier than that start time plus `clock_skew_tolerance`. Since the issuer's and the server's clocks differ by at most the tolerance, every token accepted was minted after the process started, and so was never presented to a previous process. The rule is always on and stops mattering once tokens minted before the start have expired. The watermark and the cache belong to the process, not to the configuration: a new `Configure` call keeps both.
+- **Cost for legitimate agents**: right after a SPIRE Server restart, an agent attesting with a token minted shortly before it (still served by Nova's cache) is rejected once, and succeeds on SPIRE Agent's next attempt with a fresh token, typically within `clock_skew_tolerance` plus Nova's cache window (about 45s by default). A running agent never presents the same token twice (see the agent's freshness wait), and a restarted one usually does not attest at all.
 
 **Config**, from `plugin_data`:
 
@@ -111,7 +118,7 @@ Claude should keep JWT verification in its own pure, testable function (token, k
 - `jwks_min_refetch_interval` (duration, default `5s`)
 - `jwks_stale_key_retention` (duration, default `5m`, at least `5m`)
 - `allowed_project_ids` (array of strings, optional allowlist; reject attestation for any other project)
-- `clock_skew_tolerance` (duration, default `30s`, at most `5m`)
+- `clock_skew_tolerance` (duration, default `30s`, at most `60s`)
 
 Unknown keys are errors. The CA bundle, if set, must exist and parse at `Configure` time.
 
@@ -147,8 +154,9 @@ NodeAttestor "openstack_iid" {
   plugin_cmd      = "/usr/bin/openstack-agent-plugin"
   plugin_checksum = "<sha256 of the installed binary>"
   plugin_data {
-    vendordata_url = "http://169.254.169.254/openstack/latest/vendor_data2.json"
-    http_timeout   = "5s"
+    vendordata_url      = "http://169.254.169.254/openstack/latest/vendor_data2.json"
+    http_timeout        = "5s"
+    fresh_token_timeout = "30s"
   }
 }
 ```
@@ -182,7 +190,9 @@ The binary paths are those installed by the `openstack-agent-plugin` and `openst
 | Vendordata endpoint unreachable, non-`200`, or too large | Return error from `AidAttestation`; no payload sent | N/A |
 | Malformed vendordata response | Return error; no payload sent | N/A |
 | `openstack_iid` target missing from the vendordata (issuer unavailable) | Return a distinct error naming the missing target; no payload sent | N/A |
-| Payload malformed or larger than 16 KiB | N/A | Reject, return error |
+| Token larger than `iid.MaxTokenBytes` | Return error; no payload sent | Reject (payload over the limit) |
+| Vendordata still serving the last presented token after `fresh_token_timeout` | Return a distinct error; no payload sent | N/A |
+| Payload malformed or over its size limit | N/A | Reject, return error |
 | `alg` not allowed, or differing from the JWK's | N/A | Reject, return error, log the `alg` and `kid` |
 | Unknown `kid` | N/A | Re-fetch the JWK Set (rate-limited); reject if still unknown, log the `kid` |
 | JWT signature invalid | N/A (agent doesn't verify) | Reject attestation, return error, log the `kid` attempted |
@@ -191,7 +201,10 @@ The binary paths are those installed by the `openstack-agent-plugin` and `openst
 | `sub` differs from `instance_id`; malformed `instance_id`, `project_id` or `hostname` | N/A | Reject, return error |
 | Tag value not a string, tag key containing `:`, or tags over the size cap | N/A | Reject, return error |
 | `project_id` not in `allowed_project_ids` | N/A | Reject, return error naming the disallowed project |
-| `jti` already used | N/A | Reject, return error, log the `instance_id` |
+| `jti` already used | N/A | Reject with a distinct "token already used" error, log the `instance_id` |
+| Token issued before the plugin process started (startup watermark) | N/A | Reject with a distinct "issued before this server started" error; the agent's next attempt carries a fresh token |
+| Replay cache full, even after purging expired entries | N/A | Reject, log an error (fail closed) |
+| JWK Set with more than `iid.MaxJWKSKeys` keys | N/A | Treat as a failed fetch: keep the last known good keys, log the error |
 | JWK Set fetch fails | N/A | Keep using the last known good keys for `jwks_stale_key_retention`; past that, reject all attestation until a fetch succeeds |
 
 None of these paths should panic. Every rejection must be a clean gRPC error surfaced through the plugin SDK, never a crashed plugin process — a crashed server-side plugin takes down node attestation for every agent, not just the failing one. Like the issuer, the server plugin treats unavailability as safe, never as a reason to loosen verification.
@@ -201,15 +214,17 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 **Unit tests** (no running SPIRE needed):
 
 - JWT verification function: valid RS256 and ES256 tokens accepted; expired, not-yet-valid, over-long lifetime, wrong `iss`, wrong `aud`, `sub` differing from `instance_id`, unknown `kid`, tampered signature, `alg: none`, an HMAC `alg`, and an `alg` differing from the JWK's all rejected.
-- Claim validation: malformed IDs and hostnames, non-string tag values, tag keys containing `:` and oversized tags rejected; an unknown extra claim accepted and ignored.
+- Claim validation: malformed IDs and hostnames, non-string tag values, tag keys containing `:` and oversized tags rejected; unknown extra claims, string or not, accepted and ignored.
+- Clock skew: tokens just inside and just outside `iid.TTL + 2 × clock_skew_tolerance` around the server's clock; a token with `exp - iat` over `iid.TTL` rejected whatever the tolerance.
 - SPIFFE ID and selector construction from a fixed set of verified claims, including tags with special characters (values containing `:`) and with and without enrichment claims.
-- JWK Set retrieval: key filtering, kid conflict exclusion, last-known-good retention and its expiry, a rate-limited re-fetch on an unknown kid that then succeeds.
-- Replay cache: a reused `jti` rejected, a rejected attempt not recorded, entries forgotten after `exp + clock_skew_tolerance`, the cache bounded.
+- JWK Set retrieval: key filtering, kid conflict exclusion, a set with more than `iid.MaxJWKSKeys` keys treated as a failed fetch, last-known-good retention and its expiry, a rate-limited re-fetch on an unknown kid that then succeeds.
+- Replay cache: a reused `jti` rejected, a rejected attempt not recorded, entries forgotten after `exp + clock_skew_tolerance`, a full cache rejecting attestations.
+- Startup watermark: a token minted before the process start (plus tolerance) rejected, one minted after accepted; a new `Configure` call keeps the cache and the watermark.
 - Config validation: missing, unknown, malformed and out-of-range fields produce errors naming them; a non-https `jwks_url` or one ending in `/jwks/local.json` rejected.
 
 **Integration tests**, using the plugin SDK's test harness (`plugintest`):
 
-- Agent plugin against a mock vendordata HTTP server (success, timeout, malformed JSON, missing `openstack_iid` target, 500 response, redirect).
+- Agent plugin against a mock vendordata HTTP server (success, timeout, malformed JSON, missing `openstack_iid` target, token over `iid.MaxTokenBytes`, 500 response, redirect), including the freshness wait: a second attestation served the same token waits until the server serves a fresh one, and fails with the distinct error if none comes within `fresh_token_timeout`.
 - Server plugin against a table of JWTs signed with test keys and a test JWKS server, covering every server-side row in the failure-modes table above.
 - End-to-end with the real issuer: the issuer's test harness (`internal/metadata/integration`, with the mocked Keystone and Nova of `internal/metadata/openstacktest`) runs the signer replicas, peered or with an aggregator; a mock metadata server serves the token the signer returned for the instance; the agent plugin presents it and the server plugin verifies it against the replicas' (or the aggregator's) `/.well-known/jwks.json`, yielding the expected SPIFFE ID and selectors. Key rotation drill: tokens signed just before a rotation and just after it both attest.
 - Optionally, a real SPIRE Agent and Server pair running both plugins, confirming that the resulting agent SVID carries the expected SPIFFE ID.
@@ -227,14 +242,12 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 
 ## Resolved questions and out of scope
 
-**Resolved questions** (open in the first draft):
+**Resolved questions** (open in earlier drafts):
 
 - Static pinned key vs. JWKS endpoint for the server trust anchor: JWKS endpoint only. The issuer's keys are ephemeral and rotate at least daily, so a pinned key cannot work; the endpoint's availability is covered by last-known-good retention, its integrity by verified TLS with a pinned CA.
-- Server-side `jti` tracking: yes, in a bounded in-memory cache per SPIRE Server instance, on top of the short TTL and the TLS-protected transport (the issuer leaves replay tracking to this plugin).
-
-**Open question**:
-
-- [ ] Re-attestation cadence: how often should the SPIRE Agent be configured to re-run this flow, given `CanReattest: true`. Any cadence works with the issuer, since every attempt fetches a fresh token; attempts more frequent than the issuer's per-instance rate limit (1/5s) or Nova's metadata cache (15s) gain nothing.
+- Server-side `jti` tracking: yes, in a bounded in-memory cache per SPIRE Server instance, on top of the short TTL and the TLS-protected transport (the issuer leaves replay tracking to this plugin); the agent waits for a fresh token rather than present one twice.
+- Server-side replay across restarts: a startup watermark rejects tokens minted before the plugin process started; replay across HA SPIRE Server instances is a documented, accepted limitation (see the trust model).
+- Re-attestation cadence: SPIRE's default needs no tuning. A running SPIRE Agent re-attests when its agent SVID nears expiry (about half of the server's `agent_ttl`, i.e. roughly every 30 minutes with the default 1h), far beyond Nova's metadata cache window; a restarted agent reuses its persisted SVID. A cadence shorter than `fresh_token_timeout` would still work, but each attempt might wait for Nova to serve a fresh token. Operators may also lower Nova's `metadata_cache_expiration` to shorten those waits, at the cost of more vendordata calls to the issuer.
 
 **Explicitly out of scope for this spec**:
 
