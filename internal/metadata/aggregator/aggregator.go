@@ -179,6 +179,13 @@ func (a *Aggregator) Run(ctx context.Context) error {
 	}
 }
 
+// Refresh fetches every replica once, at once, and records the outcomes,
+// outside the polling schedule: a consumer meeting an unknown kid uses it to
+// pick up a key published since the last poll. Callers should rate-limit it.
+func (a *Aggregator) Refresh(ctx context.Context) {
+	a.poll(ctx)
+}
+
 // poll fetches every replica concurrently and records the outcomes.
 func (a *Aggregator) poll(ctx context.Context) {
 	type outcome struct {

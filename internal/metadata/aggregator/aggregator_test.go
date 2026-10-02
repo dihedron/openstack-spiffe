@@ -461,6 +461,24 @@ func TestReplicaStatusTransitionsLogged(t *testing.T) {
 	}
 }
 
+func TestRefresh(t *testing.T) {
+	ra := newReplica(t)
+	ra.publish(t, ecKey(t, "a"))
+	a := newAggregator(t, &testClock{now: testNow}, ra)
+	if got := kids(t, a); len(got) != 0 {
+		t.Fatalf("kids %v before any fetch", got)
+	}
+	a.Refresh(context.Background())
+	if got := kids(t, a); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("kids %v after Refresh, want [a]", got)
+	}
+	ra.publish(t, ecKey(t, "a"), ecKey(t, "b"))
+	a.Refresh(context.Background())
+	if got := kids(t, a); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("kids %v after a second Refresh, want [a b]", got)
+	}
+}
+
 func TestRun(t *testing.T) {
 	ra := newReplica(t)
 	ra.publish(t, ecKey(t, "a"))
