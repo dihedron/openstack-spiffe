@@ -1,6 +1,6 @@
 # OpenStack metadata JWT issuer — implementation spec
 
-Sep 20, 2026 (revised Oct 1, 2026) · @Andrea Funtò
+Sep 20, 2026 (revised Oct 1 and Oct 2, 2026) · @Andrea Funtò
 
 ## Overview
 
@@ -84,7 +84,7 @@ Trust in Nova's claims about `project-id` and `instance-id` thus rests on the au
 
 ## Claim schema
 
-The schema must match the companion `openstack_iid` node attestor spec exactly: it is a shared contract. The header and claim definitions, the fixed values (`iss`, `aud`, target name, maximum TTL, tags size cap) and the reserved claim names are defined once, in a single Go package (`pkg/iid`) imported by this service and by the SPIRE plugins, never hand-copied.
+The schema must match the companion `openstack_iid` node attestor spec exactly: it is a shared contract. The header and claim definitions, the fixed values (`iss`, `aud`, target name, maximum TTL, tags size cap), the reserved claim names and the field validation rules (the `project-id`, `instance-id` and `hostname` rules of request validation, which the SPIRE Server-side plugin re-applies to the claims) are defined once, in a single Go package (`pkg/iid`) imported by this service and by the SPIRE plugins, never hand-copied.
 
 ```json
 {
@@ -112,6 +112,7 @@ The schema must match the companion `openstack_iid` node attestor spec exactly: 
 - **TTL**: `exp - iat` is a short, fixed window: `token_ttl_seconds`, default 300 (5 minutes), never more. This service enforces it, not just documents it: it refuses to start with a longer or non-positive value. `iat` and `nbf` are the issuance time.
 - **Tags and payload bloat protection**: users frequently abuse instance metadata for large cloud-init scripts. To keep JWT-bearing headers within standard HTTP limits (4–8 KB) downstream, the `tags` claim is derived from the incoming `metadata` field as follows:
   - only string values are kept; other entries are dropped (not an error);
+  - keys containing `:` are dropped, since they would make the `openstack_iid:tag:<key>:<value>` selector of the SPIRE plugins ambiguous (the SPIRE Server-side plugin rejects a token carrying one);
   - if `tags.allowlist` is configured, only the listed keys are kept (an empty allowlist keeps every string entry, and `config check` warns about it);
   - the JSON-serialized `tags` object never exceeds 1024 bytes (escaping included): entries are considered in sorted key order and any entry that would not fit is dropped, so the result is deterministic and later, smaller entries can still fit;
   - every dropped entry is logged with its key and the reason, never its value; the token is still issued.
@@ -209,7 +210,7 @@ Since every replica signs with its own keys, the SPIRE Server-side plugin fetche
 - **Unreachable replicas**: the keys from a replica's last successful fetch are kept for `stale_key_retention` (default and minimum: 5 minutes, the maximum token TTL), so in-flight tokens keep verifying during short outages. Keys a reachable replica stops publishing are dropped on its next successful fetch.
 - **Endpoints**: `GET /.well-known/jwks.json` with `Cache-Control: public, max-age=<cache_max_age>` (default 30s), so consumers refresh on a reasonable schedule without hitting the endpoint on every attestation; `/liveness`; `/readiness` (ready while at least one replica has been fetched successfully within `stale_key_retention`, i.e. while the merged set holds any replica's keys; see the health endpoints).
 
-**Requirements on the SPIRE Server-side plugin** (companion spec): fetch keys from the peered signer replicas' `/.well-known/jwks.json` or from the aggregator, select the verification key by the JWT header kid, and re-fetch the JWK Set (rate-limited) when it meets an unknown kid.
+**Requirements on the SPIRE Server-side plugin** (companion spec, which details them): fetch keys from the peered signer replicas' `/.well-known/jwks.json` or from the aggregator, never from a replica's `/jwks/local.json`, over verified TLS; select the verification key by the JWT header kid, and re-fetch the JWK Set (rate-limited) when it meets an unknown kid; keep the last known good keys for at least the maximum token TTL; and enforce `iss`, `aud` and the maximum TTL itself rather than trusting the token.
 
 ## Freshness, replay and rate limiting
 
@@ -217,7 +218,7 @@ Because Nova calls this service whenever the instance reads its vendordata, the 
 
 - **Short TTL**: 5 minutes (see the claim schema), which bounds the damage window if a token is exfiltrated in transit.
 - **Fresh jti**: a new UUID for every token, even for the same instance asking again seconds later; a jti is never reused.
-- **No replay tracking**: enforcing jti uniqueness is the responsibility of the downstream SPIRE Server-side plugin, if it chooses to track it. This service's job is to never issue two tokens with the same jti, not to police reuse downstream.
+- **No replay tracking**: enforcing jti uniqueness is the responsibility of the downstream SPIRE Server-side plugin, which keeps a bounded in-memory cache of used jtis per SPIRE Server instance (companion spec). This service's job is to never issue two tokens with the same jti, not to police reuse downstream.
 - **Two-stage rate limiting**: limits blunt any attempt to use this endpoint to exhaust the signing key store's request budget. The instance ID is only available inside the JSON body, so rate limiting happens in two stages, both answering `429`:
   1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s, keyed by the client address described below) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`: a larger declared `Content-Length` is rejected with `400` at once, and reading an undeclared body stops at the cap), so spam is rejected cheaply without allocating memory for the payload. IPv6 sources are keyed by their /64 prefix, since a single host usually controls a whole /64 and could otherwise bypass the limit by rotating addresses.
   2. **Right after a size-capped decode**: a per-instance-ID token bucket (`rate_limit_per_instance`, default 1/5s: no more than one token every few seconds per instance), before any lookup or signing operation.
@@ -380,7 +381,7 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 
 **Unit tests**:
 
-- Claim construction from a valid Nova request body, including `tags` filtering: non-string values dropped, the allowlist applied, the strict size limit enforced.
+- Claim construction from a valid Nova request body, including `tags` filtering: non-string values and keys containing `:` dropped, the allowlist applied, the strict size limit enforced.
 - Request validation rejects malformed bodies, duplicate members and non-canonical instance IDs.
 - Instance verification rejects unknown instances, project mismatches and disallowed statuses; enrichment claims appear only when enabled; lookups are served from cache within the TTL.
 - The kid correctly reflects the active (in-memory or Vault-backed) signing key on every issued token.
