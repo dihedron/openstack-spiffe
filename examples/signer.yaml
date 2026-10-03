@@ -5,8 +5,8 @@
 # the OS_* environment variables (see signer.env).
 
 listen_addr: "0.0.0.0:8443"
-tls_cert_path: "/etc/openstack-metadata-signer/tls.crt"  # required
-tls_key_path: "/etc/openstack-metadata-signer/tls.key"   # required, mode 0600
+tls_cert_path: "/etc/openstack-spire-issuer/tls.crt"     # required
+tls_key_path: "/etc/openstack-spire-issuer/tls.key"      # required, mode 0600, owned by openstack-spire-issuer
 tls_min_version: "1.3"                                   # or "1.2": server and OpenStack connections
 replica_id: "signer-a"                                   # unique per replica; default: first label of the hostname
 

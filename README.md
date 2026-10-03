@@ -36,7 +36,7 @@ A complete solution providing all needed components to implement SPIFFE on OpenS
 make                       # or: go build ./cmd/openstack-spire-issuer
 ```
 
-`make go-snapshot` builds release artifacts in `dist/` with goreleaser. Each application gets its own archive and its own `deb`, `rpm` and `apk` packages: `openstack-spire-issuer` (which also installs the sample configurations under `/etc/openstack-spire-issuer/`), `openstack-server-plugin` and `openstack-agent-plugin`.
+`make go-snapshot` builds release artifacts in `dist/` with goreleaser. Each application gets its own archive and its own `deb` and `rpm` packages: `openstack-spire-issuer` (which also installs the sample configurations under `/etc/openstack-spire-issuer/`), `openstack-server-plugin` and `openstack-agent-plugin`.
 
 ### Configure
 
@@ -76,6 +76,19 @@ openstack-spire-issuer jwks aggregate --config /etc/openstack-spire-issuer/aggre
 ```
 
 Both services perform a pre-flight check at startup. They refuse to start (exit code 1) on any configuration error, on problems with the referenced files, and, for the signer, on missing credentials or a failed Keystone authentication. Both shut down gracefully on `SIGINT`/`SIGTERM`, giving in-flight requests up to 15 seconds.
+
+**Running under systemd.** The `deb` and `rpm` packages install two units, both **disabled**: `openstack-spire-issuer.service` (signer) and `openstack-spire-issuer-aggregator.service` (aggregator). They run as the `openstack-spire-issuer` system user, which the package creates, and read their configuration from `/etc/openstack-spire-issuer/`. The signer also reads its `OS_*` credentials from `signer.env` there. To bring a replica up:
+
+```bash
+sudoedit /etc/openstack-spire-issuer/signer.yaml /etc/openstack-spire-issuer/signer.env
+sudo install -o openstack-spire-issuer -g openstack-spire-issuer -m 0600 tls.key /etc/openstack-spire-issuer/tls.key
+sudo install -m 0644 tls.crt /etc/openstack-spire-issuer/tls.crt
+sudo -u openstack-spire-issuer openstack-spire-issuer config check --signer /etc/openstack-spire-issuer/signer.yaml
+sudo systemctl enable --now openstack-spire-issuer.service
+journalctl -u openstack-spire-issuer.service -f
+```
+
+Package upgrades restart only the units that are running, and removing the package stops and disables them. The units are sandboxed (`ProtectSystem=strict`, no capabilities), so set `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` in `signer.env` (or with `systemctl edit` for the aggregator), and leave logs on standard error.
 
 **Probes.**
 - `/liveness` returns 200 while the process is serving.

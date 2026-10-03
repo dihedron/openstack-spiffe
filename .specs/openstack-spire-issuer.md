@@ -280,8 +280,8 @@ The client address keys the per-source rate limit and identifies the caller in l
 ```yaml
 listen_addr: "0.0.0.0:8443"
 tls_min_version: "1.3"                                  # or "1.2" (server and OpenStack connections)
-tls_cert_path: "/etc/openstack-metadata-signer/tls.crt" # required
-tls_key_path: "/etc/openstack-metadata-signer/tls.key"  # required
+tls_cert_path: "/etc/openstack-spire-issuer/tls.crt"    # required
+tls_key_path: "/etc/openstack-spire-issuer/tls.key"     # required
 replica_id: "signer-a"                                  # default: first label of the hostname
 key_store:
   backend: "ephemeral_memory"                           # or "vault_transit" (later)
@@ -329,8 +329,8 @@ The service's OpenStack credentials never appear in this file: they come from th
 ```yaml
 listen_addr: "0.0.0.0:8444"
 tls_min_version: "1.3"                                 # or "1.2" (server and replica connections)
-tls_cert_path: "/etc/jwks-aggregator/tls.crt"          # required
-tls_key_path: "/etc/jwks-aggregator/tls.key"           # required
+tls_cert_path: "/etc/openstack-spire-issuer/aggregator-tls.crt" # required
+tls_key_path: "/etc/openstack-spire-issuer/aggregator-tls.key" # required
 replicas:                                              # required, https only
   - "https://signer-a.internal:8443/jwks/local.json"
   - "https://signer-b.internal:8443/jwks/local.json"
@@ -416,6 +416,16 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
   The signer's load balancer either preserves client addresses, or is listed in `client_address.trusted_proxies` and forwards them in `client_address.header` (see client address).
 - No private key material is ever written to the deployment host's disk. The only secrets the service holds locally are its client credentials (Keystone `OS_*` variables, and the Vault credentials once `vault_transit` exists); they come from the platform's standard secret-injection mechanism, never baked into the image.
 - Annotated sample configurations (signer, with peers, aggregator, `OS_*` credentials template and the Nova settings) live in `examples/`, and a test keeps the signer and aggregator samples valid, cross-file checks included; the README documents deployment, OpenStack setup and tuning.
+- **System packages and systemd.** goreleaser builds a `deb` and an `rpm` package (no `apk`: the services are not meant to run on Alpine). Besides the binary (`/usr/bin/openstack-spire-issuer`), the package installs:
+  - two systemd units in `/usr/lib/systemd/system/`: `openstack-spire-issuer.service` runs a signer replica (`service start --config /etc/openstack-spire-issuer/signer.yaml`, credentials from `EnvironmentFile=/etc/openstack-spire-issuer/signer.env`), and `openstack-spire-issuer-aggregator.service` runs the JWKS aggregator (`jwks aggregate --config /etc/openstack-spire-issuer/aggregator.yaml`);
+  - the sample `signer.yaml`, `aggregator.yaml` and `signer.env` in `/etc/openstack-spire-issuer/` as configuration files the package manager never overwrites, mode `0640`, owned by `root:openstack-spire-issuer`; the directory itself is mode `0750` with the same ownership.
+
+  Both units are installed **disabled** and stopped: no package script enables or starts them, since the samples are not a working configuration. The operator configures the replica, installs its TLS certificate and key (key mode `0600`, owned by `openstack-spire-issuer`), and runs `systemctl enable --now` on the unit(s) it needs. The package scripts:
+  - create the locked system user and group `openstack-spire-issuer` (no home, no login shell) before installation;
+  - after installation, reload systemd and restart only the units that were running, so an upgrade picks up the new binary while a fresh install starts nothing;
+  - before removal (not on upgrade), stop and disable both units, and reload systemd afterwards. The user is kept, so that files it owns stay attributed.
+
+  The units run as `openstack-spire-issuer` with no capabilities (the default ports are unprivileged) and a read-only view of the system (`ProtectSystem=strict` and related hardening). They restart on failure after 5 seconds, and allow 30 seconds to stop, above the 15-second graceful drain. Logs go to standard error and thus to the journal; file logging and profiling, which write to the working directory, are not supported under the units.
 - Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
 
 ## Resolved questions and out of scope

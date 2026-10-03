@@ -235,7 +235,7 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 
 - Both plugins live in this repository's single Go module, next to the issuer, so that all three import the same `pkg/iid`; each is its own binary (`openstack-agent-plugin`, `openstack-server-plugin`), built with `CGO_ENABLED=0` for simple, static distribution.
 - Both are built against `github.com/spiffe/spire-plugin-sdk` at a pinned version, recorded in `go.mod`.
-- Releases go through the existing goreleaser configuration: each plugin gets its own archive and its own `deb`, `rpm` and `apk` package, installing only its binary.
+- Releases go through the existing goreleaser configuration: each plugin gets its own archive and its own `deb` and `rpm` package, installing only its binary.
 - The server plugin is deployed wherever SPIRE Server runs (a small number of hosts, standard config management), with network access to the JWK Set URL (the signer replicas' or the aggregator's load balancer).
 - The agent plugin must ship inside every OpenStack instance image the agent runs on — bake it into the base image or install it via the provisioning pipeline, so it's present before SPIRE Agent starts.
 - Record the SHA-256 of each installed binary and set it as `plugin_checksum` in the corresponding `.conf` file — this is a supply-chain control (SPIRE refuses to load a plugin binary whose hash doesn't match), not optional hardening. A `make checksum` target prints the SHA-256 of each plugin binary produced by the build; goreleaser's checksums file covers the release archives and packages.

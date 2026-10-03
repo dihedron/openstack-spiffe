@@ -1,0 +1,48 @@
+[Unit]
+Description=OpenStack SPIRE instance identity token issuer (signer replica)
+Documentation=https://github.com/dihedron/openstack-spiffe
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=openstack-spire-issuer
+Group=openstack-spire-issuer
+# OpenStack credentials of the signer's service user (OS_* variables) and,
+# optionally, OPENSTACK_SPIRE_ISSUER_LOG_LEVEL
+EnvironmentFile=/etc/openstack-spire-issuer/signer.env
+ExecStart=/usr/bin/openstack-spire-issuer service start --config /etc/openstack-spire-issuer/signer.yaml
+Restart=on-failure
+RestartSec=5s
+# graceful shutdown drains in-flight requests for up to 15 seconds
+TimeoutStopSec=30s
+
+# hardening: the service only reads its configuration and talks over TCP
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
