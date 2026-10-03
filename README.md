@@ -1,4 +1,7 @@
 # openstack-spiffe
+
+[![Go Coverage](https://github.com/dihedron/openstack-spiffe/wiki/coverage.svg)](https://raw.githack.com/wiki/dihedron/openstack-spiffe/coverage.html)
+
 A complete solution providing all needed components to implement SPIFFE on OpenStack.
 
 ## openstack-spire-issuer: the instance identity token issuer

@@ -36,3 +36,17 @@ jobs:
         run: make
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Go coverage report
+        uses: ncruces/go-coverage-report@v0.3.2        
+        with:
+          report: true
+          chart: true
+          amend: true
+        if: |
+          matrix.os == 'ubuntu-latest' &&
+          github.event_name == 'push'  
+        continue-on-error: true
