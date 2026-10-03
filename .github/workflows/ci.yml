@@ -37,16 +37,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Test
-        run: go test -v ./...
+      - name: Test and produce Go code coverage report
+        run: go test -coverprofile=coverage.txt
 
-      - name: Go coverage report
-        uses: ncruces/go-coverage-report@v0.3.2        
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          report: true
-          chart: true
-          amend: true
-        if: |
-          matrix.os == 'ubuntu-latest' &&
-          github.event_name == 'push'  
-        continue-on-error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
