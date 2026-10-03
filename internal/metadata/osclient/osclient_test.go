@@ -22,7 +22,7 @@ func getenv(env map[string]string) func(string) string {
 func TestCredentialsFromOpenrc(t *testing.T) {
 	env := map[string]string{
 		"OS_AUTH_URL":            "https://keystone.example:5000/v3",
-		"OS_USERNAME":            "spire-metadata",
+		"OS_USERNAME":            "spire-issuer",
 		"OS_PASSWORD":            "secret",
 		"OS_USER_DOMAIN_NAME":    "Default",
 		"OS_PROJECT_NAME":        "service",
@@ -38,7 +38,7 @@ func TestCredentialsFromOpenrc(t *testing.T) {
 		t.Fatalf("endpoint preferences %q/%q, want internal/RegionOne", c.Interface, c.Region)
 	}
 	opts := c.authOptions()
-	if opts.Username != "spire-metadata" || opts.DomainName != "Default" || !opts.AllowReauth {
+	if opts.Username != "spire-issuer" || opts.DomainName != "Default" || !opts.AllowReauth {
 		t.Fatalf("unexpected auth options: %+v", opts)
 	}
 	if opts.Scope == nil || opts.Scope.ProjectName != "service" || opts.Scope.DomainName != "Default" {

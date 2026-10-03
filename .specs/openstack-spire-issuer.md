@@ -4,7 +4,7 @@ Sep 20, 2026 (revised Oct 1 and Oct 2, 2026) · @Andrea Funtò
 
 ## Overview
 
-This spec defines the OpenStack metadata JWT issuer (`openstack-spire-metadata`): the service that runs alongside Nova's dynamic vendordata mechanism and hands each booting instance a short-lived, signed JWT proving its `project_id` and `instance_id`.
+This spec defines the OpenStack metadata JWT issuer (`openstack-spire-issuer`): the service that runs alongside Nova's dynamic vendordata mechanism and hands each booting instance a short-lived, signed JWT proving its `project_id` and `instance_id`.
 
 This JWT is the trust root that the `openstack_iid` SPIRE node attestor pair (see the companion spec) verifies. Its correctness matters more than almost any other component in the system: every downstream SPIFFE ID and selector is only as trustworthy as this service's binding between "who is asking" and "what the token claims". The design addresses high-throughput data-plane requirements (instance boot storms), the realities of control-plane authorization, and the size of the token payload.
 
@@ -14,9 +14,9 @@ This JWT is the trust root that the `openstack_iid` SPIRE node attestor pair (se
 
 The system has three parts:
 
-- **Signer replicas** (`openstack-spire-metadata service start`): several independent, share-nothing replicas behind a load balancer, the target of Nova's DynamicJSON configuration. Each replica authenticates Nova, verifies the instance, mints tokens signed with its own key, and publishes its own public keys. When its configuration lists its peers (the other replicas), a replica also acts as a JWKS aggregator: it polls its peers' public keys and serves them merged with its own (see peer aggregation). Running N replicas with each other as peers thus gives N token minters and N JWKS aggregators, with no further deployment.
+- **Signer replicas** (`openstack-spire-issuer service start`): several independent, share-nothing replicas behind a load balancer, the target of Nova's DynamicJSON configuration. Each replica authenticates Nova, verifies the instance, mints tokens signed with its own key, and publishes its own public keys. When its configuration lists its peers (the other replicas), a replica also acts as a JWKS aggregator: it polls its peers' public keys and serves them merged with its own (see peer aggregation). Running N replicas with each other as peers thus gives N token minters and N JWKS aggregators, with no further deployment.
 - **Key store**: behind a single interface, either ephemeral in-memory keys owned by each replica (implemented first) or Vault's transit engine (later).
-- **JWKS aggregator** (`openstack-spire-metadata jwks aggregate`, optional): one or more stateless instances behind their own load balancer that merge the replicas' public keys into a single JWK Set, for deployments where the SPIRE Server-side plugin should not reach the signers directly (e.g. to keep it off the Nova-facing network).
+- **JWKS aggregator** (`openstack-spire-issuer jwks aggregate`, optional): one or more stateless instances behind their own load balancer that merge the replicas' public keys into a single JWK Set, for deployments where the SPIRE Server-side plugin should not reach the signers directly (e.g. to keep it off the Nova-facing network).
 
 The SPIRE Server-side plugin fetches the merged JWK Set either from the signer replicas (when peers are configured) or from the JWKS aggregator.
 
@@ -206,7 +206,7 @@ When `peers.urls` lists the local JWKS endpoints of the other replicas, a replic
 
 Since every replica signs with its own keys, the SPIRE Server-side plugin fetches the merged keys of all replicas, either from the replicas themselves (peer aggregation, above) or from a separate JWKS aggregator, which is optional and useful when the SPIRE Server should not reach the signers directly.
 
-- **Command**: `openstack-spire-metadata jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS (`tls_min_version`, default 1.3, or later), with the certificate the SPIRE Server operator pins.
+- **Command**: `openstack-spire-issuer jwks aggregate --config <path>`. The aggregator is stateless, so it can itself run as multiple replicas behind a load balancer; it is served over TLS (`tls_min_version`, default 1.3, or later), with the certificate the SPIRE Server operator pins.
 - **Discovery**: a static list of replica JWKS URLs (`replicas`, https only), pointing at the replicas' `/jwks/local.json`. A replica's `/.well-known/jwks.json` still works, but on a replica with peers it also carries the peers' keys, which the aggregator then imports twice and drops later than needed, so `config check` warns about it.
 - **Polling**: at startup and then every `poll_interval` (default 30s), all replicas are fetched concurrently, each within `fetch_timeout` (default 5s), over TLS (`tls_min_version` or later) verified against `replica_ca_cert_path` (or the system roots). A fetch fails on a non-`200` status, a response larger than 1 MiB, a body that is not a JWK Set, or a JWK Set with more than `MaxJWKSKeys` (100) entries (never truncated, which would keep an arbitrary subset; a replica publishes a handful of keys); redirects are never followed, since the configured URL itself must answer. A failing replica is logged when it starts failing and when it recovers, not on every poll.
 - **Merging**: the output is a standard RFC 7517 JWK Set (not a custom map), deduplicated by kid. If two replicas, or one replica twice, publish the same kid with different key material, that kid is excluded and an error is logged on every poll while the conflict lasts (fail closed); identical duplicates are served once. Only public keys with `use=sig` and an allowed algorithm (RS256 with RSA of at least 2048 bits, ES256 on P-256) are passed through; other keys are left out and logged. A key carrying private key material (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth` or `k`) is rejected and logged as an error, without the material itself; the replica's other keys are still used. The merged set is sorted by kid.
@@ -255,7 +255,7 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **TLS**: each service's `tls_min_version` (`"1.2"` or `"1.3"`, default `"1.3"`) is the minimum TLS version of both its HTTPS server and the connections it makes: the signer's to Keystone, Nova and its peers, the aggregator's to the replicas. `"1.3"` is recommended; `"1.2"` exists for peers that cannot negotiate TLS 1.3 (e.g. an older load balancer in front of the OpenStack APIs) and makes `config check` warn. Any other value is an error.
 
-**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_METADATA_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_METADATA_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials and `user-data` are never logged.
+**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_ISSUER_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials and `user-data` are never logged.
 
 **Request IDs**: every response carries an `X-Request-Id` header with a random ID generated by the service (incoming values are ignored), and every log record written while handling the request carries it as `request_id`.
 
@@ -269,9 +269,9 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **Command line** (object/verb convention):
 
-- `openstack-spire-metadata service start --config <path>`: run a signer replica. It refuses to start (exit code 1) on any configuration error (the pre-flight check includes the file checks of `config check`), missing or invalid `OS_*` credentials, a failed Keystone authentication or an unusable TLS certificate, and logs configuration warnings. It serves HTTPS with TLS `tls_min_version` or later and bounded timeouts (read header 5s, read 15s, write 30s, idle 2m; headers at most 64 KiB), and on `SIGINT` or `SIGTERM` stops accepting connections and lets in-flight requests complete for up to 15 seconds.
-- `openstack-spire-metadata jwks aggregate --config <path>`: run the JWKS aggregator. Like `service start`, it refuses to start on any configuration error, file checks included, logs configuration warnings, serves TLS `tls_min_version` or later with the same timeouts, and shuts down gracefully on `SIGINT` or `SIGTERM`.
-- `openstack-spire-metadata config check ...`: validate configuration files (see below).
+- `openstack-spire-issuer service start --config <path>`: run a signer replica. It refuses to start (exit code 1) on any configuration error (the pre-flight check includes the file checks of `config check`), missing or invalid `OS_*` credentials, a failed Keystone authentication or an unusable TLS certificate, and logs configuration warnings. It serves HTTPS with TLS `tls_min_version` or later and bounded timeouts (read header 5s, read 15s, write 30s, idle 2m; headers at most 64 KiB), and on `SIGINT` or `SIGTERM` stops accepting connections and lets in-flight requests complete for up to 15 seconds.
+- `openstack-spire-issuer jwks aggregate --config <path>`: run the JWKS aggregator. Like `service start`, it refuses to start on any configuration error, file checks included, logs configuration warnings, serves TLS `tls_min_version` or later with the same timeouts, and shuts down gracefully on `SIGINT` or `SIGTERM`.
+- `openstack-spire-issuer config check ...`: validate configuration files (see below).
 
 ## Configuration
 
@@ -348,7 +348,7 @@ Unknown keys are errors in both files, so that typos are never silently ignored.
 The binary provides a command to validate configuration files before deployment (e.g. in CI or a pre-rollout hook), applying the same rules the services apply at startup:
 
 ```
-openstack-spire-metadata config check [--signer PATH]... [--aggregator PATH] [--format text|json|yaml] [--strict] [--skip-files] [--print-effective]
+openstack-spire-issuer config check [--signer PATH]... [--aggregator PATH] [--format text|json|yaml] [--strict] [--skip-files] [--print-effective]
 ```
 
 - **Complete report**: all findings are reported in a single run, each with file, line, YAML path, severity (error or warning) and message; the command never stops at the first problem.

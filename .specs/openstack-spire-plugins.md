@@ -6,7 +6,7 @@ Sep 20, 2026 (revised Oct 2, 2026) · @Andrea Funtò
 
 ## Overview
 
-This spec defines a matched pair of SPIRE plugins, `openstack_iid`, that attest an OpenStack Nova instance's identity to a SPIRE Server using a short-lived signed JWT issued by the OpenStack metadata JWT issuer (`openstack-spire-metadata`, companion spec) and delivered to the instance through Nova's DynamicJSON vendordata (`vendor_data2.json`, under the `openstack_iid` target).
+This spec defines a matched pair of SPIRE plugins, `openstack_iid`, that attest an OpenStack Nova instance's identity to a SPIRE Server using a short-lived signed JWT issued by the OpenStack metadata JWT issuer (`openstack-spire-issuer`, companion spec) and delivered to the instance through Nova's DynamicJSON vendordata (`vendor_data2.json`, under the `openstack_iid` target).
 
 - **Agent-side plugin** (`openstack-agent-plugin`): runs inside SPIRE Agent on the VM. Fetches the signed JWT from the local metadata service and forwards it to the Server.
 - **Server-side plugin** (`openstack-server-plugin`): runs inside SPIRE Server. Verifies the JWT's signature and claims against the issuer's published keys, then emits the agent's SPIFFE ID and selectors.

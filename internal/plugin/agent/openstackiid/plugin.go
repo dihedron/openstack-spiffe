@@ -1,6 +1,6 @@
 // Package openstackiid implements the agent side of the openstack_iid SPIRE
 // node attestor: it fetches the instance identity token that the OpenStack
-// metadata JWT issuer (openstack-spire-metadata) hands to the instance through
+// metadata JWT issuer (openstack-spire-issuer) hands to the instance through
 // Nova's DynamicJSON vendordata, and sends it to SPIRE Server as the
 // attestation payload.
 //

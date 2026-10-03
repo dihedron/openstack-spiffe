@@ -61,7 +61,7 @@ type User struct {
 // Service is the service's own user, as authenticated through the OS_*
 // variables returned by Env.
 var Service = User{
-	ID: "5e7a0c1d2b3f4a5e6d7c8b9a0f1e2d3c", Name: "spire-metadata",
+	ID: "5e7a0c1d2b3f4a5e6d7c8b9a0f1e2d3c", Name: "spire-issuer",
 	DomainID: "default", DomainName: "Default", Roles: []string{"service"},
 }
 

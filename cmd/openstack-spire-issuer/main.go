@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-metadata/command"
+	"github.com/dihedron/openstack-spiffe/cmd/openstack-spire-issuer/command"
 	"github.com/jessevdk/go-flags"
 	"github.com/joho/godotenv"
 )

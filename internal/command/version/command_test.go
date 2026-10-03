@@ -10,7 +10,7 @@ func TestRelevantEnv(t *testing.T) {
 		{"OS_AUTH_URL=https://keystone:5000/v3", "OS_AUTH_URL=https://keystone:5000/v3", true},
 		{"OS_PASSWORD=hunter2", "OS_PASSWORD=********", true},
 		{"OS_APPLICATION_CREDENTIAL_SECRET=s3cr3t", "OS_APPLICATION_CREDENTIAL_SECRET=********", true},
-		{"OPENSTACK_SPIRE_METADATA_LOG_LEVEL=debug", "OPENSTACK_SPIRE_METADATA_LOG_LEVEL=debug", true},
+		{"OPENSTACK_SPIRE_ISSUER_LOG_LEVEL=debug", "OPENSTACK_SPIRE_ISSUER_LOG_LEVEL=debug", true},
 		{"HOME=/root", "", false},
 		{"MIDPOINT_PASSWORD=x", "", false},
 	}

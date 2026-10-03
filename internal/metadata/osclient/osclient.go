@@ -206,7 +206,7 @@ func New(ctx context.Context, creds Credentials, caCertPath string, opts ...Opti
 		return nil, fmt.Errorf("creating OpenStack client: %w", err)
 	}
 	provider.HTTPClient = http.Client{Transport: transport, Timeout: requestTimeout}
-	provider.UserAgent.Prepend("openstack-spire-metadata")
+	provider.UserAgent.Prepend("openstack-spire-issuer")
 	if err := openstack.Authenticate(ctx, provider, creds.authOptions()); err != nil {
 		return nil, fmt.Errorf("authenticating with Keystone at %s: %w", creds.AuthURL, err)
 	}

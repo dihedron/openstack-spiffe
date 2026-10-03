@@ -1,6 +1,6 @@
 // Package openstackiid implements the server side of the openstack_iid SPIRE
 // node attestor: it verifies the instance identity token issued by the
-// OpenStack metadata JWT issuer (openstack-spire-metadata) against the
+// OpenStack metadata JWT issuer (openstack-spire-issuer) against the
 // issuer's published keys, and turns its claims into the agent's SPIFFE ID
 // and selectors.
 //

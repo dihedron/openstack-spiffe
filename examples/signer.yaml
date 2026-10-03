@@ -1,6 +1,6 @@
-# openstack-spire-metadata signer replica ("service start --config signer.yaml").
+# openstack-spire-issuer signer replica ("service start --config signer.yaml").
 # Values shown are the defaults unless marked otherwise; check the file with
-#   openstack-spire-metadata config check --signer signer.yaml --aggregator aggregator.yaml
+#   openstack-spire-issuer config check --signer signer.yaml --aggregator aggregator.yaml
 # The service's own OpenStack credentials are NOT in this file: they come from
 # the OS_* environment variables (see signer.env).
 

@@ -1,5 +1,5 @@
 // Package iid defines the contract shared between the OpenStack metadata JWT
-// issuer (openstack-spire-metadata) and the openstack_iid SPIRE node attestor
+// issuer (openstack-spire-issuer) and the openstack_iid SPIRE node attestor
 // plugins: the JWT header and claim schema, the fixed issuer/audience values
 // and the shape of the vendordata response. Both sides must import it rather
 // than re-declaring any of these values.
