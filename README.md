@@ -1,6 +1,6 @@
 # openstack-spiffe
 
-[![Go Coverage](https://github.com/dihedron/openstack-spiffe/wiki/coverage.svg)](https://raw.githack.com/wiki/dihedron/openstack-spiffe/coverage.html)
+[![codecov](https://codecov.io/gh/dihedron/openstack-spiffe/graph/badge.svg?token=d8NsmmlTOn)](https://codecov.io/gh/dihedron/openstack-spiffe)
 
 A complete solution providing all needed components to implement SPIFFE on OpenStack.
 
