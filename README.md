@@ -162,3 +162,20 @@ Each token is accepted once by a given SPIRE Server.
 - **After a SPIRE Server restart.** The server plugin rejects tokens minted before its process started. Agents attesting right after a restart may be refused once, and succeed on SPIRE Agent's next attempt.
 - **Clock skew.** `clock_skew_tolerance` (30s, at most 60s) absorbs clock differences between the issuer and SPIRE Server. A token is accepted for at most 5 minutes plus twice the tolerance; keep both clocks synchronized.
 - **Limitation.** The replay cache is local to each SPIRE Server instance. In an HA deployment, a token intercepted within its acceptance window could be presented once to each other SPIRE Server instance. Tokens travel only from the instance's metadata service to SPIRE Agent and then over SPIRE's TLS channel, and they are never logged.
+
+## Lab: end-to-end tests on a real OpenStack
+
+[test/lab/](test/lab) builds a disposable test environment on libvirt VMs and runs the whole solution in it: DevStack (Keystone, Nova, Neutron and Glance behind TLS, with nested KVM instances), two issuer replicas installed from the deb and rpm packages, and SPIRE Server with the server plugin. Instances booted by Nova run SPIRE Agent with the agent plugin and attest through the real vendordata path. The design is in [.specs/openstack-spire-test-environment.md](.specs/openstack-spire-test-environment.md).
+
+It runs on any x86-64 Linux machine with KVM and nested virtualization, about 14 vCPUs, 37 GiB of free memory and 120 GiB of disk with the default sizes; every setting is in [test/lab/lab.env](test/lab/lab.env), overridable in a git-ignored `lab.local.env` or the environment.
+
+```bash
+test/lab/lab.sh preflight    # check the machine; installs missing software after confirmation
+test/lab/lab.sh up           # build the lab (about 15 minutes) and snapshot it
+test/lab/lab.sh deploy       # build the packages here and install them on the VMs (about 3 minutes)
+test/lab/lab.sh test         # run the acceptance tests (about 20 minutes; -long adds key rotation)
+test/lab/lab.sh reset        # return to the snapshot in under a minute, then deploy again
+test/lab/lab.sh down         # remove everything but the download cache
+```
+
+`status`, `ssh <vm>` and `logs <vm> [unit]` inspect it. Nothing is compiled in the VMs: `deploy` installs the baseline amd64 packages that `make snapshot` builds on the lab host.
