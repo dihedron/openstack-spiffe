@@ -5,8 +5,9 @@
 # load_settings reads lab.env, then lab.local.env if present, then gives
 # precedence to the LAB_* variables set in the environment.
 load_settings() {
+	# only what the environment sets: exported variables
 	local name pair saved=()
-	for name in $(compgen -A variable LAB_); do
+	for name in $(compgen -A export LAB_); do
 		saved+=("$name=${!name}")
 	done
 	# shellcheck disable=SC1091 # lab.env: settings, checked on its own
@@ -102,6 +103,7 @@ ubuntu_image_url() {
 	case "$LAB_UBUNTU_RELEASE" in
 	22.04) codename=jammy ;;
 	24.04) codename=noble ;;
+	26.04) codename=resolute ;;
 	*) die "no known image for Ubuntu $LAB_UBUNTU_RELEASE: set LAB_UBUNTU_IMAGE_URL" ;;
 	esac
 	echo "https://cloud-images.ubuntu.com/$codename/current/$codename-server-cloudimg-amd64.img"
@@ -122,4 +124,18 @@ rhel_image_url() {
 # go_mod_version: the Go version go.mod requires.
 go_mod_version() {
 	awk '$1 == "go" { print $2; exit }' "$REPO_DIR/go.mod"
+}
+
+# --- Lab state ----------------------------------------------------------------
+
+env_file() { echo "$LAB_STATE_DIR/env.json"; }
+
+# env_get FILTER: a value from env.json.
+env_get() { jq -r "$1" "$(env_file)"; }
+
+# env_set PATH VALUE: sets a string in env.json (PATH as in jq, e.g. .a.b).
+env_set() {
+	local tmp
+	tmp="$(mktemp "$LAB_STATE_DIR/env.XXXXXX")"
+	jq --arg v "$2" "$1 = \$v" "$(env_file)" >"$tmp" && mv "$tmp" "$(env_file)"
 }

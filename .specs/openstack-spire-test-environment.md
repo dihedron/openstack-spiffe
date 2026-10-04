@@ -18,7 +18,7 @@ The specs refer to these checks as "confirmed on the DevStack test bed". This sp
 **Portability**: the lab runs on any Linux x86-64 machine with KVM and enough resources, not only on the machine it was written on. Nothing in it depends on a particular host: every path, address, size and version is a setting with a default, and a preflight check verifies the host, installs the missing software and refuses to start with a clear explanation when something cannot be fixed automatically.
 
 **Non-goals**:
-- Running in CI. A full bring-up takes most of an hour and needs nested virtualization.
+- Running in CI. A full bring-up takes 15 to 30 minutes (12 on the reference host, a 16-core desktop) and needs nested virtualization.
 - Load, performance or soak testing.
 - High-availability SPIRE Server, the Vault transit key store, Barbican.
 - A production-like OpenStack. DevStack is a development deployment; the lab tests this solution, not OpenStack.
@@ -31,13 +31,13 @@ All VMs run on the lab host's libvirt (`qemu:///system`) and share a dedicated N
 | VM | OS (default) | Role | Default size (vCPU / RAM / disk) |
 | --- | --- | --- | --- |
 | `devstack` | Ubuntu 24.04 LTS | DevStack all-in-one: Keystone, Nova (with `nova-api-metadata` and nested KVM compute), Neutron, Glance | 8 / 24 GiB / 100 GiB |
-| `issuer-a` | Ubuntu 24.04 LTS | Signer replica, installed from the deb package | 2 / 2 GiB / 20 GiB |
-| `issuer-b` | AlmaLinux 10 | Signer replica, installed from the rpm package | 2 / 2 GiB / 20 GiB |
-| `spire` | Ubuntu 24.04 LTS | SPIRE Server with `openstack-server-plugin` (deb package) | 2 / 2 GiB / 20 GiB |
+| `issuer-a` | Ubuntu 24.04 LTS | Signer replica, installed from the deb package | 2 / 3 GiB / 20 GiB |
+| `issuer-b` | AlmaLinux 10 | Signer replica, installed from the rpm package | 2 / 3 GiB / 20 GiB |
+| `spire` | Ubuntu 24.04 LTS | SPIRE Server with `openstack-server-plugin` (deb package) | 2 / 3 GiB / 20 GiB |
 
-Inside DevStack, Nova boots the instances under test from two Glance images: the Ubuntu 24.04 and AlmaLinux 10 cloud images. Each runs SPIRE Agent with `openstack-agent-plugin`, installed from the deb or rpm package respectively. Each distro family is thus exercised once as an issuer host and once as a guest. The RHEL-like distro is AlmaLinux by default and Rocky Linux when `LAB_RHEL_DISTRO=rocky`, both at their latest major release (10). RHEL 10 derivatives require an x86-64-v3 CPU, so every VM runs with the host's CPU model (`host-passthrough`), and so do the Nova instances (`[libvirt] cpu_mode = host-passthrough` in DevStack's Nova configuration). The issuer and the plugins themselves run on any x86-64 CPU: the lab installs their baseline (`GOAMD64=v1`) packages.
+Inside DevStack, Nova boots the instances under test from two Glance images: the Ubuntu 24.04 and AlmaLinux 10 cloud images. Each runs SPIRE Agent with `openstack-agent-plugin`, installed from the deb or rpm package respectively. Each distro family is thus exercised once as an issuer host and once as a guest. The RHEL-like distro is AlmaLinux by default and Rocky Linux when `LAB_RHEL_DISTRO=rocky`, both at their latest major release (10). RHEL 10 derivatives require an x86-64-v3 CPU, so every VM runs with the host's CPU model (`host-passthrough`), and so do the Nova instances (`LIBVIRT_CPU_MODE=host-passthrough` in DevStack's `local.conf`; DevStack's default is a fixed, older model). The issuer and the plugins themselves run on any x86-64 CPU: the lab installs their baseline (`GOAMD64=v1`) packages.
 
-**Addressing** (defaults, all settings): `spiffe-lab` is `10.250.0.0/24`, with the lab host at `.1`, `devstack` at `.10`, `issuer-a` at `.21`, `issuer-b` at `.22` and `spire` at `.30`. Names resolve through `/etc/hosts` entries the bring-up writes on every VM (`issuer-a.lab`, ...). The instances reach `spire.lab` through DevStack's public network, which DevStack NATs through the `devstack` VM; if that proves unreliable during step 1, a provider network bridged onto `spiffe-lab` replaces it.
+**Addressing** (defaults, all settings): `spiffe-lab` is `10.250.0.0/24`, with the lab host at `.1`, `devstack` at `.10`, `issuer-a` at `.21`, `issuer-b` at `.22` and `spire` at `.30`. libvirt's DNS on the lab network resolves the VMs' names (`issuer-a.lab`, ...), and its DHCP gives each VM a fixed address from a fixed MAC. The instances reach the lab network through their Neutron router and DevStack's public network, which DevStack itself masquerades behind the `devstack` VM's address; their private subnet uses libvirt's DNS (the lab host's address) so that they resolve the lab names too.
 
 **Flows**:
 
@@ -62,7 +62,7 @@ There is no load balancer. Nova calls a single target URL, so `issuer-a` serves 
   - `LAB_SPIRE_VERSION` and `LAB_SPIRE_SHA256`: empty by default, meaning the most recent SPIRE release compatible with the `spire-plugin-sdk` version in `go.mod` (same major version, and a minor version at least the SDK's), resolved at `up` from SPIRE's releases, with its checksum taken from the release's published checksums file. A pinned version must come with its SHA-256.
   - Image URLs are derived from the distro and release, and can be overridden (`LAB_UBUNTU_IMAGE_URL`, `LAB_RHEL_IMAGE_URL`) for mirrors and air-gapped hosts.
 - **Network**: `LAB_SUBNET` (default `10.250.0.0/24`), `LAB_NETWORK` (default `spiffe-lab`), and the host part of each VM's address.
-- **Sizes**: vCPUs, RAM and disk of each VM (`LAB_DEVSTACK_VCPUS`, ...), and the flavor of the instances.
+- **Sizes**: vCPUs, RAM and disk of each VM (`LAB_DEVSTACK_VCPUS`, ...), and the flavor of the instances. They apply when a VM is created: `up` warns when an existing VM's memory differs from the settings, and `down` followed by `up` applies them.
 - **Locations**: `LAB_STATE_DIR` (default `test/lab/.state`, git-ignored: PKI, SSH key, `env.json`), `LAB_CACHE_DIR` (default `${XDG_CACHE_HOME:-~/.cache}/openstack-spiffe-lab`: downloaded images and tarballs, kept across `down`), and `LAB_POOL` (default: a libvirt storage pool named `spiffe-lab`, created under `LAB_POOL_DIR`, default `/var/lib/libvirt/images/spiffe-lab`).
 - **Behaviour**: `LAB_ASSUME_YES` (default unset) answers yes to the preflight's installation prompts, for unattended use.
 
@@ -84,9 +84,9 @@ Every resolved value, the DevStack commit, SPIRE version and checksum, and image
 
 **Resources**, computed from the configured sizes, not fixed numbers:
 - CPUs: the sum of the VMs' vCPUs against the host's logical CPUs. `warn` above 1.5 times overcommit, `fail` above 3.
-- Memory: the sum of the VMs' RAM, plus 4 GiB for the host, against the memory available now. `fail` below it, `warn` when the margin is under 4 GiB more.
+- Memory: the sum of the VMs' RAM, plus 4 GiB for the host, against the memory available now; the lab's VMs already running hold their memory, so only the others count. `fail` below it, `warn` when the margin is under 4 GiB more.
 - Disk: the VMs' disks (thin-provisioned, so their actual use at the end of `up`, about 40% of their size, plus 20% margin) against the free space under `LAB_POOL_DIR`, and about 10 GiB of downloads against the free space under `LAB_CACHE_DIR`. `fail` below, `warn` within 20%.
-- With the defaults, that means 14 vCPUs, 30 GiB of RAM and about 90 GiB of disk: a host with 16 logical CPUs, 48 GiB of RAM and 150 GiB free runs the lab comfortably.
+- With the defaults, that means 14 vCPUs, 33 GiB of RAM and about 90 GiB of disk: a host with 16 logical CPUs, 48 GiB of RAM and 150 GiB free runs the lab comfortably. The small VMs get 3 GiB each, the minimum libvirt recommends for Ubuntu 24.04, although their services need much less.
 
 **Software**: each tool is checked with its minimum version, and installed when missing or too old, after a single confirmation listing everything to install (or none with `LAB_ASSUME_YES`). Installation uses `sudo` and the host's package manager; Go and goreleaser come from their official releases, with checksums verified, when the distro's packages are too old.
 - libvirt (daemon running and enabled), `virsh`, `virt-install`, `qemu-img`, QEMU with KVM support.
@@ -109,8 +109,8 @@ Preflight changes nothing on the host except installing software and adding the 
 Everything lives in `test/lab/`. `lab.sh` is the entry point. Each command is idempotent and prints what it does:
 
 - `preflight [--no-install]`: see above.
-- `up`: runs `preflight`, creates the storage pool, network and VMs from cloud images with cloud-init, runs DevStack's `stack.sh`, configures Nova, Keystone (the dedicated vendordata user) and the images, generates the lab PKI, then runs `deploy`. Most of the time goes into `stack.sh`.
-- `snapshot` / `reset`: saves the VMs right after a successful `up`, or reverts to that state, in a few minutes. This is the normal way to start a test session.
+- `up`: runs `preflight`, creates the storage pool, network and VMs from cloud images with cloud-init, runs DevStack's `stack.sh`, configures Nova, Keystone (the dedicated vendordata user) and the images, generates the lab PKI, then runs `deploy`. Most of the time goes into DevStack's `stack.sh`, which runs as a systemd unit on `devstack` so that a dropped SSH connection cannot interrupt it; `up` reports its progress. A second `up` on a complete lab only verifies it, so `up` can always be rerun after a failure.
+- `snapshot` / `reset`: saves the VMs right after a successful `up`, or reverts to that state, in a few minutes. This is the normal way to start a test session. Snapshots include the VMs' memory: DevStack does not survive a cold reboot (the public bridge's address and its NAT rule are not persistent), so reverting must resume the running VMs rather than boot them.
 - `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser), serves `dist/` from the lab host on the lab network, installs or upgrades them on `issuer-a`, `issuer-b` and `spire`, writes their configuration and restarts the services. Nothing is compiled in the VMs: they only install packages, as a production host would. This is the inner loop after a code change.
 - `test [-run REGEX]`: runs the acceptance tests.
 - `status`, `ssh <vm>`, `logs <vm> [unit]`: inspection.
@@ -160,4 +160,4 @@ Chunks 4 to 8 each add their own scenarios from the table and run them before th
 - Versions: Ubuntu 24.04 LTS, DevStack's most recent stable branch, and the most recent SPIRE release compatible with the plugin SDK, all resolved at `up` unless pinned in `lab.env`.
 - RHEL-like distro: the most recent major release (10) of AlmaLinux by default, Rocky Linux as an option.
 - No load balancer in front of the issuers.
-- Instance access to the lab network: DevStack's public network and its NAT first, a bridged provider network as the fallback, settled in step 2.
+- Instance access to the lab network: DevStack's public network, through the NAT DevStack sets up itself; no provider network is needed (step 2).

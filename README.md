@@ -19,7 +19,7 @@ A complete solution providing all needed components to implement SPIFFE on OpenS
                    signer replica A         signer replica B     ── Keystone (token validation, projects)
                    own in-memory keys       own in-memory keys   ── Nova API (instance verification)
                             │◀── GET /jwks/local.json ─▶│   with peers: each replica polls the others
-                            │                          │
+                            │                           │
       with peers: SPIRE Server ── GET /.well-known/jwks.json ──▶ any replica (own + peers' keys)
    without peers: SPIRE Server ── GET /.well-known/jwks.json ──▶ JWKS aggregator(s),
                                                                  polling every GET /jwks/local.json

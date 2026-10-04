@@ -175,15 +175,25 @@ pf_resources() {
 		pf_ok "$vcpus vCPUs on $cpus logical CPUs"
 	fi
 
-	local available need
+	# the lab's VMs already running hold their memory (as libvirt reports
+	# it, whatever the settings say now): only the others still need it
+	local available need running=0 vm kib
+	for vm in devstack issuer-a issuer-b spire; do
+		if have virsh && [[ "$(virsh -q -c qemu:///system domstate "$LAB_NETWORK-$vm" 2>/dev/null)" == running ]]; then
+			kib="$(virsh -q -c qemu:///system dominfo "$LAB_NETWORK-$vm" | awk '/^Max memory:/ { print $3 }')"
+			running=$((running + ${kib:-0} / 1024 / 1024))
+		fi
+	done
 	available=$(($(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo) / 1024 / 1024))
-	need=$((ram + PF_HOST_RAM_GIB))
+	need=$((ram - running + PF_HOST_RAM_GIB))
+	local detail="${ram} for the VMs"
+	((running == 0)) || detail="${ram} for the VMs, ${running} of them already in use by the running lab"
 	if ((available < need)); then
-		pf_fail "${available} GiB of memory available, the lab needs ${need} GiB (${ram} for the VMs, ${PF_HOST_RAM_GIB} for the host)"
+		pf_fail "${available} GiB of memory available, the lab needs ${need} GiB more (${detail}, ${PF_HOST_RAM_GIB} for the host)"
 	elif ((available < need + PF_RAM_MARGIN_GIB)); then
-		pf_warn "${available} GiB of memory available for ${need} GiB needed: little margin"
+		pf_warn "${available} GiB of memory available for ${need} GiB needed (${detail}): little margin"
 	else
-		pf_ok "${available} GiB of memory available, ${need} GiB needed"
+		pf_ok "${available} GiB of memory available, ${need} GiB needed (${detail})"
 	fi
 
 	pf_space "VM disks" "$LAB_POOL_DIR" $((disk * PF_DISK_USE_PERCENT * (100 + PF_DISK_MARGIN_PERCENT) / 10000))
