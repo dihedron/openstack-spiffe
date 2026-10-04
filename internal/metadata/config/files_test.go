@@ -83,7 +83,7 @@ func fileFindings(findings []Finding) []findingKey {
 func TestFileChecksValid(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := writeKeyPair(t, dir, "server", fileCheckNow.Add(365*24*time.Hour), 0o600)
-	result := CheckSigner("signer.yaml", []byte(signerDoc(cert, key, cert)), fileCheckOptions())
+	result := CheckSigner("signer.yaml", []byte(signerDoc(cert, key, cert)+auditSyslogEnabled), fileCheckOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
@@ -92,7 +92,7 @@ func TestFileChecksValid(t *testing.T) {
 func TestFileChecksSkipped(t *testing.T) {
 	opts := fileCheckOptions()
 	opts.SkipFiles = true
-	result := CheckSigner("signer.yaml", []byte(signerDoc("/missing.crt", "/missing.key", "/missing.pem")), opts)
+	result := CheckSigner("signer.yaml", []byte(signerDoc("/missing.crt", "/missing.key", "/missing.pem")+auditSyslogEnabled), opts)
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings with SkipFiles:\n%s", dump(result.Findings))
 	}

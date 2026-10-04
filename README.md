@@ -103,6 +103,8 @@ Package upgrades restart only the units that are running, and removing the packa
 
 **Logging.** Logs go to standard error at `info` level. Set `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` to `debug`, `info`, `warn`, `error` or `off`. Every request carries an `X-Request-Id`, which also appears in its log lines as `request_id`. Tokens, keys, credentials and user data are never logged.
 
+**Audit trail.** Every issued token is recorded as `token issued` (`audit=token_issued`, with the caller, client address, `jti` and `kid`), and every signing key's lifecycle as `audit=key_lifecycle` records (with its RFC 7638 thumbprint). These records are always logged, whatever the log level, `off` included. With `audit.syslog.enabled` in `signer.yaml`, they are also sent to the local syslog daemon (`/dev/log`, facility `authpriv` by default), from which rsyslog or syslog-ng can forward them to a central, append-only store. `service start` refuses to start if the sink is enabled and its socket cannot be opened.
+
 **TLS.** `tls_min_version` (`"1.3"` by default, or `"1.2"`) applies both to what each service accepts and to the connections it makes. Set `"1.2"` only for peers that cannot negotiate TLS 1.3.
 
 ### Tuning

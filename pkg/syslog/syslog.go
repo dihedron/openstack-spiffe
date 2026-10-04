@@ -149,7 +149,7 @@ func New(options ...Option) (*Syslog, error) {
 	if err := validateHeaderField("hostname", syslog.hostname, 255); err != nil {
 		return nil, fmt.Errorf("invalid hostname: %w", err)
 	}
-	if err := validateHeaderField("application name", syslog.application, 48); err != nil {
+	if err := ValidateAppName(syslog.application); err != nil {
 		return nil, fmt.Errorf("invalid application name: %w", err)
 	}
 	if err := validateHeaderField("process", syslog.process, 128); err != nil {

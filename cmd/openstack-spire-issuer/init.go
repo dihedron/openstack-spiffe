@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dihedron/openstack-spiffe/pkg/metadata"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 	"github.com/joho/godotenv"
 )
 
@@ -101,8 +102,12 @@ func init() {
 		}
 	}
 
-	// initialise the logger
-	handler := slog.NewTextHandler(writer, options)
+	// initialise the logger: the configured level applies to ordinary
+	// records only, audit records are always logged (even with "off"), so
+	// the text handler itself must accept them
+	configured := options.Level
+	options.Level = min(configured.Level(), slog.LevelInfo)
+	handler := syslog.KeepAudit(slog.NewTextHandler(writer, options), configured)
 	slog.SetDefault(slog.New(handler))
 
 	// check if CPU profiling should be enabled

@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -33,6 +34,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/dihedron/openstack-spiffe/internal/metadata/auditsink"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/jwks"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
@@ -85,6 +87,8 @@ type system struct {
 	novaToken  string
 	// caPath is the CA bundle trusted by every server's certificate.
 	caPath string
+	// syslog receives what the replicas' syslog audit sink sends.
+	syslog *syslogDaemon
 }
 
 // writeTLS writes a self-signed certificate for 127.0.0.1, shared by every
@@ -145,6 +149,7 @@ func start(t *testing.T, topo topology) *system {
 	cloud := openstacktest.New(t)
 	cloud.AddProject(openstacktest.Project{ID: projectID, Name: "web", DomainID: "default"})
 	certPath, keyPath, pool := writeTLS(t)
+	daemon := newSyslogDaemon(t)
 
 	listeners := map[string]net.Listener{}
 	for _, id := range topo.replicas {
@@ -167,7 +172,11 @@ keystone:
   allowed_users: [nova@Default]
   ca_cert_path: %s
 enrich: [availability_zone, project_name]
-`, listeners[id].Addr(), certPath, keyPath, id, publishAhead, cloud.CAFile(t))
+audit:
+  syslog:
+    enabled: true
+    socket: %s
+`, listeners[id].Addr(), certPath, keyPath, id, publishAhead, cloud.CAFile(t), daemon.path)
 		if topo.peers {
 			doc += fmt.Sprintf("peers:\n  ca_cert_path: %s\n  poll_interval: 300ms\n  fetch_timeout: 200ms\n  cache_max_age: 0s\n  urls:\n", certPath)
 			for _, peer := range topo.replicas {
@@ -209,6 +218,21 @@ replicas:
 		}
 	}
 
+	// the log handler service start installs, around the test's own
+	handler, closeSink, err := auditsink.New(slog.Default().Handler(), signerResults[0].Config.Audit.Syslog)
+	if err != nil {
+		t.Fatalf("auditsink.New: %v", err)
+	}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		// after the servers have stopped (cleanups run last-in, first-out)
+		if err := closeSink(context.Background()); err != nil {
+			t.Errorf("closing the syslog audit sink: %v", err)
+		}
+		slog.SetDefault(previous)
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	servers := len(topo.replicas)
 	done := make(chan error, servers+1)
@@ -218,6 +242,7 @@ replicas:
 		signers:   map[string]string{},
 		novaToken: cloud.IssueToken(novaUser, time.Now().Add(time.Hour)),
 		caPath:    certPath,
+		syslog:    daemon,
 	}
 	env := cloud.Env()
 	creds, err := osclient.CredentialsFromEnv(func(name string) string { return env[name] })

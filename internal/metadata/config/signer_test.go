@@ -21,6 +21,10 @@ keystone:
   allowed_users: ["nova@Default"]
 `
 
+// auditSyslogEnabled enables the syslog audit sink, so that fixtures meant
+// to be free of warnings do not get the warning about it being disabled.
+const auditSyslogEnabled = "audit:\n  syslog:\n    enabled: true\n"
+
 // parseSigner checks doc without file checks and fails on any error finding.
 func parseSigner(r io.Reader, hostname func() (string, error)) (*Signer, error) {
 	data, err := io.ReadAll(r)
@@ -62,6 +66,10 @@ func TestSignerDefaults(t *testing.T) {
 		{"keystone.project_cache_ttl", cfg.Keystone.ProjectCacheTTL, 10 * time.Minute},
 		{"nova_lookup.enabled", cfg.NovaLookup.Enabled, true},
 		{"nova_lookup.cache_ttl", cfg.NovaLookup.CacheTTL, time.Minute},
+		{"audit.syslog.enabled", cfg.Audit.Syslog.Enabled, false},
+		{"audit.syslog.socket", cfg.Audit.Syslog.Socket, "/dev/log"},
+		{"audit.syslog.facility", cfg.Audit.Syslog.Facility, "authpriv"},
+		{"audit.syslog.app_name", cfg.Audit.Syslog.AppName, "openstack-spire-issuer"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -190,6 +198,14 @@ func TestSignerInvalid(t *testing.T) {
 		{"unknown enrichment", [2]string{}, "enrich: [hypervisor_hostname]\n", "enrich"},
 		{"duplicate enrichment", [2]string{}, "enrich: [flavor, flavor]\n", "enrich"},
 		{"server enrichment without lookup", [2]string{}, "nova_lookup:\n  enabled: false\nenrich: [availability_zone]\n", "enrich"},
+		{"unknown audit syslog key", [2]string{}, "audit:\n  syslog:\n    severity: info\n", "severity"},
+		{"unknown syslog facility", [2]string{}, "audit:\n  syslog:\n    facility: kern\n", "audit.syslog.facility"},
+		{"empty syslog facility", [2]string{}, "audit:\n  syslog:\n    facility: \"\"\n", "audit.syslog.facility"},
+		{"syslog app name too long", [2]string{}, "audit:\n  syslog:\n    app_name: " + strings.Repeat("a", 49) + "\n", "audit.syslog.app_name"},
+		{"syslog app name with a space", [2]string{}, "audit:\n  syslog:\n    app_name: \"my issuer\"\n", "audit.syslog.app_name"},
+		{"syslog app name not ASCII", [2]string{}, "audit:\n  syslog:\n    app_name: \"issuér\"\n", "audit.syslog.app_name"},
+		{"empty syslog app name", [2]string{}, "audit:\n  syslog:\n    app_name: \"\"\n", "audit.syslog.app_name"},
+		{"empty syslog socket", [2]string{}, "audit:\n  syslog:\n    enabled: true\n    socket: \"\"\n", "audit.syslog.socket"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -292,8 +308,15 @@ func TestLoadSigner(t *testing.T) {
 	if cfg.ReplicaID != "signer-a" {
 		t.Fatalf("replica_id = %q", cfg.ReplicaID)
 	}
-	if len(warnings) != 1 || warnings[0].Path != "tags.allowlist" || warnings[0].File != path {
-		t.Fatalf("warnings = %+v, want the tags.allowlist warning", warnings)
+	var paths []string
+	for _, w := range warnings {
+		if w.File != path {
+			t.Fatalf("warning %+v names file %q, want %q", w, w.File, path)
+		}
+		paths = append(paths, w.Path)
+	}
+	if want := []string{"tags.allowlist", "audit.syslog.enabled"}; !slices.Equal(paths, want) {
+		t.Fatalf("warnings = %+v, want %v", warnings, want)
 	}
 	if _, _, err := LoadSigner(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatalf("LoadSigner on a missing file succeeded")
@@ -361,5 +384,27 @@ func TestLoadSignerPreflight(t *testing.T) {
 func TestSignerEmptyDocument(t *testing.T) {
 	if _, err := parseSignerString(t, ""); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("empty document: err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestSignerAuditSyslog(t *testing.T) {
+	cfg, err := parseSignerString(t, minimalSigner+`audit:
+  syslog:
+    enabled: true
+    socket: /run/systemd/journal/dev-log
+    facility: local3
+    app_name: issuer-a
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := AuditSyslog{Enabled: true, Socket: "/run/systemd/journal/dev-log", Facility: "local3", AppName: "issuer-a"}
+	if cfg.Audit.Syslog != want {
+		t.Fatalf("audit.syslog = %+v, want %+v", cfg.Audit.Syslog, want)
+	}
+	for _, facility := range []string{"auth", "authpriv", "daemon", "local0", "local7"} {
+		if _, err := parseSignerString(t, minimalSigner+"audit:\n  syslog:\n    facility: "+facility+"\n"); err != nil {
+			t.Errorf("facility %s: %v", facility, err)
+		}
 	}
 }

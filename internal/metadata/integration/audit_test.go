@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json/v2"
 	"log/slog"
+	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/requestid"
 	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
@@ -52,8 +54,8 @@ func (b *syncBuffer) auditRecords(t *testing.T, kind string) []map[string]any {
 func TestAuditTrail(t *testing.T) {
 	logs := &syncBuffer{}
 	previous := slog.Default()
-	// as service start installs it, so that records carry the request ID
-	slog.SetDefault(slog.New(requestid.NewLogHandler(slog.NewJSONHandler(logs, nil))))
+	// start installs the request ID and syslog handlers around this one
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	s := start(t, topologies[0])
@@ -96,10 +98,96 @@ func TestAuditTrail(t *testing.T) {
 		}
 	}
 
+	// the same records reach syslog (R-1, R-3)
+	datagrams := s.syslog.received(t, "token_issued", func(d map[string]any) bool { return d["jti"] == claims.ID })
+	if len(datagrams) != 1 || datagrams[0]["kid"] != header.KeyID || datagrams[0]["request_id"] != issued[0]["request_id"] {
+		t.Fatalf("token_issued datagrams for jti %s: %v, want exactly one with kid %s and request_id %v", claims.ID, datagrams, header.KeyID, issued[0]["request_id"])
+	}
+	lifecycle := map[string]bool{}
+	for _, d := range s.syslog.received(t, "key_lifecycle", func(d map[string]any) bool { return d["kid"] == header.KeyID }) {
+		if d["thumbprint"] == thumbprint {
+			lifecycle[d["event"].(string)] = true
+		}
+	}
+	for _, event := range []string{"generated", "published", "active"} {
+		if !lifecycle[event] {
+			t.Errorf("no %s datagram for the signing key %s", event, header.KeyID)
+		}
+	}
+
 	logs.mu.Lock()
 	out := logs.buf.String()
 	logs.mu.Unlock()
 	if strings.Contains(out, jwt) {
 		t.Fatal("the token appears in the logs")
+	}
+}
+
+// syslogDaemon stands in for the local syslog daemon: it collects the
+// datagrams sent to its socket, so that the socket never fills up.
+type syslogDaemon struct {
+	path      string
+	mu        sync.Mutex
+	datagrams []string
+}
+
+func newSyslogDaemon(t *testing.T) *syslogDaemon {
+	t.Helper()
+	d := &syslogDaemon{path: filepath.Join(t.TempDir(), "log")}
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: d.path, Net: "unixgram"})
+	if err != nil {
+		t.Fatalf("listening on %s: %v", d.path, err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 64<<10)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			d.mu.Lock()
+			d.datagrams = append(d.datagrams, string(buf[:n]))
+			d.mu.Unlock()
+		}
+	}()
+	// registered first, so it runs after the sink has been drained
+	t.Cleanup(func() {
+		_ = conn.Close()
+		<-done
+	})
+	return d
+}
+
+// received returns the JSON messages of the datagrams with the given MSGID
+// that match, waiting briefly for the sink's asynchronous delivery of the
+// first one.
+func (d *syslogDaemon) received(t *testing.T, msgID string, match func(map[string]any) bool) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var out []map[string]any
+		d.mu.Lock()
+		for _, datagram := range d.datagrams {
+			// <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
+			fields := strings.SplitN(datagram, " ", 8)
+			if len(fields) != 8 || fields[5] != msgID {
+				continue
+			}
+			var msg map[string]any
+			if err := json.Unmarshal([]byte(fields[7]), &msg); err != nil {
+				d.mu.Unlock()
+				t.Fatalf("datagram %q: MSG is not a JSON object: %v", datagram, err)
+			}
+			if match(msg) {
+				out = append(out, msg)
+			}
+		}
+		d.mu.Unlock()
+		if len(out) > 0 || time.Now().After(deadline) {
+			return out
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

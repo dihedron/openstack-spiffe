@@ -11,6 +11,7 @@ import (
 	"github.com/dihedron/openstack-spiffe/internal/metadata/clientaddr"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/novalookup"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
 // Key store backends.
@@ -88,6 +89,28 @@ type Signer struct {
 	Enrich []string `yaml:"enrich"`
 	// Peers configures peer aggregation of the replicas' keys.
 	Peers Peers `yaml:"peers"`
+	// Audit configures where audit records go besides the regular log.
+	Audit Audit `yaml:"audit"`
+}
+
+// Audit configures where audit records go besides the regular log.
+type Audit struct {
+	// Syslog configures the syslog audit sink.
+	Syslog AuditSyslog `yaml:"syslog"`
+}
+
+// AuditSyslog configures the syslog audit sink, which sends the audit
+// records (token_issued, key_lifecycle) to the local syslog daemon.
+type AuditSyslog struct {
+	// Enabled turns the sink on.
+	Enabled bool `yaml:"enabled"`
+	// Socket is the syslog daemon's Unix datagram socket.
+	Socket string `yaml:"socket"`
+	// Facility is the syslog facility: auth, authpriv, daemon or local0 to
+	// local7.
+	Facility string `yaml:"facility"`
+	// AppName is the RFC 5424 APP-NAME: 1 to 48 printable ASCII characters.
+	AppName string `yaml:"app_name"`
 }
 
 // KeyStore configures the signing keys.
@@ -178,6 +201,11 @@ func defaultSigner() *Signer {
 			AllowedStatuses: novalookup.DefaultAllowedStatuses(),
 		},
 		Peers: defaultPeers(),
+		Audit: Audit{Syslog: AuditSyslog{
+			Socket:   syslog.DefaultSocket,
+			Facility: "authpriv",
+			AppName:  "openstack-spire-issuer",
+		}},
 	}
 }
 
@@ -320,6 +348,16 @@ func (s *Signer) validate(r *Result[Signer]) {
 		}
 	}
 
+	if _, err := syslog.ParseFacility(s.Audit.Syslog.Facility); err != nil {
+		r.errorf(KindRuleViolation, "audit.syslog.facility", "%v", err)
+	}
+	if err := syslog.ValidateAppName(s.Audit.Syslog.AppName); err != nil {
+		r.errorf(KindRuleViolation, "audit.syslog.app_name", "%v", err)
+	}
+	if s.Audit.Syslog.Socket == "" {
+		r.errorf(KindRuleViolation, "audit.syslog.socket", "is required")
+	}
+
 	checkList(r, "enrich", s.Enrich)
 	for i, claim := range s.Enrich {
 		path := fmt.Sprintf("enrich[%d]", i)
@@ -364,4 +402,7 @@ func (s *Signer) warn(r *Result[Signer]) {
 		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)
 	}
 	s.Peers.warn(r)
+	if !s.Audit.Syslog.Enabled {
+		r.warnf("audit.syslog.enabled", "the syslog audit sink is disabled: audit records (token_issued, key_lifecycle) stay on this host, in the regular log only")
+	}
 }

@@ -9,10 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/dihedron/openstack-spiffe/internal/metadata/auditsink"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/osclient"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/requestid"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/server"
 )
 
@@ -28,17 +29,36 @@ type Start struct {
 	Config string `short:"c" long:"config" description:"Path to the signer configuration file." value-name:"PATH" required:"true"`
 }
 
-// Execute loads and checks the configuration (refusing to start on any
-// error, logging warnings), authenticates with Keystone using the OS_*
-// environment variables, and serves until SIGINT or SIGTERM, then shuts down
-// gracefully.
-func (cmd *Start) Execute(args []string) error {
-	slog.SetDefault(slog.New(requestid.NewLogHandler(slog.Default().Handler())))
+// auditDrainTimeout bounds how long the syslog audit records still queued
+// at shutdown are sent for, after the HTTP server's own graceful shutdown;
+// together they stay within the systemd unit's stop timeout.
+const auditDrainTimeout = 5 * time.Second
 
+// Execute loads and checks the configuration (refusing to start on any
+// error, logging warnings), installs the syslog audit sink if enabled
+// (refusing to start if its socket cannot be opened), authenticates with
+// Keystone using the OS_* environment variables, and serves until SIGINT or
+// SIGTERM, then shuts down gracefully and drains the audit records still
+// queued for syslog.
+func (cmd *Start) Execute(args []string) error {
 	cfg, warnings, err := config.LoadSigner(cmd.Config)
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
+
+	handler, closeSink, err := auditsink.New(slog.Default().Handler(), cfg.Audit.Syslog)
+	if err != nil {
+		return fmt.Errorf("refusing to start: %w", err)
+	}
+	slog.SetDefault(slog.New(handler))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), auditDrainTimeout)
+		defer cancel()
+		if err := closeSink(ctx); err != nil {
+			slog.Error("cannot send every queued audit record to syslog, they remain in the regular log", "error", err)
+		}
+	}()
+
 	for _, w := range warnings {
 		slog.Warn("configuration warning", "file", w.File, "line", w.Line, "path", w.Path, "message", w.Message)
 	}

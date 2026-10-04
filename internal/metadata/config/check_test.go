@@ -122,7 +122,7 @@ func dump(findings []Finding) string {
 }
 
 func TestCheckSignerValid(t *testing.T) {
-	doc := minimalSigner + "tags:\n  allowlist: [role]\n"
+	doc := minimalSigner + "tags:\n  allowlist: [role]\n" + auditSyslogEnabled
 	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
@@ -190,6 +190,7 @@ nova_lookup:
 		{4, "key_store.vault_proxy_endpoint", SeverityWarning, KindRisky},
 		{5, "rate_limit_per_instance", SeverityWarning, KindRisky},
 		{9, "nova_lookup.enabled", SeverityWarning, KindRisky},
+		{0, "audit.syslog.enabled", SeverityWarning, KindRisky},
 	}
 	got := keysOf(result.Warnings())
 	for _, w := range want {
@@ -218,7 +219,7 @@ keystone:
   allowed_users: [nova@Default]
 client_address:
   header: X-Real-IP
-`
+` + auditSyslogEnabled
 	result := CheckSigner("signer.yaml", []byte(ignored), checkOptions())
 	if len(result.Errors()) != 0 {
 		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
@@ -273,7 +274,7 @@ fetch_timeout: 1x
 func TestCrossCheck(t *testing.T) {
 	signer := func(file, replica, publishAhead string) *Result[Signer] {
 		doc := strings.Replace(minimalSigner, "replica_id: signer-a", "replica_id: "+replica, 1) +
-			"tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: " + publishAhead + "\n"
+			"tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: " + publishAhead + "\n" + auditSyslogEnabled
 		r := CheckSigner(file, []byte(doc), checkOptions())
 		if len(r.Findings) != 0 {
 			t.Fatalf("setup: unexpected findings:\n%s", dump(r.Findings))
@@ -402,7 +403,7 @@ func TestRateMarshal(t *testing.T) {
 
 func TestTLSMinVersion(t *testing.T) {
 	signer := func(extra string) string {
-		return "tls_cert_path: /c\ntls_key_path: /k\nreplica_id: a\ntags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n" + extra
+		return "tls_cert_path: /c\ntls_key_path: /k\nreplica_id: a\ntags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n" + auditSyslogEnabled + extra
 	}
 	aggregator := func(extra string) string {
 		return "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks]\n" + extra
@@ -446,5 +447,23 @@ func TestTLSMinVersion(t *testing.T) {
 				t.Fatalf("tls_min_version %s: errors %+v, want one on tls_min_version", bad, errs)
 			}
 		}
+	}
+}
+
+func TestCheckSignerAuditSyslogEnabledHasNoWarning(t *testing.T) {
+	doc := `tls_cert_path: /tls.crt
+tls_key_path: /tls.key
+replica_id: signer-a
+tags:
+  allowlist: [role]
+keystone:
+  allowed_users: [nova@Default]
+audit:
+  syslog:
+    enabled: true
+`
+	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
+	if len(result.Findings) != 0 {
+		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
 }

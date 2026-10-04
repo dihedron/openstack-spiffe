@@ -45,6 +45,17 @@ nova_lookup:
 
 enrich: ["availability_zone", "project_name"]            # example; default: none
 
+# Audit records (token_issued, key_lifecycle) always appear in the regular log,
+# whatever OPENSTACK_SPIRE_ISSUER_LOG_LEVEL says. The syslog audit sink also
+# sends them to the local syslog daemon, which can forward them to a central,
+# append-only store. Under systemd, journald provides /dev/log.
+audit:
+  syslog:
+    enabled: true                                        # default: false (config check warns)
+    socket: "/dev/log"                                   # Unix datagram socket; service start fails if it cannot be opened
+    facility: "authpriv"                                 # auth, authpriv, daemon, local0..local7
+    app_name: "openstack-spire-issuer"                   # RFC 5424 APP-NAME: 1 to 48 printable ASCII characters
+
 # Peer aggregation: with peers, this replica also serves its peers' keys merged
 # with its own on /.well-known/jwks.json, so that every replica is a JWKS
 # aggregator for the SPIRE Server and no separate aggregator is needed. List

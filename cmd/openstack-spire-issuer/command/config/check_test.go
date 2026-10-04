@@ -19,6 +19,9 @@ tags:
   allowlist: [role]
 keystone:
   allowed_users: [nova@Default]
+audit:
+  syslog:
+    enabled: true
 `
 
 const aggregator = `tls_cert_path: /tls.crt

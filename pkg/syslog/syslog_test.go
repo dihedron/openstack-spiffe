@@ -362,3 +362,16 @@ func TestValidation(t *testing.T) {
 		t.Errorf("empty MSGID (NILVALUE): %v", err)
 	}
 }
+
+func TestValidateAppName(t *testing.T) {
+	for _, valid := range []string{"openstack-spire-issuer", "a", strings.Repeat("a", 48), "app_1.2"} {
+		if err := ValidateAppName(valid); err != nil {
+			t.Errorf("ValidateAppName(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "-", strings.Repeat("a", 49), "my app", "appé", "app\n"} {
+		if err := ValidateAppName(invalid); err == nil {
+			t.Errorf("ValidateAppName(%q) = nil, want an error", invalid)
+		}
+	}
+}

@@ -9,7 +9,9 @@ import (
 	"time"
 )
 
-// peeredSigner is a valid signer with two peers and no warnings.
+// peeredSigner is a valid signer with two peers and no warnings but the
+// one about the disabled syslog audit sink, left out so that tests can
+// append to its peers block.
 const peeredSigner = minimalSigner + `tags:
   allowlist: [role]
 peers:
@@ -43,7 +45,7 @@ func TestSignerPeersDefaults(t *testing.T) {
 }
 
 func TestSignerPeersValid(t *testing.T) {
-	result := CheckSigner("signer.yaml", []byte(peeredSigner), checkOptions())
+	result := CheckSigner("signer.yaml", []byte(peeredSigner+auditSyslogEnabled), checkOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
@@ -89,7 +91,7 @@ func TestSignerPeersInvalid(t *testing.T) {
 }
 
 func TestSignerPeersSettingsWithoutURLsWarn(t *testing.T) {
-	doc := minimalSigner + "tags:\n  allowlist: [role]\npeers:\n  poll_interval: 10s\n  fetch_timeout: 1s\n"
+	doc := minimalSigner + "tags:\n  allowlist: [role]\npeers:\n  poll_interval: 10s\n  fetch_timeout: 1s\n" + auditSyslogEnabled
 	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
 	if len(result.Errors()) != 0 {
 		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
@@ -103,7 +105,7 @@ func TestSignerPeersSettingsWithoutURLsWarn(t *testing.T) {
 	}
 
 	// without peers, publish_ahead is not checked against the peer timing
-	doc = minimalSigner + "tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: 10s\n"
+	doc = minimalSigner + "tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: 10s\n" + auditSyslogEnabled
 	if result := CheckSigner("signer.yaml", []byte(doc), checkOptions()); len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}

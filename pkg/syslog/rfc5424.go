@@ -1,6 +1,7 @@
 package syslog
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -82,6 +83,19 @@ func (s Severity) Validate() error {
 // priority renders PRI (RFC 5424, section 6.2.1).
 func priority(f Facility, s Severity) string {
 	return fmt.Sprintf("<%d>", int(f)*8+int(s))
+}
+
+// maxAppNameLength is the maximum length of an APP-NAME (RFC 5424,
+// section 6.2.5).
+const maxAppNameLength = 48
+
+// ValidateAppName checks an RFC 5424 APP-NAME: 1 to 48 printable US-ASCII
+// characters, and not the NILVALUE "-".
+func ValidateAppName(name string) error {
+	if name == "" {
+		return errors.New("application name: empty")
+	}
+	return validateHeaderField("application name", name, maxAppNameLength)
 }
 
 // validateHeaderField checks a header field (HOSTNAME, APP-NAME, PROCID,
