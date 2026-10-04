@@ -243,7 +243,7 @@ func TestMintedTokenVerifiesAgainstEphemeralStore(t *testing.T) {
 				t.Fatalf("NewMinter: %v", err)
 			}
 
-			token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+			token, err := mint(m, validRequest(), claims.Enrichment{})
 			if err != nil {
 				t.Fatalf("Mint: %v", err)
 			}
@@ -275,12 +275,12 @@ func TestKidFollowsActiveKeyAcrossRotation(t *testing.T) {
 		t.Fatalf("NewMinter: %v", err)
 	}
 
-	before, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	before, err := mint(m, validRequest(), claims.Enrichment{})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
 	ks.activate("2026-09-30-signer-a-key-100")
-	after, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	after, err := mint(m, validRequest(), claims.Enrichment{})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestRotationBetweenActiveAndSignIsRetried(t *testing.T) {
 		t.Fatalf("NewMinter: %v", err)
 	}
 
-	token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	token, err := mint(m, validRequest(), claims.Enrichment{})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestPersistentlyInactiveKeyGivesUp(t *testing.T) {
 		t.Fatalf("NewMinter: %v", err)
 	}
 
-	token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	token, err := mint(m, validRequest(), claims.Enrichment{})
 	if !errors.Is(err, ErrKeyStoreUnavailable) || token != "" {
 		t.Fatalf("Mint = %q, %v; want no token and ErrKeyStoreUnavailable", token, err)
 	}
@@ -362,7 +362,7 @@ func TestKeyStoreFailures(t *testing.T) {
 				t.Fatalf("NewMinter: %v", err)
 			}
 
-			token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+			token, err := mint(m, validRequest(), claims.Enrichment{})
 			if token != "" {
 				t.Fatalf("got a token despite the failure: %q", token)
 			}
@@ -381,7 +381,7 @@ func TestUnsupportedAlgorithmRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMinter: %v", err)
 	}
-	if token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{}); err == nil || token != "" {
+	if token, err := mint(m, validRequest(), claims.Enrichment{}); err == nil || token != "" {
 		t.Fatalf("Mint = %q, %v; want an error", token, err)
 	}
 	if ks.signs != 0 {
@@ -400,7 +400,7 @@ func TestInvalidRequestNeverReachesKeyStore(t *testing.T) {
 	req := validRequest()
 	req.InstanceID = "not-a-uuid"
 
-	token, err := m.Mint(context.Background(), req, claims.Enrichment{})
+	token, err := mint(m, req, claims.Enrichment{})
 	if !errors.Is(err, claims.ErrInvalidRequest) || errors.Is(err, ErrKeyStoreUnavailable) || token != "" {
 		t.Fatalf("Mint = %q, %v; want no token and ErrInvalidRequest only", token, err)
 	}
@@ -431,7 +431,7 @@ func TestReservedCustomClaimsRejectedBeforeSigning(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewMinter: %v", err)
 			}
-			token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+			token, err := mint(m, validRequest(), claims.Enrichment{})
 			if !errors.Is(err, iid.ErrInvalidCustomClaim) || token != "" {
 				t.Fatalf("Mint = %q, %v; want no token and ErrInvalidCustomClaim", token, err)
 			}
@@ -462,7 +462,7 @@ func TestOversizedTokenNotIssued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMinter: %v", err)
 	}
-	token, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	token, err := mint(m, validRequest(), claims.Enrichment{})
 	if !errors.Is(err, ErrTokenTooLarge) || errors.Is(err, ErrKeyStoreUnavailable) || token != "" {
 		t.Fatalf("Mint = %d-byte token, %v; want no token and ErrTokenTooLarge", len(token), err)
 	}
@@ -498,7 +498,7 @@ func TestTokenAtMaximumClaimSizesFitsTheLimit(t *testing.T) {
 		AvailabilityZone: strings.Repeat("z", 255), Flavor: strings.Repeat("f", 255), UserID: strings.Repeat("u", 64),
 		ProjectName: strings.Repeat("n", 64), DomainID: strings.Repeat("d", 64),
 	}
-	token, err := m.Mint(context.Background(), req, enrichment)
+	token, err := mint(m, req, enrichment)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -515,8 +515,8 @@ func TestDistinctTokensPerCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMinter: %v", err)
 	}
-	a, _ := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
-	b, _ := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	a, _ := mint(m, validRequest(), claims.Enrichment{})
+	b, _ := mint(m, validRequest(), claims.Enrichment{})
 	_, ca := verify(t, ks, a)
 	_, cb := verify(t, ks, b)
 	if ca.ID == cb.ID {
@@ -542,7 +542,7 @@ func TestEnrichmentClaimsAreSigned(t *testing.T) {
 		t.Fatalf("NewMinter: %v", err)
 	}
 	enrichment := claims.Enrichment{AvailabilityZone: "az-1", Flavor: "m1.small", UserID: "u1", ProjectName: "web", DomainID: "default"}
-	token, err := m.Mint(context.Background(), validRequest(), enrichment)
+	token, err := mint(m, validRequest(), enrichment)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -552,5 +552,59 @@ func TestEnrichmentClaimsAreSigned(t *testing.T) {
 	}
 	if len(c.Custom) != 0 {
 		t.Fatalf("enrichment claims decoded as custom claims: %v", c.Custom)
+	}
+}
+
+// mint returns only the token Mint issued, for tests not concerned with
+// the other details of the issuance.
+func mint(m *Minter, req claims.NovaRequest, enrichment claims.Enrichment) (string, error) {
+	issued, err := m.Mint(context.Background(), req, enrichment)
+	return issued.Token, err
+}
+
+func TestIssuedDescribesTheToken(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		ks := newFakeStore()
+		ks.add(t, "old", "ES256")
+		ks.add(t, "new", "ES256")
+		ks.activate("old")
+		if rotate {
+			var once sync.Once
+			ks.onSign = func(kid string) error {
+				once.Do(func() { ks.activate("new") })
+				return nil
+			}
+		}
+		m, err := NewMinter(ks, newBuilder(t))
+		if err != nil {
+			t.Fatalf("NewMinter: %v", err)
+		}
+		issued, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+		if err != nil {
+			t.Fatalf("rotate=%v: Mint: %v", rotate, err)
+		}
+		h, c := verify(t, ks, issued.Token)
+		want := Issued{Token: issued.Token, KeyID: h.KeyID, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}
+		if issued != want {
+			t.Fatalf("rotate=%v: Issued %+v, want %+v", rotate, issued, want)
+		}
+		if rotate && issued.KeyID != "new" {
+			t.Fatalf("Issued.KeyID = %q after a rotation, want new", issued.KeyID)
+		}
+	}
+}
+
+func TestFailedMintIssuesNothing(t *testing.T) {
+	ks := newFakeStore()
+	ks.add(t, "k", "RS256")
+	ks.activate("k")
+	ks.signErr = errors.New("hsm down")
+	m, err := NewMinter(ks, newBuilder(t))
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+	issued, err := m.Mint(context.Background(), validRequest(), claims.Enrichment{})
+	if err == nil || issued != (Issued{}) {
+		t.Fatalf("Mint = %+v, %v; want nothing issued and an error", issued, err)
 	}
 }

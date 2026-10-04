@@ -1,26 +1,41 @@
 package attest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
 
-func TestRedact(t *testing.T) {
+// escaped spells a JSON member name with its first letter as a \u escape,
+// which a parser reads as the plain name.
+func escaped(name string) string {
+	return `\` + "u00" + hex.EncodeToString([]byte(name[:1])) + name[1:]
+}
+
+func TestRedactObjects(t *testing.T) {
 	tests := []struct {
 		name, body string
 		keep       []string
 	}{
-		{"object", `{"project-id":"p","user-data":"SECRET"}`, []string{`"project-id":"p"`, `"user-data":"[redacted]"`}},
+		{"user-data", `{"project-id":"p","user-data":"SECRET"}`, []string{`"project-id":"p"`, `"user-data":"[redacted]"`}},
 		{"duplicate user-data", `{"user-data":"SECRET","user-data":"SECRET2","hostname":"vm"}`, []string{`"hostname":"vm"`}},
-		{"escaped key", `{"user-data":"SECRET"}`, []string{`[redacted]`}},
-		{"malformed", `{"project-id":"p","user-data":"SECRET", oops`, []string{`"project-id":"p"`, `[redacted]`}},
-		{"no user-data", `not json at all`, []string{`not json at all`}},
+		{"escaped user-data", `{"` + escaped("user-data") + `":"SECRET"}`, []string{`"user-data":"[redacted]"`}},
+		{"metadata values", `{"metadata":{"db_password":"SECRET","role":"SECRET2","n":1}}`, []string{`"db_password":"[redacted]"`, `"role":"[redacted]"`, `"n":"[redacted]"`}},
+		{"escaped metadata", `{"` + escaped("metadata") + `":{"token":"SECRET"}}`, []string{`"token":"[redacted]"`}},
+		{"duplicate metadata", `{"metadata":{"a":"SECRET"},"metadata":{"k":"SECRET2"}}`, []string{`"k":"[redacted]"`}},
+		{"metadata not an object", `{"metadata":["SECRET"]}`, []string{`"metadata":"[redacted]"`}},
+		{"nested metadata", `{"metadata":{"k":{"deep":"SECRET"}}}`, []string{`"k":"[redacted]"`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := redact([]byte(tt.body))
+			attrs := redact([]byte(tt.body))
+			if len(attrs) != 2 || attrs[0] != "payload" {
+				t.Fatalf("redact(%s) = %v, want a payload attribute", tt.body, attrs)
+			}
+			got := attrs[1].(string)
 			if strings.Contains(got, "SECRET") {
-				t.Fatalf("redact(%s) = %s: user-data leaked", tt.body, got)
+				t.Fatalf("redact(%s) = %s: secret leaked", tt.body, got)
 			}
 			for _, want := range tt.keep {
 				if !strings.Contains(got, want) {
@@ -28,6 +43,31 @@ func TestRedact(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRedactUnparseable(t *testing.T) {
+	for _, body := range []string{
+		`{"project-id":"p","user-data":"SECRET", oops`,
+		`{"` + escaped("user-data") + `":"SECRET"`,
+		`not json at all SECRET`,
+		`["SECRET"]`,
+		// duplicate members of different types cannot be merged
+		`{"metadata":"SECRET","metadata":{"k":"SECRET2"}}`,
+		`"SECRET"`,
+		"",
+	} {
+		attrs := redact([]byte(body))
+		sum := sha256.Sum256([]byte(body))
+		want := []any{"payload_bytes", len(body), "payload_sha256", hex.EncodeToString(sum[:])}
+		if len(attrs) != len(want) {
+			t.Fatalf("redact(%q) = %v, want %v", body, attrs, want)
+		}
+		for i := range want {
+			if attrs[i] != want[i] {
+				t.Fatalf("redact(%q) = %v, want %v", body, attrs, want)
+			}
+		}
 	}
 }
 

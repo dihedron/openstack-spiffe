@@ -18,10 +18,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dihedron/openstack-spiffe/internal/metadata/auth"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/claims"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/clientaddr"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/novalookup"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/token"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
 // InstanceLimiter limits token issuance per instance ID;
@@ -38,7 +41,7 @@ type Verifier interface {
 
 // Minter mints signed tokens; *token.Minter implements it.
 type Minter interface {
-	Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (string, error)
+	Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (token.Issued, error)
 }
 
 // Handler serves POST /attest.
@@ -86,12 +89,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var req claims.NovaRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		slog.WarnContext(ctx, "rejecting malformed request body", "error", err, "payload", redact(body))
+		slog.WarnContext(ctx, "rejecting malformed request body", append([]any{"error", err}, redact(body)...)...)
 		fail(w, http.StatusBadRequest)
 		return
 	}
 	if err := req.Validate(); err != nil {
-		slog.WarnContext(ctx, "rejecting invalid request", "error", err, "payload", redact(body))
+		slog.WarnContext(ctx, "rejecting invalid request", append([]any{"error", err}, redact(body)...)...)
 		fail(w, http.StatusBadRequest)
 		return
 	}
@@ -115,7 +118,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jwt, err := h.minter.Mint(ctx, req, enrichment)
+	issued, err := h.minter.Mint(ctx, req, enrichment)
 	if err != nil {
 		// the minter logs the details
 		switch {
@@ -130,12 +133,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := json.Marshal(iid.NewVendorDataResponse(jwt))
+	response, err := json.Marshal(iid.NewVendorDataResponse(issued.Token))
 	if err != nil {
 		log.ErrorContext(ctx, "cannot encode response", "error", err)
 		fail(w, http.StatusInternalServerError)
 		return
 	}
+	auditIssued(ctx, r, req, issued)
 	w.Header().Set("Content-Type", "application/json")
 	// the body is a credential: nobody may store it
 	w.Header().Set("Cache-Control", "no-store")
@@ -143,6 +147,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(response); err != nil {
 		log.DebugContext(ctx, "cannot write response", "error", err)
 	}
+}
+
+// auditIssued writes the token_issued audit record (R-1): one per issued
+// token, once the response is ready and before it is sent. With the server
+// plugin's agent_attested record, which carries the same jti, it ties every
+// agent identity to the Nova call, the replica and the key behind its token.
+// The request ID is added by the log handler; the token itself is never
+// part of the record.
+func auditIssued(ctx context.Context, r *http.Request, req claims.NovaRequest, issued token.Issued) {
+	attrs := []any{syslog.AuditKey, "token_issued"}
+	if identity, ok := auth.IdentityFrom(ctx); ok {
+		attrs = append(attrs, "user_id", identity.UserID)
+	}
+	attrs = append(attrs, "client_address", clientaddr.String(r))
+	if client, ok := clientaddr.From(r); ok {
+		if peer, ok := clientaddr.Peer(r); ok && peer != client {
+			attrs = append(attrs, "peer_address", peer.String())
+		}
+	}
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		cert := r.TLS.PeerCertificates[0]
+		attrs = append(attrs, "client_cert_subject", cert.Subject.String(), "client_cert_serial", cert.SerialNumber.Text(16))
+	}
+	attrs = append(attrs,
+		"project_id", req.ProjectID,
+		"instance_id", req.InstanceID,
+		"jti", issued.ID,
+		"kid", issued.KeyID,
+		"iat", issued.IssuedAt,
+		"exp", issued.Expiry,
+	)
+	slog.InfoContext(ctx, "token issued", attrs...)
 }
 
 // fail replies with a bare status: details are logged, never sent to the

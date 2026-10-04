@@ -162,6 +162,12 @@ func String(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// Peer returns the TCP peer address, which differs from the client address
+// when the request came through a trusted proxy.
+func Peer(r *http.Request) (netip.Addr, bool) {
+	return peerAddr(r.RemoteAddr)
+}
+
 func peerAddr(remoteAddr string) (netip.Addr, bool) {
 	addrPort, err := netip.ParseAddrPort(remoteAddr)
 	if err != nil {

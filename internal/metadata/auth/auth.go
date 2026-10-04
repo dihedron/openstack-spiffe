@@ -141,7 +141,8 @@ func NewAuthenticator(validator TokenValidator, allowedUsers []string, requiredR
 
 // Middleware rejects requests whose X-Auth-Token is missing or invalid (401),
 // whose user is not authorized (403) or that cannot be validated (503), and
-// passes the others to next. Rejected requests never reach next, and their
+// passes the others to next, with the caller's identity in the request
+// context (see IdentityFrom). Rejected requests never reach next, and their
 // bodies are never read.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +151,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		var status int
 		switch {
 		case err == nil:
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(WithIdentity(ctx, identity)))
 			return
 		case errors.Is(err, ErrMissingToken), errors.Is(err, ErrInvalidToken):
 			slog.WarnContext(ctx, "rejecting unauthenticated request", "client_address", clientaddr.String(r), "reason", err)
@@ -164,6 +165,21 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		}
 		http.Error(w, http.StatusText(status), status)
 	})
+}
+
+type identityKey struct{}
+
+// WithIdentity returns a copy of ctx carrying the caller's identity, as
+// Middleware stores it.
+func WithIdentity(ctx context.Context, identity Identity) context.Context {
+	return context.WithValue(ctx, identityKey{}, identity)
+}
+
+// IdentityFrom returns the caller's identity, stored in the request context
+// by Middleware once the caller is authenticated and authorized.
+func IdentityFrom(ctx context.Context) (Identity, bool) {
+	identity, ok := ctx.Value(identityKey{}).(Identity)
+	return identity, ok
 }
 
 // Authenticate validates the token and checks that its user is allowlisted

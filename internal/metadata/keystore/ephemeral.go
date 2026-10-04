@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
 const (
@@ -26,15 +27,40 @@ const (
 	retryDelay = 10 * time.Second
 )
 
+// Key lifecycle events, logged as key_lifecycle audit records (R-3).
+const (
+	eventGenerated = "generated"
+	eventPublished = "published"
+	eventActive    = "active"
+	eventRetired   = "retired"
+	eventDropped   = "dropped"
+)
+
 // ephemeralKey is a key pair held in memory.
 type ephemeralKey struct {
 	id          string
 	algorithm   string
 	signer      crypto.Signer
+	thumbprint  string
 	publishedAt time.Time
 	// activatesAt is publishedAt plus the publish-ahead period; the key is
 	// retired when its successor activates.
 	activatesAt time.Time
+	// activeLogged and retiredLogged record which transitions have been
+	// logged, so that each is logged exactly once.
+	activeLogged  bool
+	retiredLogged bool
+}
+
+// lifecycleRecord is a key lifecycle event waiting to be logged.
+type lifecycleRecord struct {
+	event      string
+	kid        string
+	algorithm  string
+	thumbprint string
+	// at is when the transition took effect, which may precede the
+	// maintenance run noticing it.
+	at time.Time
 }
 
 // Ephemeral is a KeyStore that generates its key pairs in memory and never
@@ -238,21 +264,41 @@ func (e *Ephemeral) Run(ctx context.Context) error {
 	}
 }
 
-// maintain purges the keys whose retention window has passed, generates the
-// next key if it is due and returns the time at which it needs to run again.
+// maintain logs the key transitions that took effect since its last run,
+// purges the keys whose retention window has passed, generates the next key
+// if it is due and returns the time at which it needs to run again.
 func (e *Ephemeral) maintain(ctx context.Context) (time.Time, error) {
 	now := e.now()
 
 	e.mu.Lock()
+	// activations first: a key retires when its successor activates, and
+	// the successor's activation is logged before the retirement it causes
+	var records []lifecycleRecord
+	for _, k := range e.keys {
+		if !k.activeLogged && !k.activatesAt.After(now) {
+			k.activeLogged = true
+			records = append(records, k.record(eventActive, k.activatesAt))
+		}
+	}
+	for i, k := range e.keys[:len(e.keys)-1] {
+		if successor := e.keys[i+1]; !k.retiredLogged && !successor.activatesAt.After(now) {
+			k.retiredLogged = true
+			records = append(records, k.record(eventRetired, successor.activatesAt))
+		}
+	}
 	purged := 0
 	for purged < len(e.keys) && e.expired(purged, now) {
-		slog.InfoContext(ctx, "retired signing key purged", "replica_id", e.replicaID, "kid", e.keys[purged].id)
+		k := e.keys[purged]
+		records = append(records, k.record(eventDropped, e.keys[purged+1].activatesAt.Add(e.retention)))
 		purged++
 	}
 	e.keys = slices.Delete(e.keys, 0, purged)
 	last := e.keys[len(e.keys)-1]
 	due := !last.activatesAt.After(now) && !now.Before(e.generationDue(last))
 	e.mu.Unlock()
+	for _, r := range records {
+		e.logLifecycle(ctx, r)
+	}
 
 	if due {
 		// only maintain adds keys, and it is not run concurrently, so the
@@ -295,20 +341,54 @@ func (e *Ephemeral) addKey(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generating %s key: %w", e.algorithm, err)
 	}
+	thumbprint, err := Thumbprint(PublicKey{Algorithm: e.algorithm, Key: signer.Public()})
+	if err != nil {
+		return fmt.Errorf("generating %s key: %w", e.algorithm, err)
+	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	now := e.now()
 	key := &ephemeralKey{
 		id:          e.newKeyID(now),
 		algorithm:   e.algorithm,
 		signer:      signer,
+		thumbprint:  thumbprint,
 		publishedAt: now,
 		activatesAt: now.Add(e.publishAhead),
 	}
 	e.keys = append(e.keys, key)
-	slog.InfoContext(ctx, "signing key published", "replica_id", e.replicaID, "kid", key.id, "algorithm", key.algorithm, "activates_at", key.activatesAt)
+	e.mu.Unlock()
+	// an ephemeral key is published as soon as it is generated
+	e.logLifecycle(ctx, key.record(eventGenerated, now))
+	e.logLifecycle(ctx, key.record(eventPublished, now), "activates_at", key.activatesAt)
 	return nil
+}
+
+// record returns a lifecycle record of the key for the given event.
+func (k *ephemeralKey) record(event string, at time.Time) lifecycleRecord {
+	return lifecycleRecord{event: event, kid: k.id, algorithm: k.algorithm, thumbprint: k.thumbprint, at: at}
+}
+
+// logLifecycle logs a key_lifecycle audit record (R-3): with the kid,
+// algorithm and RFC 7638 thumbprint, these records tie a kid, and the tokens
+// it signed, to this replica and to specific key material after the replica
+// has restarted and the key is gone. A dropped key is logged at
+// syslog.LevelNotice, the others at info.
+func (e *Ephemeral) logLifecycle(ctx context.Context, r lifecycleRecord, extra ...any) {
+	level := slog.LevelInfo
+	if r.event == eventDropped {
+		level = syslog.LevelNotice
+	}
+	attrs := append([]any{
+		syslog.AuditKey, "key_lifecycle",
+		"event", r.event,
+		"replica_id", e.replicaID,
+		"kid", r.kid,
+		"algorithm", r.algorithm,
+		"thumbprint", r.thumbprint,
+		"effective_at", r.at,
+	}, extra...)
+	slog.Log(ctx, level, "signing key "+r.event, attrs...)
 }
 
 // newKeyID returns the kid for a key generated at t; callers must hold the

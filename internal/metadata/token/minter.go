@@ -34,6 +34,21 @@ type ClaimsBuilder interface {
 	Build(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (iid.Claims, error)
 }
 
+// Issued is a minted token together with the details its audit record
+// needs, so that callers never have to parse the token back.
+type Issued struct {
+	// Token is the compact-serialized JWS.
+	Token string
+	// KeyID is the kid of the key that signed it.
+	KeyID string
+	// ID is its jti.
+	ID string
+	// IssuedAt and Expiry are its iat and exp, in seconds since the Unix
+	// epoch.
+	IssuedAt int64
+	Expiry   int64
+}
+
 // Minter issues signed openstack_iid tokens. It holds no key material: every
 // signature is delegated to the key store. It is safe for concurrent use as
 // long as its key store and claims builder are.
@@ -59,22 +74,24 @@ func NewMinter(keys keystore.KeyStore, builder ClaimsBuilder) (*Minter, error) {
 // signed with the key store's active key, whose kid is in the header. It
 // never returns a token alongside an error: invalid requests fail with
 // claims.ErrInvalidRequest, key store failures with ErrKeyStoreUnavailable,
-// and a token over iid.MaxTokenBytes with ErrTokenTooLarge.
-func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (string, error) {
+// and a token over iid.MaxTokenBytes with ErrTokenTooLarge. Issuance itself
+// is not logged here: the caller writes the audit record once the response
+// is ready.
+func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment claims.Enrichment) (Issued, error) {
 	c, err := m.builder.Build(ctx, req, enrichment)
 	if err != nil {
-		return "", fmt.Errorf("minting token: %w", err)
+		return Issued{}, fmt.Errorf("minting token: %w", err)
 	}
 	// the builder already checked the custom claims, but enrichment claim
 	// names are optional fields the JSON encoder cannot guard against a
 	// collision, so check again right before signing
 	if err := iid.ValidateCustomClaims(c.Custom); err != nil {
 		slog.ErrorContext(ctx, "refusing to sign claims with reserved custom claim names", "project_id", req.ProjectID, "instance_id", req.InstanceID, "error", err)
-		return "", fmt.Errorf("minting token: %w", err)
+		return Issued{}, fmt.Errorf("minting token: %w", err)
 	}
 	payload, err := json.Marshal(c)
 	if err != nil {
-		return "", fmt.Errorf("minting token: encoding claims: %w", err)
+		return Issued{}, fmt.Errorf("minting token: encoding claims: %w", err)
 	}
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 
@@ -84,18 +101,17 @@ func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment cl
 			// cannot happen with the claims builder's own caps: refuse rather
 			// than hand out a token the SPIRE Server would reject
 			slog.ErrorContext(ctx, "refusing to issue an oversized token", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid, "bytes", len(token), "max_bytes", iid.MaxTokenBytes)
-			return "", fmt.Errorf("minting token: %w: %d bytes, at most %d allowed", ErrTokenTooLarge, len(token), iid.MaxTokenBytes)
+			return Issued{}, fmt.Errorf("minting token: %w: %d bytes, at most %d allowed", ErrTokenTooLarge, len(token), iid.MaxTokenBytes)
 		}
 		if err == nil {
-			slog.InfoContext(ctx, "token issued", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid, "jti", c.ID)
-			return token, nil
+			return Issued{Token: token, KeyID: kid, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}, nil
 		}
 		if errors.Is(err, keystore.ErrKeyNotActive) && attempt < signAttempts {
 			slog.DebugContext(ctx, "signing key rotated while signing, retrying", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid)
 			continue
 		}
 		slog.ErrorContext(ctx, "cannot sign token", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid, "error", err)
-		return "", fmt.Errorf("minting token: %w", err)
+		return Issued{}, fmt.Errorf("minting token: %w", err)
 	}
 }
 

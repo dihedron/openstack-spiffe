@@ -182,3 +182,17 @@ func TestFromWithoutMiddlewareUsesThePeer(t *testing.T) {
 		t.Fatalf("String = %q, want the raw peer", got)
 	}
 }
+
+func TestPeer(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/attest", nil)
+	r.RemoteAddr = "[::ffff:10.0.10.3]:40000"
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	addr, ok := Peer(r)
+	if !ok || addr.String() != "10.0.10.3" {
+		t.Fatalf("Peer = %v, %v; want 10.0.10.3, the TCP peer", addr, ok)
+	}
+	r.RemoteAddr = "garbage"
+	if _, ok := Peer(r); ok {
+		t.Fatal("Peer accepted an unparseable peer")
+	}
+}

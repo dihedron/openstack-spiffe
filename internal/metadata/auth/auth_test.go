@@ -432,3 +432,24 @@ func TestNewAuthenticatorValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestMiddlewarePutsTheIdentityInTheContext(t *testing.T) {
+	a := newAuthenticator(t, newValidator(), &testClock{now: testNow})
+	var got Identity
+	var found bool
+	h := a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, found = IdentityFrom(r.Context())
+	}))
+	if resp := post(h, serviceToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	if !found || got.UserID != novaUserID {
+		t.Fatalf("IdentityFrom = %+v, %v; want the caller's identity", got, found)
+	}
+}
+
+func TestIdentityFromWithoutMiddleware(t *testing.T) {
+	if id, ok := IdentityFrom(context.Background()); ok {
+		t.Fatalf("IdentityFrom = %+v on a bare context", id)
+	}
+}

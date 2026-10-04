@@ -3,12 +3,18 @@ package attest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,12 +22,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dihedron/openstack-spiffe/internal/metadata/auth"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/claims"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/clientaddr"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/novalookup"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/ratelimit"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/token"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
 const (
@@ -67,10 +76,19 @@ type fakeMinter struct {
 	enrichment claims.Enrichment
 }
 
-func (f *fakeMinter) Mint(ctx context.Context, req claims.NovaRequest, e claims.Enrichment) (string, error) {
+const (
+	testKID = "2026-09-29-signer-a-key-52331"
+	testJTI = "5b1f0f3e-2f7a-4c1e-8d0a-6c2f9b7e4a11"
+	testIAT = int64(1790692331)
+)
+
+func (f *fakeMinter) Mint(ctx context.Context, req claims.NovaRequest, e claims.Enrichment) (token.Issued, error) {
 	f.calls++
 	f.req, f.enrichment = req, e
-	return f.token, f.err
+	if f.err != nil {
+		return token.Issued{}, f.err
+	}
+	return token.Issued{Token: f.token, KeyID: testKID, ID: testJTI, IssuedAt: testIAT, Expiry: testIAT + 300}, nil
 }
 
 type fixture struct {
@@ -196,7 +214,7 @@ func TestRejectedPayloadIsLoggedRedacted(t *testing.T) {
 	}
 }
 
-func TestMalformedPayloadIsLoggedWithoutUserData(t *testing.T) {
+func TestUnparseablePayloadIsLoggedBySizeAndHashOnly(t *testing.T) {
 	logs := captureLogs(t)
 	f := newFixture(t)
 	body := `{"project-id":"` + projectID + `","user-data":"` + userData + `", broken`
@@ -204,11 +222,32 @@ func TestMalformedPayloadIsLoggedWithoutUserData(t *testing.T) {
 		t.Fatalf("status %d, want 400", w.Code)
 	}
 	out := logs.String()
-	if strings.Contains(out, userData) || strings.Contains(out, userData[:12]) {
-		t.Fatalf("user-data leaked into the logs:\n%s", out)
+	// the sensitive values cannot be located reliably in an unparseable
+	// payload, so none of its content is logged
+	if strings.Contains(out, userData[:12]) || strings.Contains(out, projectID) {
+		t.Fatalf("payload content leaked into the logs:\n%s", out)
 	}
-	if !strings.Contains(out, projectID) {
-		t.Fatalf("payload prefix not logged:\n%s", out)
+	sum := sha256.Sum256([]byte(body))
+	for _, want := range []string{fmt.Sprintf("payload_bytes=%d", len(body)), "payload_sha256=" + hex.EncodeToString(sum[:])} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log lacks %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestRejectedPayloadMetadataValuesAreRedacted(t *testing.T) {
+	logs := captureLogs(t)
+	f := newFixture(t)
+	body := `{"project-id":"` + projectID + `","instance-id":"NOT-A-UUID","hostname":"vm","metadata":{"db_password":"hunter2","role":"web"}}`
+	if w := f.do(http.MethodPost, body); w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", w.Code)
+	}
+	out := logs.String()
+	if strings.Contains(out, "hunter2") || strings.Contains(out, `\"web\"`) {
+		t.Fatalf("metadata value leaked into the logs:\n%s", out)
+	}
+	if !strings.Contains(out, "db_password") || !strings.Contains(out, "role") {
+		t.Fatalf("metadata keys not logged:\n%s", out)
 	}
 }
 
@@ -381,5 +420,161 @@ func TestBodyReadFailure(t *testing.T) {
 	f.handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/attest", io.NopCloser(errReader{})))
 	if w.Code != http.StatusBadRequest || f.minter.calls != 0 {
 		t.Fatalf("status %d, minter calls %d; want 400, 0", w.Code, f.minter.calls)
+	}
+}
+
+// auditRecords returns the token_issued audit records in JSON logs.
+func auditRecords(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for line := range strings.Lines(logs.String()) {
+		var r map[string]any
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("decoding log line %q: %v", line, err)
+		}
+		if r[syslog.AuditKey] == "token_issued" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func captureJSONLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
+
+const auditedToken = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2VjcmV0LXNpZ25hdHVyZQ"
+
+// authenticated returns a request as it reaches the handler behind the
+// authentication middleware.
+func authenticated(body string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/attest", strings.NewReader(body))
+	return r.WithContext(auth.WithIdentity(r.Context(), auth.Identity{UserID: "3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60"}))
+}
+
+func TestTokenIssuedAuditRecord(t *testing.T) {
+	logs := captureJSONLogs(t)
+	f := newFixture(t)
+	f.minter.token = auditedToken
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, authenticated(validBody))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+
+	records := auditRecords(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("%d token_issued records, want exactly 1:\n%s", len(records), logs)
+	}
+	r := records[0]
+	want := map[string]any{
+		"msg":            "token issued",
+		"level":          "INFO",
+		"user_id":        "3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60",
+		"client_address": "192.0.2.1",
+		"project_id":     projectID,
+		"instance_id":    instanceID,
+		"jti":            testJTI,
+		"kid":            testKID,
+		"iat":            float64(testIAT),
+		"exp":            float64(testIAT + 300),
+	}
+	for k, v := range want {
+		if r[k] != v {
+			t.Errorf("%s = %v, want %v", k, r[k], v)
+		}
+	}
+	for _, absent := range []string{"peer_address", "client_cert_subject", "client_cert_serial"} {
+		if _, ok := r[absent]; ok {
+			t.Errorf("%s = %v, want it absent", absent, r[absent])
+		}
+	}
+	for _, secret := range []string{auditedToken, "c2VjcmV0LXNpZ25hdHVyZQ", userData} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("log contains %q:\n%s", secret, logs)
+		}
+	}
+}
+
+func TestTokenIssuedAuditRecordBehindTrustedProxy(t *testing.T) {
+	logs := captureJSONLogs(t)
+	f := newFixture(t)
+	resolver, err := clientaddr.NewResolver([]string{"10.0.10.0/24"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := authenticated(validBody)
+	r.RemoteAddr = "10.0.10.3:40000"
+	r.Header.Set("X-Forwarded-For", "198.51.100.7")
+	resolver.Middleware(f.handler).ServeHTTP(httptest.NewRecorder(), r)
+
+	records := auditRecords(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("%d token_issued records, want 1", len(records))
+	}
+	if got := records[0]["client_address"]; got != "198.51.100.7" {
+		t.Errorf("client_address = %v, want the forwarded address", got)
+	}
+	if got := records[0]["peer_address"]; got != "10.0.10.3" {
+		t.Errorf("peer_address = %v, want the proxy", got)
+	}
+}
+
+func TestTokenIssuedAuditRecordWithClientCertificate(t *testing.T) {
+	logs := captureJSONLogs(t)
+	f := newFixture(t)
+	cert := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: "nova-api-metadata", Organization: []string{"cloud"}},
+		SerialNumber: big.NewInt(0x1f2e3d),
+	}
+	r := authenticated(validBody)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	f.handler.ServeHTTP(httptest.NewRecorder(), r)
+
+	records := auditRecords(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("%d token_issued records, want 1", len(records))
+	}
+	if got, want := records[0]["client_cert_subject"], "CN=nova-api-metadata,O=cloud"; got != want {
+		t.Errorf("client_cert_subject = %v, want %v", got, want)
+	}
+	if got, want := records[0]["client_cert_serial"], "1f2e3d"; got != want {
+		t.Errorf("client_cert_serial = %v, want %v", got, want)
+	}
+}
+
+func TestNoAuditRecordWithoutToken(t *testing.T) {
+	for name, setup := range map[string]func(f *fixture){
+		"rate limited":        func(f *fixture) { f.limiter.allow = false },
+		"instance mismatch":   func(f *fixture) { f.verifier.err = novalookup.ErrInstanceMismatch },
+		"lookup unavailable":  func(f *fixture) { f.verifier.err = novalookup.ErrLookupUnavailable },
+		"key store down":      func(f *fixture) { f.minter.err = token.ErrKeyStoreUnavailable },
+		"oversized token":     func(f *fixture) { f.minter.err = token.ErrTokenTooLarge },
+		"invalid for builder": func(f *fixture) { f.minter.err = claims.ErrInvalidRequest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureJSONLogs(t)
+			f := newFixture(t)
+			setup(f)
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, authenticated(validBody))
+			if w.Code == http.StatusOK {
+				t.Fatal("status 200")
+			}
+			if records := auditRecords(t, logs); len(records) != 0 {
+				t.Fatalf("token_issued records for a refused request: %v", records)
+			}
+		})
+	}
+	logs := captureJSONLogs(t)
+	f := newFixture(t)
+	f.handler.ServeHTTP(httptest.NewRecorder(), authenticated("not json"))
+	if records := auditRecords(t, logs); len(records) != 0 {
+		t.Fatalf("token_issued records for a bad request: %v", records)
 	}
 }
