@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
@@ -24,11 +25,18 @@ const (
 	ReasonTooLarge
 	// ReasonNotEncodable marks an entry that cannot be serialized to JSON.
 	ReasonNotEncodable
-	// ReasonInvalidKey marks an empty key or a key containing ':', which
-	// would make the "tag:<key>:<value>" selector of the SPIRE plugins
-	// ambiguous (see iid.ValidateTagKey).
+	// ReasonInvalidKey marks a key failing iid.ValidateTagKey: empty, or
+	// containing ':', which would make the "tag:<key>:<value>" selector of
+	// the SPIRE plugins ambiguous, or not valid UTF-8, or containing control
+	// or format characters.
 	ReasonInvalidKey
+	// ReasonInvalidValue marks a value failing iid.ValidateTagValue: not
+	// valid UTF-8, or containing control or format characters.
+	ReasonInvalidValue
 )
+
+// maxLoggedKeyBytes bounds the part of a dropped key that is logged.
+const maxLoggedKeyBytes = 64
 
 // String returns a human-readable description of the reason.
 func (r Reason) String() string {
@@ -42,7 +50,9 @@ func (r Reason) String() string {
 	case ReasonNotEncodable:
 		return "not encodable"
 	case ReasonInvalidKey:
-		return "invalid key (empty or containing ':')"
+		return "invalid key (empty, containing ':', or invalid characters)"
+	case ReasonInvalidValue:
+		return "invalid value (invalid characters)"
 	default:
 		return fmt.Sprintf("unknown reason (%d)", int8(r))
 	}
@@ -56,10 +66,10 @@ type DroppedTag struct {
 	Reason Reason
 }
 
-// FilterTags derives the "tags" claim from the instance metadata. Keys that
-// are empty or contain ':' are dropped (see iid.ValidateTagKey), even when
-// allowlisted; only string values are kept; if allowlist is not empty, only
-// the listed keys are kept.
+// FilterTags derives the "tags" claim from the instance metadata. Keys
+// failing iid.ValidateTagKey are dropped, even when allowlisted; if allowlist
+// is not empty, only the listed keys are kept; only string values passing
+// iid.ValidateTagValue are kept.
 // The JSON serialization of the result never exceeds maxBytes: entries are
 // considered in sorted key order and any entry that would not fit is dropped,
 // so the outcome is deterministic for a given input. The returned map is never
@@ -83,6 +93,10 @@ func FilterTags(metadata map[string]any, allowlist []string, maxBytes int) (map[
 			dropped = append(dropped, DroppedTag{Key: key, Reason: ReasonNotString})
 			continue
 		}
+		if iid.ValidateTagValue(value) != nil {
+			dropped = append(dropped, DroppedTag{Key: key, Reason: ReasonInvalidValue})
+			continue
+		}
 		entry, err := entrySize(key, value)
 		if err != nil {
 			dropped = append(dropped, DroppedTag{Key: key, Reason: ReasonNotEncodable})
@@ -99,6 +113,22 @@ func FilterTags(metadata map[string]any, allowlist []string, maxBytes int) (map[
 		tags[key] = value
 	}
 	return tags, dropped
+}
+
+// LoggedKey returns a metadata key as it may be logged: at most 64 bytes,
+// cut on a character boundary when the key is valid UTF-8, and marked with
+// "..." when cut. Escaping is left to the log handler.
+func LoggedKey(key string) string {
+	if len(key) <= maxLoggedKeyBytes {
+		return key
+	}
+	n := maxLoggedKeyBytes
+	if utf8.ValidString(key) {
+		for !utf8.RuneStart(key[n]) {
+			n--
+		}
+	}
+	return key[:n] + "..."
 }
 
 // entrySize returns the size of `"key":"value"` once JSON-encoded, escaping

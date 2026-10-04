@@ -263,7 +263,7 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Cla
 		}
 		header, claims, err = Verify(token, lookupIn(keys), now, s.skew)
 	}
-	log := slog.With("kid", header.KeyID, "project_id", claims.ProjectID, "instance_id", claims.InstanceID)
+	log := slog.With(append(kidAttributes(header.KeyID), "project_id", claims.ProjectID, "instance_id", claims.InstanceID)...)
 	switch {
 	case errors.Is(err, ErrUnknownKID) && len(keys) == 0:
 		log.ErrorContext(ctx, "attestation rejected: no verification keys", "error", err)
@@ -291,6 +291,16 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Cla
 		}
 	}
 	return claims, nil
+}
+
+// kidAttributes returns the log attributes describing a token's kid: the kid
+// itself if it is well-formed, otherwise only its length, since a malformed
+// kid is attacker-controlled content.
+func kidAttributes(kid string) []any {
+	if iid.ValidateKeyID(kid) != nil {
+		return []any{"kid", "invalid", "kid_length", len(kid)}
+	}
+	return []any{"kid", kid}
 }
 
 func lookupIn(keys map[string]keystore.PublicKey) KeyLookup {

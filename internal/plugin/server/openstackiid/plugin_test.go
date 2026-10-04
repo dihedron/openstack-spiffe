@@ -1,9 +1,12 @@
 package openstackiid
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"encoding/pem"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -296,6 +299,54 @@ func TestAttestUnknownKIDRecoveredByRefetch(t *testing.T) {
 	h.clock.Advance(5 * time.Second)
 	if _, err := h.attest(t, sign(t, es, nil, validClaims())); err != nil {
 		t.Fatalf("token with a newly published kid rejected: %v", err)
+	}
+}
+
+func TestAttestMalformedKID(t *testing.T) {
+	_, es, _ := testKeys(t)
+	h := serve(t, es)
+	h.mustConfigure(t, "")
+	waitForKeys(t, h)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	// past jwks_min_refetch_interval, so that an unknown kid would re-fetch
+	h.clock.Advance(5 * time.Second)
+	fetches := h.jwks.fetches.Load()
+	const kid = "attacker-controlled-kid\x1b[31m"
+	_, err := h.attest(t, sign(t, es, map[string]any{"kid": kid}, validClaims()))
+	wantCode(t, err, codes.PermissionDenied, "invalid kid")
+	if strings.Contains(err.Error(), "attacker") {
+		t.Errorf("status %q contains the kid", err)
+	}
+	if got := h.jwks.fetches.Load(); got != fetches {
+		t.Errorf("JWK Set fetched %d times for a malformed kid, want no re-fetch", got-fetches)
+	}
+	out := logs.String()
+	if strings.Contains(out, "attacker") {
+		t.Errorf("log contains the kid:\n%s", out)
+	}
+	if want := fmt.Sprintf("kid=invalid kid_length=%d", len(kid)); !strings.Contains(out, want) {
+		t.Errorf("log lacks %q:\n%s", want, out)
+	}
+}
+
+func TestAttestLogsValidKID(t *testing.T) {
+	_, es, _ := testKeys(t)
+	h := serve(t, es)
+	h.mustConfigure(t, "")
+	waitForKeys(t, h)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	_, err := h.attest(t, sign(t, es, nil, with(validClaims(), map[string]any{"aud": "other"})))
+	wantCode(t, err, codes.PermissionDenied, "audience")
+	if want := "kid=" + es.kid; !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
 	}
 }
 

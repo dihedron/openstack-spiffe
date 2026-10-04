@@ -9,8 +9,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"math/big"
-	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,9 +111,29 @@ func TestKeyIDFormat(t *testing.T) {
 	if want := "2026-09-29-signer-a-key-52331"; ids[0] != want {
 		t.Fatalf("kid = %q, want %q", ids[0], want)
 	}
-	pattern := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-[a-z0-9]([a-z0-9-]*[a-z0-9])?-key-\d+$`)
-	if !pattern.MatchString(ids[0]) {
-		t.Fatalf("kid %q does not match <YYYY-MM-DD>-<replica-id>-key-<n>", ids[0])
+	if err := iid.ValidateKeyID(ids[0]); err != nil {
+		t.Fatalf("kid %q: %v", ids[0], err)
+	}
+}
+
+// TestKeyIDsPassTheSharedCheck ties the kid generator to iid.ValidateKeyID,
+// which the server plugin applies before any key lookup: a kid it rejects
+// would make every token of the replica fail attestation.
+func TestKeyIDsPassTheSharedCheck(t *testing.T) {
+	longest := strings.Repeat("r", 63)
+	for _, replica := range []string{"a", "signer-a", "key", longest} {
+		// the end of the day gives the largest sequence numbers
+		clock := newFakeClock(time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC))
+		s := newTestStore(t, clock, replica, "ES256")
+		ids := []string{activeOrPending(t, s)}
+		for range 3 {
+			ids = append(ids, s.newKeyID(clock.Now()))
+		}
+		for _, id := range ids {
+			if err := iid.ValidateKeyID(id); err != nil {
+				t.Errorf("replica %q: kid %q: %v", replica, id, err)
+			}
+		}
 	}
 }
 

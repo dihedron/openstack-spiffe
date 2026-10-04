@@ -110,7 +110,7 @@ func (b *Builder) Build(ctx context.Context, req NovaRequest, enrichment Enrichm
 
 	tags, dropped := FilterTags(req.Metadata, b.allowlist, b.maxTagsBytes)
 	for _, d := range dropped {
-		slog.InfoContext(ctx, "metadata entry left out of tags", "project_id", req.ProjectID, "instance_id", req.InstanceID, "key", d.Key, "reason", d.Reason)
+		slog.InfoContext(ctx, "metadata entry left out of tags", "project_id", req.ProjectID, "instance_id", req.InstanceID, "key", LoggedKey(d.Key), "reason", d.Reason)
 	}
 
 	issuedAt := b.now().Unix()

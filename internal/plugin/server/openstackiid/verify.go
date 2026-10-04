@@ -61,7 +61,7 @@ func Verify(token string, lookup KeyLookup, now time.Time, skew time.Duration) (
 
 	header, err := parseHeader(parts[0])
 	if err != nil {
-		return iid.Header{}, iid.Claims{}, err
+		return header, iid.Claims{}, err
 	}
 	key, ok := lookup(header.KeyID)
 	if !ok {
@@ -116,8 +116,11 @@ func parseHeader(encoded string) (iid.Header, error) {
 		return header, fmt.Errorf("%w: algorithm %q not allowed", ErrInvalidToken, header.Algorithm)
 	case header.Type != "" && header.Type != "JWT":
 		return header, fmt.Errorf("%w: type %q, want JWT", ErrInvalidToken, header.Type)
-	case header.KeyID == "":
-		return header, fmt.Errorf("%w: no kid", ErrInvalidToken)
+	}
+	// checked before any key lookup, re-fetch or logging: until the
+	// signature is verified the kid is attacker-controlled
+	if err := iid.ValidateKeyID(header.KeyID); err != nil {
+		return header, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 	return header, nil
 }
@@ -190,9 +193,28 @@ func checkClaims(c iid.Claims, now time.Time, skew time.Duration) error {
 	if err := iid.ValidateHostname(c.Hostname); err != nil {
 		return fmt.Errorf("%w: hostname: %w", ErrInvalidToken, err)
 	}
-	for key := range c.Tags {
+	for key, value := range c.Tags {
 		if err := iid.ValidateTagKey(key); err != nil {
 			return fmt.Errorf("%w: tags: %w", ErrInvalidToken, err)
+		}
+		if err := iid.ValidateTagValue(value); err != nil {
+			return fmt.Errorf("%w: tags: %w", ErrInvalidToken, err)
+		}
+	}
+	// ParseClaims already rejects an enrichment claim that is present but
+	// empty: an empty value here is an absent claim
+	for name, value := range map[string]string{
+		iid.ClaimAvailabilityZone: c.AvailabilityZone,
+		iid.ClaimFlavor:           c.Flavor,
+		iid.ClaimUserID:           c.UserID,
+		iid.ClaimProjectName:      c.ProjectName,
+		iid.ClaimDomainID:         c.DomainID,
+	} {
+		if value == "" {
+			continue
+		}
+		if err := iid.ValidateEnrichmentValue(value); err != nil {
+			return fmt.Errorf("%w: %s: %w", ErrInvalidToken, name, err)
 		}
 	}
 	if len(c.Tags) > 0 {

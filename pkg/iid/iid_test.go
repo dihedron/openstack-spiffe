@@ -276,10 +276,94 @@ func TestValidateTagKey(t *testing.T) {
 			t.Errorf("ValidateTagKey(%q) = %v, want nil", valid, err)
 		}
 	}
-	for _, invalid := range []string{"", ":", "a:b", "role:"} {
+	for _, invalid := range []string{"", ":", "a:b", "role:", "ro\u202ele", "ro\u200ble", "ro\x00le", "ro\nle", "ro\u0085le", "ro\xffle"} {
 		if err := ValidateTagKey(invalid); !errors.Is(err, ErrInvalidClaim) {
 			t.Errorf("ValidateTagKey(%q) = %v, want ErrInvalidClaim", invalid, err)
 		}
+	}
+}
+
+func TestValidateTagValue(t *testing.T) {
+	for _, valid := range []string{"", "web", "a:b:c", "ünïcødé", "with space", strings.Repeat("v", 2048)} {
+		if err := ValidateTagValue(valid); err != nil {
+			t.Errorf("ValidateTagValue(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"we\u202eb", "we\u200bb", "\ufeffweb", "we\x00b", "we\tb", "we\u0085b", "we\xffb"} {
+		if err := ValidateTagValue(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateTagValue(%q) = %v, want ErrInvalidClaim", invalid, err)
+		}
+	}
+}
+
+func TestValidateEnrichmentValue(t *testing.T) {
+	for _, valid := range []string{"nova", "m1.small", "zone a", "ünïcødé", strings.Repeat("e", 255)} {
+		if err := ValidateEnrichmentValue(valid); err != nil {
+			t.Errorf("ValidateEnrichmentValue(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", strings.Repeat("e", 256), strings.Repeat("é", 128), "no\u202eva", "no\u200bva", "no\nva", "no\xffva"} {
+		if err := ValidateEnrichmentValue(invalid); !errors.Is(err, ErrInvalidClaim) {
+			t.Errorf("ValidateEnrichmentValue(%q) = %v, want ErrInvalidClaim", invalid, err)
+		}
+	}
+}
+
+func TestValidateReplicaID(t *testing.T) {
+	for _, valid := range []string{"a", "signer-a", "s1", "0", strings.Repeat("r", 63)} {
+		if err := ValidateReplicaID(valid); err != nil {
+			t.Errorf("ValidateReplicaID(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{"", "Signer", "-a", "a-", "a.b", "a_b", strings.Repeat("r", 64)} {
+		if err := ValidateReplicaID(invalid); err == nil {
+			t.Errorf("ValidateReplicaID(%q) = nil, want an error", invalid)
+		}
+	}
+}
+
+func TestValidateKeyID(t *testing.T) {
+	longest := "2026-10-04-" + strings.Repeat("r", 63) + "-key-" + strings.Repeat("9", 128-len("2026-10-04-")-63-len("-key-"))
+	for _, valid := range []string{
+		"2026-10-04-signer-a-key-0",
+		"2026-10-04-signer-a-key-86399",
+		"2026-10-04-key-key-12", // a replica ID may itself be "key"
+		"2026-10-04-a-key-b-key-7",
+		longest,
+	} {
+		if err := ValidateKeyID(valid); err != nil {
+			t.Errorf("ValidateKeyID(%q) = %v, want nil", valid, err)
+		}
+	}
+	for _, invalid := range []string{
+		"",
+		"key-1",
+		"2026-10-4-signer-a-key-1",
+		"20261004-signer-a-key-1",
+		"2026-10-04-signer-a-key-",
+		"2026-10-04-signer-a-key-x",
+		"2026-10-04--key-1",
+		"2026-10-04-Signer-key-1",
+		"2026-10-04-signer_a-key-1",
+		"2026-10-04-signer-a-key-1\n",
+		"2026-10-04-signer\u202e-key-1",
+		"2026-10-04-signer-a-key-1/../../x",
+		longest + "9",
+	} {
+		if err := ValidateKeyID(invalid); !errors.Is(err, ErrInvalidKeyID) {
+			t.Errorf("ValidateKeyID(%q) = %v, want ErrInvalidKeyID", invalid, err)
+		}
+	}
+}
+
+func TestValidateKeyIDErrorOmitsKeyID(t *testing.T) {
+	const kid = "attacker-controlled\x1b[31m"
+	err := ValidateKeyID(kid)
+	if err == nil {
+		t.Fatal("ValidateKeyID accepted a malformed kid")
+	}
+	if strings.Contains(err.Error(), "attacker") {
+		t.Errorf("error %q contains the kid", err)
 	}
 }
 

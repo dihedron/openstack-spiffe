@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -275,6 +276,54 @@ func TestMissingEnrichmentAttributeIsUnavailable(t *testing.T) {
 	_, err := v.Verify(context.Background(), projectID, instanceID)
 	if !errors.Is(err, ErrLookupUnavailable) {
 		t.Fatalf("Verify error %v, want ErrLookupUnavailable (never a token with a missing enrichment claim)", err)
+	}
+}
+
+func TestInvalidEnrichmentValueIsUnavailable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		server  Server
+		project Project
+	}{
+		"format character in zone": {
+			server:  Server{ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az\u202e-1", Flavor: "m1.small"},
+			project: Project{Name: "web", DomainID: "default"},
+		},
+		"oversized flavor": {
+			server:  Server{ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az-1", Flavor: strings.Repeat("f", 256)},
+			project: Project{Name: "web", DomainID: "default"},
+		},
+		"control character in project name": {
+			server:  Server{ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az-1", Flavor: "m1.small"},
+			project: Project{Name: "web\nlevel=ERROR", DomainID: "default"},
+		},
+		"invalid UTF-8 in domain ID": {
+			server:  Server{ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az-1", Flavor: "m1.small"},
+			project: Project{Name: "web", DomainID: "def\xffault"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newBackend()
+			b.setServer(tc.server)
+			b.projects[projectID] = tc.project
+			v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment(iid.EnrichmentClaims()))
+			e, err := v.Verify(context.Background(), projectID, instanceID)
+			if !errors.Is(err, ErrLookupUnavailable) {
+				t.Fatalf("Verify = %+v, %v, want ErrLookupUnavailable (never a token the SPIRE Server would reject)", e, err)
+			}
+		})
+	}
+}
+
+func TestInvalidValueOfDisabledEnrichmentIsIgnored(t *testing.T) {
+	b := newBackend()
+	b.setServer(Server{ProjectID: projectID, UserID: "u1", Status: "ACTIVE", AvailabilityZone: "az-1", Flavor: "m1\u200bsmall"})
+	v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment([]string{iid.ClaimAvailabilityZone}))
+	e, err := v.Verify(context.Background(), projectID, instanceID)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if e != (claims.Enrichment{AvailabilityZone: "az-1"}) {
+		t.Fatalf("enrichment %+v", e)
 	}
 }
 

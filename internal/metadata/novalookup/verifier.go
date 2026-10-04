@@ -213,7 +213,31 @@ func (v *Verifier) Verify(ctx context.Context, projectID, instanceID string) (cl
 		return claims.Enrichment{}, projectErr
 	}
 	e.ProjectName, e.DomainID = project.ProjectName, project.DomainID
+	if err := v.checkEnrichment(ctx, log, e); err != nil {
+		return claims.Enrichment{}, err
+	}
 	return e, nil
+}
+
+// checkEnrichment applies iid.ValidateEnrichmentValue to every enabled
+// enrichment claim: the SPIRE Server-side plugin rejects a token carrying an
+// invalid one, so none is ever issued. The value is not logged, since it may
+// hold the very characters the check rejects.
+func (v *Verifier) checkEnrichment(ctx context.Context, log *slog.Logger, e claims.Enrichment) error {
+	values := map[string]string{
+		iid.ClaimAvailabilityZone: e.AvailabilityZone,
+		iid.ClaimFlavor:           e.Flavor,
+		iid.ClaimUserID:           e.UserID,
+		iid.ClaimProjectName:      e.ProjectName,
+		iid.ClaimDomainID:         e.DomainID,
+	}
+	for _, name := range v.enrich {
+		if err := iid.ValidateEnrichmentValue(values[name]); err != nil {
+			log.ErrorContext(ctx, "invalid enrichment attribute", "claim", name, "error", err)
+			return fmt.Errorf("%w: %s: %w", ErrLookupUnavailable, name, err)
+		}
+	}
+	return nil
 }
 
 // verifyServer checks the server record, if instance verification is

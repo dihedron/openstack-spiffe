@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -43,8 +44,11 @@ const (
 )
 
 const (
-	maxProjectIDLength = 64
-	maxHostnameLength  = 255
+	maxProjectIDLength       = 64
+	maxHostnameLength        = 255
+	maxEnrichmentValueLength = 255
+	// MaxKeyIDBytes is the maximum length of a kid.
+	MaxKeyIDBytes = 128
 )
 
 var (
@@ -53,6 +57,10 @@ var (
 	// can never appear under two different "sub" values.
 	instanceIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	projectIDPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	// a lowercase DNS label: replica IDs end up in every kid.
+	replicaIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	// <YYYY-MM-DD>-<replica-id>-key-<n>, the replica ID being a DNS label.
+	keyIDPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-key-[0-9]+$`)
 )
 
 // Header is the JOSE header of an issued token.
@@ -161,14 +169,85 @@ func ValidateHostname(hostname string) error {
 	return nil
 }
 
-// ValidateTagKey checks the key of a "tags" entry: non-empty and without
-// ':', which would make the "tag:<key>:<value>" selector ambiguous.
+// ValidateTagKey checks the key of a "tags" entry: non-empty, without ':',
+// which would make the "tag:<key>:<value>" selector ambiguous, and with the
+// character rules of ValidateTagValue.
 func ValidateTagKey(key string) error {
 	switch {
 	case key == "":
 		return fmt.Errorf("%w: empty tag key", ErrInvalidClaim)
 	case strings.Contains(key, ":"):
 		return fmt.Errorf("%w: tag key contains ':'", ErrInvalidClaim)
+	}
+	if err := checkCharacters(key); err != nil {
+		return fmt.Errorf("%w: tag key %w", ErrInvalidClaim, err)
+	}
+	return nil
+}
+
+// ValidateTagValue checks the value of a "tags" entry: valid UTF-8, without
+// control (Cc) or format (Cf) characters, which could make selectors that
+// look alike differ, or forge log lines. Empty values are valid.
+func ValidateTagValue(value string) error {
+	if err := checkCharacters(value); err != nil {
+		return fmt.Errorf("%w: tag value %w", ErrInvalidClaim, err)
+	}
+	return nil
+}
+
+// ValidateEnrichmentValue checks the value of an enrichment claim: non-empty,
+// at most 255 bytes, with the character rules of ValidateTagValue.
+func ValidateEnrichmentValue(value string) error {
+	switch {
+	case value == "":
+		return fmt.Errorf("%w: empty enrichment value", ErrInvalidClaim)
+	case len(value) > maxEnrichmentValueLength:
+		return fmt.Errorf("%w: enrichment value longer than %d bytes", ErrInvalidClaim, maxEnrichmentValueLength)
+	}
+	if err := checkCharacters(value); err != nil {
+		return fmt.Errorf("%w: enrichment value %w", ErrInvalidClaim, err)
+	}
+	return nil
+}
+
+// checkCharacters returns an error, phrased to follow the name of what is
+// checked, if s is not valid UTF-8 or contains control or format characters.
+func checkCharacters(s string) error {
+	switch {
+	case !utf8.ValidString(s):
+		return errors.New("is not valid UTF-8")
+	case strings.ContainsFunc(s, unicode.IsControl):
+		return errors.New("contains control characters")
+	case strings.ContainsFunc(s, func(r rune) bool { return unicode.Is(unicode.Cf, r) }):
+		return errors.New("contains format characters")
+	}
+	return nil
+}
+
+// ValidateReplicaID checks a replica ID: a lowercase DNS label, since it ends
+// up in every kid the replica issues.
+func ValidateReplicaID(id string) error {
+	if !replicaIDPattern.MatchString(id) {
+		return fmt.Errorf("replica ID %q is not a lowercase DNS label", id)
+	}
+	return nil
+}
+
+// ErrInvalidKeyID marks a kid that does not have the issuer's format.
+var ErrInvalidKeyID = errors.New("invalid kid")
+
+// ValidateKeyID checks a kid: at most MaxKeyIDBytes, of the form
+// <YYYY-MM-DD>-<replica-id>-key-<n>, the replica ID being a lowercase DNS
+// label. Until a token's signature is checked its kid is attacker-controlled,
+// so the error never contains it.
+func ValidateKeyID(kid string) error {
+	switch {
+	case kid == "":
+		return fmt.Errorf("%w: missing", ErrInvalidKeyID)
+	case len(kid) > MaxKeyIDBytes:
+		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidKeyID, MaxKeyIDBytes)
+	case !keyIDPattern.MatchString(kid):
+		return fmt.Errorf("%w: not of the form <YYYY-MM-DD>-<replica-id>-key-<n>", ErrInvalidKeyID)
 	}
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"slices"
 	"sync"
 	"time"
@@ -26,9 +25,6 @@ const (
 	// retryDelay is how long Run waits after a failed maintenance run.
 	retryDelay = 10 * time.Second
 )
-
-// replicaIDPattern matches a lowercase DNS label.
-var replicaIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // ephemeralKey is a key pair held in memory.
 type ephemeralKey struct {
@@ -118,8 +114,8 @@ func NewEphemeral(ctx context.Context, replicaID, algorithm string, options ...O
 	for _, option := range options {
 		option(e)
 	}
-	if !replicaIDPattern.MatchString(e.replicaID) {
-		return nil, fmt.Errorf("replica ID %q is not a lowercase DNS label", e.replicaID)
+	if err := iid.ValidateReplicaID(e.replicaID); err != nil {
+		return nil, err
 	}
 	if e.algorithm != "RS256" && e.algorithm != "ES256" {
 		return nil, fmt.Errorf("unsupported signing algorithm %q (want RS256 or ES256)", e.algorithm)

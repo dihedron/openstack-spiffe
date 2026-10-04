@@ -133,6 +133,8 @@ The `openstack-agent-plugin` and `openstack-server-plugin` packages install thei
 
 Set `plugin_checksum` to the SHA-256 of the installed binary; `make checksum` prints it for the binaries in `dist/`. SPIRE refuses to load a plugin whose hash does not match.
 
+**Upgrade order:** upgrade the issuer replicas before the server plugin. A newer server plugin rejects tokens whose tags or enrichment claims carry control or format characters (e.g. bidirectional overrides) and tokens whose `kid` does not have the issuer's format. A newer issuer drops such tags itself; an older one may still issue them.
+
 ### Configure
 
 Merge [examples/agent.conf](examples/agent.conf) and [examples/server.conf](examples/server.conf) into the `plugins` blocks of SPIRE Agent and SPIRE Server. Unknown keys are errors.

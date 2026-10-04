@@ -157,6 +157,66 @@ func TestFilterTagsDropsInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestFilterTagsDropsInvalidCharacters(t *testing.T) {
+	tags, dropped := FilterTags(map[string]any{
+		"role":          "web",
+		"bidi\u202ekey": "x",
+		"zero\u200bkey": "x",
+		"nul\x00key":    "x",
+		"bad\xffkey":    "x",
+		"v-bidi":        "we\u202eb",
+		"v-bom":         "\ufeffweb",
+		"v-newline":     "web\nlevel=ERROR",
+		"v-utf8":        "we\xffb",
+		"v-unicode":     "ünïcødé",
+	}, nil, iid.MaxTagsBytes)
+
+	if want := map[string]string{"role": "web", "v-unicode": "ünïcødé"}; !maps.Equal(tags, want) {
+		t.Fatalf("tags = %q, want %q", tags, want)
+	}
+	reasons := map[string]Reason{}
+	for _, d := range dropped {
+		reasons[d.Key] = d.Reason
+	}
+	want := map[string]Reason{
+		"bad\xffkey":    ReasonInvalidKey,
+		"bidi\u202ekey": ReasonInvalidKey,
+		"nul\x00key":    ReasonInvalidKey,
+		"zero\u200bkey": ReasonInvalidKey,
+		"v-bidi":        ReasonInvalidValue,
+		"v-bom":         ReasonInvalidValue,
+		"v-newline":     ReasonInvalidValue,
+		"v-utf8":        ReasonInvalidValue,
+	}
+	if !maps.Equal(reasons, want) {
+		t.Fatalf("dropped = %q, want %q", reasons, want)
+	}
+}
+
+func TestFilterTagsInvalidValueCheckedAfterAllowlist(t *testing.T) {
+	// an unlisted key is reported as such, whatever its value
+	_, dropped := FilterTags(map[string]any{"other": "we\u202eb"}, []string{"role"}, iid.MaxTagsBytes)
+	if len(dropped) != 1 || dropped[0].Reason != ReasonNotAllowed {
+		t.Fatalf("dropped = %+v, want one ReasonNotAllowed", dropped)
+	}
+}
+
+func TestLoggedKey(t *testing.T) {
+	for _, tc := range []struct{ key, want string }{
+		{"role", "role"},
+		{strings.Repeat("k", 64), strings.Repeat("k", 64)},
+		{strings.Repeat("k", 65), strings.Repeat("k", 64) + "..."},
+		// never cut inside a character: "é" is 2 bytes
+		{strings.Repeat("k", 63) + "éé", strings.Repeat("k", 63) + "..."},
+		// invalid UTF-8 is cut at 64 bytes, and escaped by the log handler
+		{strings.Repeat("\xff", 70), strings.Repeat("\xff", 64) + "..."},
+	} {
+		if got := LoggedKey(tc.key); got != tc.want {
+			t.Errorf("LoggedKey(%q) = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
 func TestFilterTagsAllowlist(t *testing.T) {
 	tags, dropped := FilterTags(map[string]any{
 		"role":    "web",
@@ -266,7 +326,8 @@ func TestReasonString(t *testing.T) {
 		ReasonNotAllowed:   "key not in allowlist",
 		ReasonTooLarge:     "tags size cap exceeded",
 		ReasonNotEncodable: "not encodable",
-		ReasonInvalidKey:   "invalid key (empty or containing ':')",
+		ReasonInvalidKey:   "invalid key (empty, containing ':', or invalid characters)",
+		ReasonInvalidValue: "invalid value (invalid characters)",
 		Reason(0):          "unknown reason (0)",
 		Reason(-1):         "unknown reason (-1)",
 	}

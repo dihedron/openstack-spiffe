@@ -11,16 +11,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 )
 
 // ErrInvalidConfig is wrapped by every error returned for a configuration
 // with error findings.
 var ErrInvalidConfig = errors.New("invalid configuration")
-
-// replicaIDPattern is a DNS label: it ends up in every kid the replica issues.
-var replicaIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // CheckOptions tunes how configuration files are checked.
 type CheckOptions struct {

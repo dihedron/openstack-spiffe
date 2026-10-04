@@ -236,7 +236,7 @@ func (s *Signer) validate(r *Result[Signer]) {
 	if s.TLSKeyPath == "" {
 		r.errorf(KindRuleViolation, "tls_key_path", "is required")
 	}
-	if s.ReplicaID != "" && !replicaIDPattern.MatchString(s.ReplicaID) {
+	if s.ReplicaID != "" && iid.ValidateReplicaID(s.ReplicaID) != nil {
 		r.errorf(KindRuleViolation, "replica_id", "%q must be a lowercase DNS label (set it explicitly if the hostname is not one)", s.ReplicaID)
 	}
 

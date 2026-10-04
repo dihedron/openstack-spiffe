@@ -269,6 +269,26 @@ func TestVerifyRejects(t *testing.T) {
 			return sign(t, es, nil, with(valid, map[string]any{"tags": map[string]any{"big": strings.Repeat("x", iid.MaxTagsBytes)}}))
 		}, ErrInvalidToken},
 		{"empty enrichment claim", func() string { return sign(t, es, nil, with(valid, map[string]any{"flavor": ""})) }, ErrInvalidToken},
+		{"malformed kid", func() string { return sign(t, es, map[string]any{"kid": "../../jwks"}, valid) }, iid.ErrInvalidKeyID},
+		{"kid with control characters", func() string { return sign(t, es, map[string]any{"kid": es.kid + "\n"}, valid) }, iid.ErrInvalidKeyID},
+		{"kid over 128 bytes", func() string {
+			return sign(t, es, map[string]any{"kid": "2026-09-29-signer-b-key-" + strings.Repeat("1", 105)}, valid)
+		}, iid.ErrInvalidKeyID},
+		{"tag key with a format character", func() string {
+			return sign(t, es, nil, with(valid, map[string]any{"tags": map[string]any{"ro\u202ele": "web"}}))
+		}, ErrInvalidToken},
+		{"tag value with a format character", func() string {
+			return sign(t, es, nil, with(valid, map[string]any{"tags": map[string]any{"role": "we\u200bb"}}))
+		}, ErrInvalidToken},
+		{"tag value with a control character", func() string {
+			return sign(t, es, nil, with(valid, map[string]any{"tags": map[string]any{"role": "web\nlevel=ERROR"}}))
+		}, ErrInvalidToken},
+		{"enrichment claim with a format character", func() string {
+			return sign(t, es, nil, with(valid, map[string]any{"availability_zone": "az\u202e-1"}))
+		}, ErrInvalidToken},
+		{"enrichment claim over 255 bytes", func() string {
+			return sign(t, es, nil, with(valid, map[string]any{"project_name": strings.Repeat("p", 256)}))
+		}, ErrInvalidToken},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -277,6 +297,38 @@ func TestVerifyRejects(t *testing.T) {
 				t.Fatalf("Verify error = %v, want %v", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestVerifyMalformedKIDNeverLookedUp(t *testing.T) {
+	_, es, _ := testKeys(t)
+	looked := false
+	lookup := func(kid string) (keystore.PublicKey, bool) {
+		looked = true
+		return keystore.PublicKey{}, false
+	}
+	const kid = "attacker\x1b[31m-controlled"
+	_, _, err := Verify(sign(t, es, map[string]any{"kid": kid}, validClaims()), lookup, testNow, testSkew)
+	switch {
+	case !errors.Is(err, iid.ErrInvalidKeyID) || !errors.Is(err, ErrInvalidToken):
+		t.Fatalf("Verify error = %v, want ErrInvalidToken and iid.ErrInvalidKeyID", err)
+	case errors.Is(err, ErrUnknownKID):
+		t.Fatal("a malformed kid is reported as unknown, which triggers a JWK Set re-fetch")
+	case looked:
+		t.Fatal("a malformed kid was looked up")
+	case strings.Contains(err.Error(), "attacker"):
+		t.Fatalf("error %q contains the kid", err)
+	}
+}
+
+func TestVerifyAcceptsValidCharacters(t *testing.T) {
+	rs, _, _ := testKeys(t)
+	claims := with(validClaims(), map[string]any{
+		"tags":         map[string]any{"rôle": "wéb server", "empty": ""},
+		"project_name": "prøject",
+	})
+	if _, _, err := Verify(sign(t, rs, nil, claims), lookupOf(rs), testNow, testSkew); err != nil {
+		t.Fatalf("Verify: %v", err)
 	}
 }
 
