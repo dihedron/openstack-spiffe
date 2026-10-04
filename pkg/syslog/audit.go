@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/juju/rfc/v2/rfc5424"
 )
 
 const (
@@ -77,7 +75,7 @@ type sender interface {
 // the delivery failure accounting.
 type auditSink struct {
 	syslog     sender
-	facility   rfc5424.Facility
+	facility   Facility
 	queueSize  int
 	onFailure  func(error)
 	onRecovery func(uint64)
@@ -117,11 +115,11 @@ type AuditHandler struct {
 // NewAuditHandler returns an AuditHandler sending audit records through s,
 // with the given facility, and starts the goroutine sending them; Close
 // stops it and closes s.
-func NewAuditHandler(s *Syslog, facility rfc5424.Facility, options ...AuditOption) (*AuditHandler, error) {
+func NewAuditHandler(s *Syslog, facility Facility, options ...AuditOption) (*AuditHandler, error) {
 	return newAuditHandler(s, facility, options...)
 }
 
-func newAuditHandler(s sender, facility rfc5424.Facility, options ...AuditOption) (*AuditHandler, error) {
+func newAuditHandler(s sender, facility Facility, options ...AuditOption) (*AuditHandler, error) {
 	if err := facility.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid facility: %w", err)
 	}
@@ -275,23 +273,23 @@ func (s *auditSink) drop(err error) {
 }
 
 // facilities are the facilities audit records may be sent with.
-var facilities = map[string]rfc5424.Facility{
-	"auth":     rfc5424.FacilityAuth,
-	"authpriv": rfc5424.FacilityAuthpriv,
-	"daemon":   rfc5424.FacilityDaemon,
-	"local0":   rfc5424.FacilityLocal0,
-	"local1":   rfc5424.FacilityLocal1,
-	"local2":   rfc5424.FacilityLocal2,
-	"local3":   rfc5424.FacilityLocal3,
-	"local4":   rfc5424.FacilityLocal4,
-	"local5":   rfc5424.FacilityLocal5,
-	"local6":   rfc5424.FacilityLocal6,
-	"local7":   rfc5424.FacilityLocal7,
+var facilities = map[string]Facility{
+	"auth":     FacilityAuth,
+	"authpriv": FacilityAuthpriv,
+	"daemon":   FacilityDaemon,
+	"local0":   FacilityLocal0,
+	"local1":   FacilityLocal1,
+	"local2":   FacilityLocal2,
+	"local3":   FacilityLocal3,
+	"local4":   FacilityLocal4,
+	"local5":   FacilityLocal5,
+	"local6":   FacilityLocal6,
+	"local7":   FacilityLocal7,
 }
 
 // ParseFacility returns the facility named name: auth, authpriv, daemon or
 // local0 to local7.
-func ParseFacility(name string) (rfc5424.Facility, error) {
+func ParseFacility(name string) (Facility, error) {
 	facility, ok := facilities[name]
 	if !ok {
 		return 0, fmt.Errorf("unknown syslog facility %q: expected auth, authpriv, daemon or local0 to local7", name)
@@ -301,18 +299,18 @@ func ParseFacility(name string) (rfc5424.Facility, error) {
 
 // severity maps a slog level to a syslog severity; it never yields the
 // alert or emergency severities, which journald forwards to every terminal.
-func severity(level slog.Level) rfc5424.Severity {
+func severity(level slog.Level) Severity {
 	switch {
 	case level < slog.LevelInfo:
-		return rfc5424.SeverityDebug
+		return SeverityDebug
 	case level < LevelNotice:
-		return rfc5424.SeverityInformational
+		return SeverityInformational
 	case level < slog.LevelWarn:
-		return rfc5424.SeverityNotice
+		return SeverityNotice
 	case level < slog.LevelError:
-		return rfc5424.SeverityWarning
+		return SeverityWarning
 	default:
-		return rfc5424.SeverityError
+		return SeverityError
 	}
 }
 

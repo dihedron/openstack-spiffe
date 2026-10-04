@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/juju/rfc/v2/rfc5424"
 )
 
 func newAuditLogger(t *testing.T, syslogOptions []Option, options ...AuditOption) (*slog.Logger, *AuditHandler, *net.UnixConn) {
@@ -22,7 +20,7 @@ func newAuditLogger(t *testing.T, syslogOptions []Option, options ...AuditOption
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h, err := NewAuditHandler(s, rfc5424.FacilityAuthpriv, options...)
+	h, err := NewAuditHandler(s, FacilityAuthpriv, options...)
 	if err != nil {
 		t.Fatalf("NewAuditHandler: %v", err)
 	}
@@ -176,7 +174,7 @@ func (f *fakeSender) count() int {
 }
 
 func (f *fakeSender) room(m *Message) (int, error) {
-	return 4096, rfc5424.MsgID(m.ID).Validate()
+	return 4096, validateHeaderField("MSGID", m.ID, 32)
 }
 
 func (f *fakeSender) Close() error {
@@ -223,7 +221,7 @@ func TestAuditDropsWhenQueueFull(t *testing.T) {
 		return nil
 	}}
 	var r reports
-	h, err := newAuditHandler(sender, rfc5424.FacilityAuthpriv, append(r.options(), WithQueueSize(1))...)
+	h, err := newAuditHandler(sender, FacilityAuthpriv, append(r.options(), WithQueueSize(1))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +264,7 @@ func TestAuditReportsSendFailures(t *testing.T) {
 		return nil
 	}}
 	var r reports
-	h, err := newAuditHandler(sender, rfc5424.FacilityAuthpriv, r.options()...)
+	h, err := newAuditHandler(sender, FacilityAuthpriv, r.options()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +287,7 @@ func TestAuditReportsSendFailures(t *testing.T) {
 func TestAuditDropsInvalidKind(t *testing.T) {
 	sender := &fakeSender{}
 	var r reports
-	h, err := newAuditHandler(sender, rfc5424.FacilityAuthpriv, r.options()...)
+	h, err := newAuditHandler(sender, FacilityAuthpriv, r.options()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +323,7 @@ func TestAuditCloseHonoursContext(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	sender := &fakeSender{send: func(*Message) error { <-release; return nil }}
-	h, err := newAuditHandler(sender, rfc5424.FacilityAuthpriv)
+	h, err := newAuditHandler(sender, FacilityAuthpriv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +340,7 @@ func TestAuditCloseHonoursContext(t *testing.T) {
 
 func TestAuditConcurrentUse(t *testing.T) {
 	sender := &fakeSender{}
-	h, err := newAuditHandler(sender, rfc5424.FacilityAuthpriv, WithQueueSize(10000))
+	h, err := newAuditHandler(sender, FacilityAuthpriv, WithQueueSize(10000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,12 +364,12 @@ func TestAuditConcurrentUse(t *testing.T) {
 }
 
 func TestParseFacility(t *testing.T) {
-	for name, want := range map[string]rfc5424.Facility{
-		"auth":     rfc5424.FacilityAuth,
-		"authpriv": rfc5424.FacilityAuthpriv,
-		"daemon":   rfc5424.FacilityDaemon,
-		"local0":   rfc5424.FacilityLocal0,
-		"local7":   rfc5424.FacilityLocal7,
+	for name, want := range map[string]Facility{
+		"auth":     FacilityAuth,
+		"authpriv": FacilityAuthpriv,
+		"daemon":   FacilityDaemon,
+		"local0":   FacilityLocal0,
+		"local7":   FacilityLocal7,
 	} {
 		if got, err := ParseFacility(name); err != nil || got != want {
 			t.Errorf("%s: got %v, %v", name, got, err)

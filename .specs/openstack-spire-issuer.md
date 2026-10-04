@@ -324,7 +324,7 @@ The token itself is never part of it. Together with the SPIRE Server-side plugin
 
 The sink is implemented by `pkg/syslog`, shared with the SPIRE Server-side plugin (companion spec). Before it is used, that package needs these fixes:
 - A structured-data parameter without `=` is an error, not a panic.
-- Every message is validated (`rfc5424.Message.Validate`) before it is sent.
+- Every message is validated against the RFC 5424 syntax (facility, severity, header fields, structured-data names) before it is sent. The package implements the parts of RFC 5424 it needs itself, without a third-party dependency.
 - Structured data is serialized in sorted order. It is not used by the audit sink, but stays available for callers that have an enterprise number.
 - The connection is redialed once after a failed send, and the client gets a `Close` method.
 - The socket path, size cap and send timeout are options.

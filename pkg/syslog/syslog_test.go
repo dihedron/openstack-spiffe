@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
-
-	"github.com/juju/rfc/v2/rfc5424"
 )
 
 // listen opens a Unix datagram socket standing in for /dev/log.
@@ -83,8 +81,8 @@ func TestSendFormat(t *testing.T) {
 	s, conn := open(t, WithApplication("my-app"), WithProcess("proc-1"))
 	when := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.FixedZone("CEST", 2*3600))
 	if err := s.Send(&Message{
-		Facility: rfc5424.FacilityAuthpriv,
-		Severity: rfc5424.SeverityInformational,
+		Facility: FacilityAuthpriv,
+		Severity: SeverityInformational,
 		ID:       "Login",
 		Time:     when,
 		Content:  "a message sent to syslog",
@@ -101,7 +99,7 @@ func TestSendFormat(t *testing.T) {
 func TestSendDefaults(t *testing.T) {
 	s, conn := open(t)
 	before := time.Now().Add(-time.Second)
-	if err := s.Send(&Message{Facility: rfc5424.FacilityDaemon, Severity: rfc5424.SeverityNotice, Content: "x"}); err != nil {
+	if err := s.Send(&Message{Facility: FacilityDaemon, Severity: SeverityNotice, Content: "x"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	parts := fields(t, receive(t, conn))
@@ -129,7 +127,7 @@ func TestSendObjectAsJSON(t *testing.T) {
 		Name  string `json:"name"`
 		Count int    `json:"count"`
 	}{"Funtò", 3}
-	if err := s.Send(&Message{Facility: rfc5424.FacilityAuthpriv, Severity: rfc5424.SeverityInformational, ID: "Login", Content: content}); err != nil {
+	if err := s.Send(&Message{Facility: FacilityAuthpriv, Severity: SeverityInformational, ID: "Login", Content: content}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if got := fields(t, receive(t, conn))[7]; got != `{"name":"Funtò","count":3}` {
@@ -140,8 +138,8 @@ func TestSendObjectAsJSON(t *testing.T) {
 func TestSendStructuredData(t *testing.T) {
 	s, conn := open(t, WithEnterprise("32473"))
 	if err := s.Send(&Message{
-		Facility: rfc5424.FacilityAuthpriv,
-		Severity: rfc5424.SeverityInformational,
+		Facility: FacilityAuthpriv,
+		Severity: SeverityInformational,
 		ID:       "Login",
 		Content:  "text",
 		Data: map[string][]string{
@@ -174,7 +172,7 @@ func TestSendRejectsInvalidStructuredData(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			s, conn := open(t, WithEnterprise(test.enterprise))
-			err := s.Send(&Message{Facility: rfc5424.FacilityAuthpriv, Severity: rfc5424.SeverityInformational, Content: "text", Data: test.data})
+			err := s.Send(&Message{Facility: FacilityAuthpriv, Severity: SeverityInformational, Content: "text", Data: test.data})
 			if err == nil {
 				t.Fatal("Send succeeded")
 			}
@@ -188,13 +186,14 @@ func TestSendRejectsInvalidMessage(t *testing.T) {
 		name    string
 		message Message
 	}{
-		{"MSGID with a space", Message{Severity: rfc5424.SeverityInformational, ID: "a b", Content: "x"}},
-		{"MSGID over 32 characters", Message{Severity: rfc5424.SeverityInformational, ID: strings.Repeat("m", 33), Content: "x"}},
-		{"unknown severity", Message{Severity: 42, Content: "x"}},
-		{"unknown facility", Message{Facility: 99, Severity: rfc5424.SeverityInformational, Content: "x"}},
-		{"no content", Message{Severity: rfc5424.SeverityInformational}},
-		{"invalid UTF-8 text", Message{Severity: rfc5424.SeverityInformational, Content: "\xff"}},
-		{"content not encodable", Message{Severity: rfc5424.SeverityInformational, Content: make(chan int)}},
+		{"MSGID with a space", Message{Facility: FacilityUser, Severity: SeverityInformational, ID: "a b", Content: "x"}},
+		{"MSGID over 32 characters", Message{Facility: FacilityUser, Severity: SeverityInformational, ID: strings.Repeat("m", 33), Content: "x"}},
+		{"unknown severity", Message{Facility: FacilityUser, Severity: 42, Content: "x"}},
+		{"unknown facility", Message{Facility: 24, Severity: SeverityInformational, Content: "x"}},
+		{"kernel facility", Message{Facility: FacilityKern, Severity: SeverityInformational, Content: "x"}},
+		{"no content", Message{Facility: FacilityUser, Severity: SeverityInformational}},
+		{"invalid UTF-8 text", Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "\xff"}},
+		{"content not encodable", Message{Facility: FacilityUser, Severity: SeverityInformational, Content: make(chan int)}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -236,7 +235,7 @@ func TestNewValidatesOptions(t *testing.T) {
 
 func TestSendTruncatesOnCharacterBoundary(t *testing.T) {
 	s, conn := open(t, WithMaxSize(200))
-	if err := s.Send(&Message{Severity: rfc5424.SeverityInformational, Content: strings.Repeat("é", 200)}); err != nil {
+	if err := s.Send(&Message{Facility: FacilityUser, Severity: SeverityInformational, Content: strings.Repeat("é", 200)}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	got := receive(t, conn)
@@ -253,7 +252,7 @@ func TestSendTruncatesOnCharacterBoundary(t *testing.T) {
 
 func TestSendHeaderOverMaxSize(t *testing.T) {
 	s, conn := open(t, WithMaxSize(20))
-	if err := s.Send(&Message{Severity: rfc5424.SeverityInformational, Content: "x"}); !errors.Is(err, ErrTooLarge) {
+	if err := s.Send(&Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("got %v, want ErrTooLarge", err)
 	}
 	receiveNothing(t, conn)
@@ -266,7 +265,7 @@ func TestSendRedialsAfterDaemonRestart(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer s.Close()
-	message := &Message{Severity: rfc5424.SeverityInformational, Content: "x"}
+	message := &Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}
 	if err := s.Send(message); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -296,7 +295,7 @@ func TestSendFailsWhileDaemonDown(t *testing.T) {
 	defer s.Close()
 	conn.Close()
 	os.Remove(path)
-	if err := s.Send(&Message{Severity: rfc5424.SeverityInformational, Content: "x"}); err == nil {
+	if err := s.Send(&Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}); err == nil {
 		t.Fatal("Send succeeded without a socket")
 	}
 }
@@ -306,11 +305,60 @@ func TestSendAfterClose(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := s.Send(&Message{Severity: rfc5424.SeverityInformational, Content: "x"}); !errors.Is(err, ErrClosed) {
+	if err := s.Send(&Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}); !errors.Is(err, ErrClosed) {
 		t.Errorf("got %v, want ErrClosed", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
 	}
 	receiveNothing(t, conn)
+}
+
+func TestPriority(t *testing.T) {
+	tests := []struct {
+		facility Facility
+		severity Severity
+		want     string
+	}{
+		{FacilityUser, SeverityEmergency, "<8>"},
+		{FacilityAuthpriv, SeverityInformational, "<86>"},
+		{FacilityLocal7, SeverityDebug, "<191>"},
+	}
+	for _, test := range tests {
+		if got := priority(test.facility, test.severity); got != test.want {
+			t.Errorf("facility %d, severity %d: got %s, want %s", test.facility, test.severity, got, test.want)
+		}
+	}
+}
+
+func TestValidation(t *testing.T) {
+	for _, f := range []Facility{FacilityUser, FacilityAuthpriv, FacilityLocal7} {
+		if err := f.Validate(); err != nil {
+			t.Errorf("facility %d: %v", f, err)
+		}
+	}
+	for _, f := range []Facility{FacilityKern, FacilityLocal7 + 1} {
+		if err := f.Validate(); err == nil {
+			t.Errorf("facility %d accepted", f)
+		}
+	}
+	if err := SeverityDebug.Validate(); err != nil {
+		t.Errorf("debug severity: %v", err)
+	}
+	if err := (SeverityDebug + 1).Validate(); err == nil {
+		t.Error("severity 8 accepted")
+	}
+	for _, value := range []string{"-", "a b", "\x7f", "é", strings.Repeat("a", 33)} {
+		if err := validateHeaderField("MSGID", value, 32); err == nil {
+			t.Errorf("MSGID %q accepted", value)
+		}
+	}
+	for _, value := range []string{"", "a=b", "a]", `a"`, "a b"} {
+		if err := validateSDName("name", value); err == nil {
+			t.Errorf("SD-NAME %q accepted", value)
+		}
+	}
+	if err := validateHeaderField("MSGID", "", 32); err != nil {
+		t.Errorf("empty MSGID (NILVALUE): %v", err)
+	}
 }

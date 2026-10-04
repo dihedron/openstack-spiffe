@@ -1,11 +1,6 @@
 // Package syslog sends RFC 5424 messages to the local syslog daemon over a
 // Unix datagram socket (e.g. /dev/log), and provides AuditHandler, a
 // slog.Handler forwarding audit records there.
-//
-// The rfc5424 package provides the message types and their validation, but
-// the message is serialized here: its timestamp carries nanoseconds, where
-// RFC 5424 allows at most microseconds, and its structured data parameters
-// are escaped twice.
 package syslog
 
 import (
@@ -22,8 +17,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/juju/rfc/v2/rfc5424"
 )
 
 const (
@@ -153,11 +146,14 @@ func New(options ...Option) (*Syslog, error) {
 		option(syslog)
 	}
 
-	if err := rfc5424.AppName(syslog.application).Validate(); err != nil {
-		return nil, fmt.Errorf("invalid application name %q: %w", syslog.application, err)
+	if err := validateHeaderField("hostname", syslog.hostname, 255); err != nil {
+		return nil, fmt.Errorf("invalid hostname: %w", err)
 	}
-	if err := rfc5424.ProcID(syslog.process).Validate(); err != nil {
-		return nil, fmt.Errorf("invalid process %q: %w", syslog.process, err)
+	if err := validateHeaderField("application name", syslog.application, 48); err != nil {
+		return nil, fmt.Errorf("invalid application name: %w", err)
+	}
+	if err := validateHeaderField("process", syslog.process, 128); err != nil {
+		return nil, fmt.Errorf("invalid process: %w", err)
 	}
 	if syslog.enterprise != "" && !enterpriseNumber.MatchString(syslog.enterprise) {
 		return nil, fmt.Errorf("invalid enterprise %q: not an IANA private enterprise number", syslog.enterprise)
@@ -239,8 +235,8 @@ func (s *Syslog) write(data []byte) error {
 // messages, the message text and optionally a set of
 // parameters.
 type Message struct {
-	Facility rfc5424.Facility
-	Severity rfc5424.Severity
+	Facility Facility
+	Severity Severity
 	ID       string
 	// Time is the time of the event; the zero value means now.
 	Time    time.Time
@@ -305,17 +301,13 @@ func (s *Syslog) head(message *Message) (string, error) {
 	if when.IsZero() {
 		when = time.Now()
 	}
-	header := rfc5424.Header{
-		Priority: rfc5424.Priority{
-			Severity: message.Severity,
-			Facility: message.Facility,
-		},
-		Hostname: rfc5424.Hostname{FQDN: s.hostname},
-		AppName:  rfc5424.AppName(s.application),
-		ProcID:   rfc5424.ProcID(s.process),
-		MsgID:    rfc5424.MsgID(message.ID),
+	if err := message.Facility.Validate(); err != nil {
+		return "", fmt.Errorf("invalid syslog message: %w", err)
 	}
-	if err := header.Validate(); err != nil {
+	if err := message.Severity.Validate(); err != nil {
+		return "", fmt.Errorf("invalid syslog message: %w", err)
+	}
+	if err := validateHeaderField("MSGID", message.ID, 32); err != nil {
 		return "", fmt.Errorf("invalid syslog message: %w", err)
 	}
 	data, err := s.structuredData(message.Data)
@@ -325,8 +317,9 @@ func (s *Syslog) head(message *Message) (string, error) {
 	// RFC 5424 TIME-SECFRAC has at most 6 digits
 	timestamp := when.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
 	return fmt.Sprintf("%s%d %s %s %s %s %s %s",
-		header.Priority, rfc5424.ProtocolVersion, timestamp, header.Hostname, header.AppName,
-		header.ProcID, header.MsgID, data), nil
+		priority(message.Facility, message.Severity), Version, timestamp,
+		nilValue(s.hostname), nilValue(s.application), nilValue(s.process),
+		nilValue(message.ID), data), nil
 }
 
 // structuredData validates and renders the structured data elements, in
@@ -340,22 +333,22 @@ func (s *Syslog) structuredData(elements map[string][]string) (string, error) {
 	}
 	var b strings.Builder
 	for _, id := range slices.Sorted(maps.Keys(elements)) {
-		name := rfc5424.StructuredDataName(id + "@" + s.enterprise)
+		name := id + "@" + s.enterprise
 		if strings.Contains(id, "@") {
 			return "", fmt.Errorf("structured data ID %q: contains '@'", id)
 		}
-		if err := name.Validate(); err != nil {
-			return "", fmt.Errorf("structured data ID %q: %w", name, err)
+		if err := validateSDName("structured data ID", name); err != nil {
+			return "", err
 		}
 		b.WriteString("[")
-		b.WriteString(string(name))
+		b.WriteString(name)
 		for _, parameter := range elements[id] {
 			key, value, ok := strings.Cut(parameter, "=")
 			if !ok {
 				return "", fmt.Errorf("structured data %q: parameter %q is not of the form name=value", id, parameter)
 			}
-			if err := rfc5424.StructuredDataName(key).Validate(); err != nil {
-				return "", fmt.Errorf("structured data %q: parameter name %q: %w", id, key, err)
+			if err := validateSDName("structured data parameter name", key); err != nil {
+				return "", fmt.Errorf("structured data %q: %w", id, err)
 			}
 			if !utf8.ValidString(value) {
 				return "", fmt.Errorf("structured data %q: parameter %q: value is not valid UTF-8", id, key)
