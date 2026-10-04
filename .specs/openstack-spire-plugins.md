@@ -158,6 +158,7 @@ Claude should keep JWT verification in its own pure, testable function (token, k
 - `allowed_tag_keys` (array of strings, optional, T-3): when set, only tags with a listed key become `tag` selectors. Other tags are ignored (not an error, logged at `debug`). The SPIRE Server operator, who writes the registration entries, may not be the issuer's operator, who sets `tags.allowlist`, so this list lets them fix which tenant-asserted keys their entries can rely on. Each entry must be a valid tag key.
 - `reattest` (bool, default `true`): the `CanReattest` value; see re-attestation mode
 - `reattest_alert_window` (duration, default `5m`, `0` disables, at most `1h`): see re-attestation detection
+- `audit_syslog` (block, optional): `enabled` (bool, default `false`), `socket` (default `/dev/log`), `facility` (default `authpriv`) and `app_name` (default `openstack-server-plugin`). See audit records to syslog
 
 Unknown keys are errors. The CA bundle, if set, must exist and parse at `Configure` time.
 
@@ -165,13 +166,21 @@ Unknown keys are errors. The CA bundle, if set, must exist and parse at `Configu
 - `jwks_ca_cert_path` unset: every public CA is trusted for the JWK Set (S-5).
 - `allowed_project_ids` unset: any project's instances attest, including those meant for another SPIRE deployment trusting the same issuer (S-8).
 - `allowed_tag_keys` unset: every tag becomes a selector (T-3).
+- `audit_syslog` disabled: audit records reach only SPIRE Server's log (R-2).
 
 **Logging**: through the logger the plugin SDK provides. Rejections are logged with the reason, the `kid` (or `kid=invalid`, see the key ID rule), and the `project_id` and `instance_id` when they could be read; tokens and key material are never logged. Every successful attestation is logged at `info` as `agent attested` with `audit=agent_attested` (R-2). The record carries:
 - `project_id`, `instance_id` and the SPIFFE ID
 - `jti`, `kid`, `iat` and `exp`
 - the number of selectors
 
-The `jti` matches the issuer's `token issued` record, which ties every agent identity to the Nova call and the key that produced its token.
+The `jti` matches the issuer's `token issued` record, which ties every agent identity to the Nova call and the key that produced its token. The re-attestation detection warning is also an audit record, `audit=reattest_alert`.
+
+**Audit records to syslog** (R-2, S-4): when `audit_syslog.enabled` is set, the plugin also sends its audit records (`agent_attested` and `reattest_alert`) to the local syslog daemon. It uses the issuer's syslog audit sink (`pkg/syslog`, same format and delivery rules, see the issuer spec): RFC 5424 with the audit kind as `MSGID`, the record as a JSON `MSG`, and no structured data. `reattest_alert` uses severity `warning`, the others `info`.
+- Only audit records go there. Everything else, audit records included, still goes to SPIRE Server's log through the plugin SDK.
+- Delivery never blocks or fails an attestation: it goes through a bounded queue, and drops are counted and logged.
+- `Configure` fails when the socket cannot be opened. A new `Configure` call replaces the sink only if its settings changed, draining the old one first.
+
+The issuer's and the plugin's records then reach the same central store, where they can be joined on `jti`.
 
 ## SPIFFE ID and selector naming
 
@@ -231,6 +240,12 @@ NodeAttestor "openstack_iid" {
     allowed_tag_keys          = ["role", "env"]
     reattest                  = true
     reattest_alert_window     = "5m"
+    audit_syslog {
+      enabled  = true
+      socket   = "/dev/log"
+      facility = "authpriv"
+      app_name = "openstack-server-plugin"
+    }
   }
 }
 ```
@@ -287,7 +302,12 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 - `reattest` maps to `CanReattest`.
 - Re-attestation detection (S-4): two attestations of one instance within the window log the warning with both `jti`s and are both accepted. Outside the window, or with `0`, nothing is logged. The tracker is bounded.
 - Success record (R-2): it carries the token's `jti`, `kid`, `iat` and `exp`, and never the token.
-- Configuration warnings (S-5, S-8, T-3) for unset `jwks_ca_cert_path`, `allowed_project_ids` and `allowed_tag_keys`.
+- Configuration warnings (S-5, S-8, T-3, R-2) for unset `jwks_ca_cert_path`, `allowed_project_ids` and `allowed_tag_keys`, and for `audit_syslog` disabled.
+- Syslog audit (R-2), against a temporary Unix datagram socket:
+  - a successful attestation yields one `agent_attested` datagram whose `jti` equals the token's;
+  - a quick second attestation yields a `reattest_alert` datagram with severity `warning`;
+  - rejections and other records never reach the socket;
+  - an unopenable socket fails `Configure`.
 
 **Integration tests**, using the plugin SDK's test harness (`plugintest`):
 
@@ -319,6 +339,7 @@ Planned and not implemented yet. Tests come first, as for every change.
 | `internal/plugin/server/openstackiid/plugin.go` | Config keys `allowed_tag_keys`, `reattest` and `reattest_alert_window`; `Configure` warnings; `CanReattest` from configuration; success record with `jti`, `kid`, `iat`, `exp`; `kid=invalid` in rejection logs | S-4, S-5, S-8, T-3, R-2 |
 | `internal/plugin/server/openstackiid/selectors.go` | Filter tag selectors by `allowed_tag_keys` | T-3 |
 | `internal/plugin/server/openstackiid` (new `reattest.go`) | Bounded, process-scoped re-attestation tracker kept across `Configure` calls, like the replay cache | S-4, E-1 |
+| `internal/plugin/server/openstackiid/plugin.go`, `internal/plugin/logging` | `audit_syslog` block; the `pkg/syslog` `AuditHandler` combined with the hclog bridge, so audit records go to both SPIRE's log and syslog | R-2, S-4 |
 | `examples/` | `agent-metadata-nftables.conf`; `server.conf` sample with the new keys | S-4, T-3 |
 | `.goreleaser.yaml` | Install the nftables sample as documentation in the agent packages; signing (see the issuer spec) | S-4, T-7 |
 | README | Guest hardening, the registration entry rule for tenant-asserted selectors, `reattest` trade-off, `agent_ttl`, release verification | S-4, T-3, E-4, T-7 |

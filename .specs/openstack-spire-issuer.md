@@ -290,7 +290,7 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **TLS**: each service's `tls_min_version` (`"1.2"` or `"1.3"`, default `"1.3"`) is the minimum TLS version of both its HTTPS server and the connections it makes: the signer's to Keystone, Nova and its peers, the aggregator's to the replicas. `"1.3"` is recommended; `"1.2"` exists for peers that cannot negotiate TLS 1.3 (e.g. an older load balancer in front of the OpenStack APIs) and makes `config check` warn. Any other value is an error.
 
-**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_ISSUER_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials, `user-data` and `metadata` values are never logged.
+**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_ISSUER_LOG_STREAM` selects `stderr`, `stdout` or `file`. Audit records can additionally go to syslog (see the syslog audit sink below). Tokens, keys, credentials, `user-data` and `metadata` values are never logged.
 
 **Issuance audit** (R-1): every issued token produces exactly one `info` record, `token issued`, with `audit=token_issued`, written after the response has been encoded and before it is sent. Its fields are:
 - `request_id`
@@ -299,7 +299,39 @@ The client address keys the per-source rate limit and identifies the caller in l
 - the client certificate's subject and serial, when one was presented
 - `project_id`, `instance_id`, `jti`, `kid`, `iat` and `exp`
 
-The token itself is never part of it. Together with the SPIRE Server-side plugin's `agent attested` record, which carries the same `jti`, it traces every attestation back to the Nova call, the replica and the key that produced it. It also makes tokens minted with stolen credentials (S-3) visible as issuances without a matching metadata request. Operators should ship these records to a central, append-only log store.
+The token itself is never part of it. Together with the SPIRE Server-side plugin's `agent attested` record, which carries the same `jti`, it traces every attestation back to the Nova call, the replica and the key that produced it. It also makes tokens minted with stolen credentials (S-3) visible as issuances without a matching metadata request. Operators should ship these records to a central, append-only log store, which the syslog audit sink below makes straightforward.
+
+**Syslog audit sink** (R-1, R-3): besides the regular log, audit records can be sent to the local syslog daemon, from which rsyslog or syslog-ng forward them to a central store. Only audit records go there: the records carrying an `audit` attribute (`token_issued`, `key_lifecycle`). The regular log stays on the stream selected by `OPENSTACK_SPIRE_ISSUER_LOG_STREAM`, and audit records keep appearing in it too.
+
+- **Configuration**: `audit.syslog.enabled` (default `false`), `audit.syslog.socket` (default `/dev/log`, a Unix datagram socket), `audit.syslog.facility` (default `authpriv`, or one of `auth`, `daemon`, `local0` to `local7`), and `audit.syslog.app_name` (default `openstack-spire-issuer`). It is enabled in the configuration file rather than the environment, because it is part of the security configuration and `config check` must see it. `config check` warns when it is disabled. `service start` refuses to start when it is enabled and the socket cannot be opened.
+- **Format**: RFC 5424. The project has no IANA private enterprise number, so it uses no custom structured data: RFC 5424 requires an `@<number>` suffix on non-IANA structured-data IDs. Instead:
+  - `MSGID` is the audit kind (`token_issued`, `key_lifecycle`).
+  - `MSG` is a single-line JSON object holding the record's message and all its attributes, with the same keys as in the regular log (`request_id`, `jti`, `kid`, ...).
+  - `HOSTNAME` is the host name, `APP-NAME` is `app_name`, and `PROCID` is the PID.
+  - The structured data is `-`.
+- **Severity**: `info` for `token_issued` and for `key_lifecycle` events, except `notice` for `dropped`. Never `emerg` or `alert`, which journald forwards to every terminal.
+- **Delivery never blocks issuance**:
+  - A bounded queue (1024 records) feeds the socket from a dedicated goroutine.
+  - When the queue is full, records are dropped and counted. The count is logged on the regular log when dropping starts and when it stops, never once per record.
+  - A send that fails redials the socket once, so a restart of journald or rsyslog loses at most the record in flight.
+  - Each send is bounded by a 1s timeout.
+  - On `SIGTERM` the queue is drained within the graceful shutdown.
+
+  Audit records are best effort, never a reason to refuse a token: the copy in the regular log remains.
+- **Size**: a record never exceeds 8 KiB once serialized (Unix datagram sockets reject larger ones). The audit records defined here are well below that. A larger one is truncated on a UTF-8 character boundary and marked `"truncated": true`.
+- **Content**: the same rule as the regular log. Tokens, keys, credentials, `user-data` and `metadata` values are never part of an audit record.
+- **Under systemd**: the units already allow `AF_UNIX`. `PrivateDevices=yes` keeps the `/dev/log` symlink to journald's socket. Since that is systemd behaviour rather than this service's, the DevStack test bed (`test/install_devstack_lxd.sh`) confirms delivery under the packaged unit.
+
+The sink is implemented by `pkg/syslog`, shared with the SPIRE Server-side plugin (companion spec). Before it is used, that package needs these fixes:
+- A structured-data parameter without `=` is an error, not a panic.
+- Every message is validated (`rfc5424.Message.Validate`) before it is sent.
+- Structured data is serialized in sorted order. It is not used by the audit sink, but stays available for callers that have an enterprise number.
+- The connection is redialed once after a failed send, and the client gets a `Close` method.
+- The socket path, size cap and send timeout are options.
+- The default app name is the binary's base name, not `os.Args[0]`.
+- The package returns errors without logging them.
+- An `AuditHandler` (a `slog.Handler`) forwards only records carrying an `audit` attribute, through the queue above. It is combined with the regular handler, so a single `slog` call writes to both.
+- Its tests run against a temporary Unix datagram socket, never the host's `/dev/log`, and never send `emerg`.
 
 **Request IDs**: every response carries an `X-Request-Id` header with a random ID generated by the service (incoming values are ignored), and every log record written while handling the request carries it as `request_id`.
 
@@ -360,6 +392,12 @@ nova_lookup:
   cache_ttl: "60s"                                      # at most the token TTL
   allowed_statuses: ["ACTIVE", "BUILD", "REBOOT", "HARD_REBOOT", "REBUILD", "RESIZE", "VERIFY_RESIZE", "MIGRATING", "PASSWORD"]
 enrich: ["availability_zone", "flavor", "user_id", "project_name", "domain_id"]  # default: none
+audit:
+  syslog:                                               # audit records only (R-1, R-3)
+    enabled: true                                       # default: false (warning)
+    socket: "/dev/log"
+    facility: "authpriv"                                # auth, authpriv, daemon, local0..local7
+    app_name: "openstack-spire-issuer"
 peers:                                                  # default: none (no peer aggregation)
   urls:                                                 # https only, the peers' /jwks/local.json
     - "https://signer-b.internal:8443/jwks/local.json"
@@ -416,7 +454,7 @@ openstack-spire-issuer config check [--signer PATH]... [--aggregator PATH] [--fo
   - an `allowed_users` entry given as `name@domain` rather than a user ID (E-6);
   - an `allowed_users` entry whose name is `nova` (S-3);
   - `peers.urls` set without `peers.ca_cert_path`, or an aggregator without `replica_ca_cert_path`, which trusts every public CA for the JWKS fetches (S-5).
-- **Errors added by this revision**: `attest.allowed_sources` entries that are neither IP addresses nor CIDR ranges; an unparseable `attest.client_ca_path` (file check); `keystone.max_concurrent_validations` below 1; a malformed `rate_limit_per_source_public`.
+- **Errors added by this revision**: `attest.allowed_sources` entries that are neither IP addresses nor CIDR ranges; an unparseable `attest.client_ca_path` (file check); `keystone.max_concurrent_validations` below 1; a malformed `rate_limit_per_source_public`; an unknown `audit.syslog.facility`; an `audit.syslog.app_name` that is not 1 to 48 printable ASCII characters (RFC 5424 `APP-NAME`). `audit.syslog.enabled: false` is a warning (R-1).
 - **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
 - The services run the same checks at startup, file checks included, as a pre-flight check: they refuse to start on any error (e.g. a missing, mismatched or expired TLS certificate, or an unparseable CA bundle) and log the warnings.
 
@@ -462,6 +500,13 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 - Audit (R-1, R-3): a successful request produces exactly one `token issued` record whose `jti` and `kid` equal the token's, and no token in it. Every rotation produces `generated`, `published`, `active` and `retired` records with the key's thumbprint.
 - Keystone cap (D-2): with `max_concurrent_validations` validations in flight, the next distinct token gets `503` at once, while a cached or merged token is still served.
 - Configuration check: the new warnings and errors of this revision.
+- Syslog audit sink, against a temporary Unix datagram socket:
+  - an issued token yields exactly one RFC 5424 datagram with `MSGID` `token_issued`, the configured facility, severity `info` and a JSON `MSG` whose `jti` equals the token's;
+  - non-audit records never reach the socket;
+  - a full queue drops and counts records without blocking the request;
+  - a closed and recreated socket is redialed;
+  - an oversized record is truncated on a character boundary.
+- `pkg/syslog`: a parameter without `=` returns an error; an invalid message is refused before sending; structured data is serialized in sorted order.
 
 **Security integration tests** (this revision):
 
@@ -519,6 +564,8 @@ Planned and not implemented yet. Tests come first, as for every change.
 | `cmd/openstack-spire-issuer` | `PR_SET_DUMPABLE` at `service start` (via `golang.org/x/sys/unix`, Linux only); profiles created `0600` in all three `cmd/*/init.go`, plus a key-material warning | I-4, I-5 |
 | `packaging/systemd` | `LimitCORE=0` in both units | I-4 |
 | `.goreleaser.yaml`, README | Signed checksums, SBOMs and packages; verification instructions | T-7 |
+| `pkg/syslog` | Fixes listed under the syslog audit sink; `AuditHandler` with its bounded queue; tests on a temporary socket | R-1, R-3 |
+| `internal/metadata/config`, `cmd/openstack-spire-issuer` | `audit.syslog` block and its checks; at `service start`, a handler that writes to the regular stream and forwards audit records to syslog | R-1, R-3 |
 | `examples/` | Samples updated with the new keys, a dedicated vendordata user, and Nova `[vendordata_dynamic_auth]` `certfile`/`keyfile` once confirmed on DevStack | S-3 |
 
 ## Resolved questions and out of scope

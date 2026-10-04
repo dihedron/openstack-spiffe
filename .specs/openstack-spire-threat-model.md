@@ -138,8 +138,8 @@ The design relies on the following properties of components outside its scope. I
 
 | ID | Threat | Boundary / element | Existing controls | Status | Addressed by | Residual |
 | --- | --- | --- | --- | --- | --- | --- |
-| R-1 | Nothing is recorded when a token is issued. A token minted with stolen Nova credentials (S-3), or one later abused (S-4), cannot be traced to its caller, client address or replica | Issuer | Rejections are logged. Successes are not | **U** | Issuer: one `token issued` audit record per token (request ID, caller user ID, client address, project and instance IDs, `jti`, `kid`, `iat`, `exp`) | — |
-| R-2 | The server plugin's success record omits `jti`, `kid` and `iat`, so an attestation cannot be matched with the issuance that produced its token | Server plugin | `agent attested` with project, instance and SPIFFE ID | **U** | Plugins: success record carries `jti`, `kid`, `iat`, `exp` | — |
+| R-1 | Nothing is recorded when a token is issued. A token minted with stolen Nova credentials (S-3), or one later abused (S-4), cannot be traced to its caller, client address or replica | Issuer | Rejections are logged. Successes are not | **U** | Issuer: one `token issued` audit record per token (request ID, caller user ID, client address, project and instance IDs, `jti`, `kid`, `iat`, `exp`), optionally forwarded off the host by the syslog audit sink | — |
+| R-2 | The server plugin's success record omits `jti`, `kid` and `iat`, so an attestation cannot be matched with the issuance that produced its token | Server plugin | `agent attested` with project, instance and SPIFFE ID | **U** | Plugins: success record carries `jti`, `kid`, `iat`, `exp`; optional syslog audit sink (`audit_syslog`) | — |
 | R-3 | Ephemeral keys leave no trace. After a restart, nobody can prove which public key a past token was signed with, or that a kid ever belonged to a replica | Issuer key store | kid naming (date, replica ID) | **U** | Issuer: key lifecycle records (generated, published, active, retired) with the kid, algorithm and RFC 7638 thumbprint | — |
 
 ### Information disclosure
