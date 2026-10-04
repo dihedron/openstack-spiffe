@@ -35,7 +35,7 @@ All VMs run on the lab host's libvirt (`qemu:///system`) and share a dedicated N
 | `issuer-b` | AlmaLinux 10 | Signer replica, installed from the rpm package | 2 / 2 GiB / 20 GiB |
 | `spire` | Ubuntu 24.04 LTS | SPIRE Server with `openstack-server-plugin` (deb package) | 2 / 2 GiB / 20 GiB |
 
-Inside DevStack, Nova boots the instances under test from two Glance images: the Ubuntu 24.04 and AlmaLinux 10 cloud images. Each runs SPIRE Agent with `openstack-agent-plugin`, installed from the deb or rpm package respectively. Each distro family is thus exercised once as an issuer host and once as a guest. The RHEL-like distro is AlmaLinux by default and Rocky Linux when `LAB_RHEL_DISTRO=rocky`, both at their latest major release (10). RHEL 10 derivatives require an x86-64-v3 CPU, so every VM runs with the host's CPU model (`host-passthrough`).
+Inside DevStack, Nova boots the instances under test from two Glance images: the Ubuntu 24.04 and AlmaLinux 10 cloud images. Each runs SPIRE Agent with `openstack-agent-plugin`, installed from the deb or rpm package respectively. Each distro family is thus exercised once as an issuer host and once as a guest. The RHEL-like distro is AlmaLinux by default and Rocky Linux when `LAB_RHEL_DISTRO=rocky`, both at their latest major release (10). RHEL 10 derivatives require an x86-64-v3 CPU, so every VM runs with the host's CPU model (`host-passthrough`), and so do the Nova instances (`[libvirt] cpu_mode = host-passthrough` in DevStack's Nova configuration). The issuer and the plugins themselves run on any x86-64 CPU: the lab installs their baseline (`GOAMD64=v1`) packages.
 
 **Addressing** (defaults, all settings): `spiffe-lab` is `10.250.0.0/24`, with the lab host at `.1`, `devstack` at `.10`, `issuer-a` at `.21`, `issuer-b` at `.22` and `spire` at `.30`. Names resolve through `/etc/hosts` entries the bring-up writes on every VM (`issuer-a.lab`, ...). The instances reach `spire.lab` through DevStack's public network, which DevStack NATs through the `devstack` VM; if that proves unreliable during step 1, a provider network bridged onto `spiffe-lab` replaces it.
 
@@ -78,9 +78,9 @@ Every resolved value, the DevStack commit, SPIRE version and checksum, and image
 - systemd is running (libvirt's services are managed through it).
 
 **Virtualization**:
-- The CPU has hardware virtualization (`vmx` or `svm`), `/dev/kvm` exists and the user can open it.
+- The CPU has hardware virtualization (`vmx` or `svm`) and `/dev/kvm` exists. The user does not need to open it: with `qemu:///system`, libvirt does.
 - Nested virtualization is enabled (`kvm_intel` or `kvm_amd` `nested` parameter), since Nova runs its instances in KVM inside `devstack`. When it is off, preflight fails and prints how to enable it persistently. It does not reload kernel modules itself: that would disrupt VMs already running on the host.
-- The CPU supports x86-64-v3, required by RHEL 10 derivatives (checked through the CPU flags `avx2`, `bmi2`, `fma`, `movbe` and related). Without it, preflight fails for `LAB_RHEL_RELEASE=10` and suggests release 9.
+- The CPU supports x86-64-v3, required by RHEL 10 derivatives (checked through the CPU flags `avx2`, `bmi2`, `fma`, `movbe` and related). Without it, preflight fails for `LAB_RHEL_RELEASE=10` and suggests release 9. The lab's own packages need no such check: it installs the baseline amd64 packages, which run on any x86-64 CPU.
 
 **Resources**, computed from the configured sizes, not fixed numbers:
 - CPUs: the sum of the VMs' vCPUs against the host's logical CPUs. `warn` above 1.5 times overcommit, `fail` above 3.
@@ -92,7 +92,7 @@ Every resolved value, the DevStack commit, SPIRE version and checksum, and image
 - libvirt (daemon running and enabled), `virsh`, `virt-install`, `qemu-img`, QEMU with KVM support.
 - `cloud-localds` or, failing it, `xorriso`/`genisoimage` (cloud-init seed images).
 - `ssh`, `ssh-keygen`, `openssl`, `curl`, `jq`, `git`, `make`, `python3` (for the artifact server).
-- Go, at the version `go.mod` requires; goreleaser, at the version the build uses.
+- Go, at the version `go.mod` requires, and goreleaser v2: `deploy` builds the packages on the lab host.
 
 **Permissions**:
 - The user can manage `qemu:///system` (member of the `libvirt` group, or polkit rules allowing it). If not, preflight offers to add the user to the group, and says that a new login is needed before `up`.
@@ -111,7 +111,7 @@ Everything lives in `test/lab/`. `lab.sh` is the entry point. Each command is id
 - `preflight [--no-install]`: see above.
 - `up`: runs `preflight`, creates the storage pool, network and VMs from cloud images with cloud-init, runs DevStack's `stack.sh`, configures Nova, Keystone (the dedicated vendordata user) and the images, generates the lab PKI, then runs `deploy`. Most of the time goes into `stack.sh`.
 - `snapshot` / `reset`: saves the VMs right after a successful `up`, or reverts to that state, in a few minutes. This is the normal way to start a test session.
-- `deploy`: builds the packages with `make snapshot`, serves `dist/` from the lab host on the lab network, installs or upgrades them on `issuer-a`, `issuer-b` and `spire`, writes their configuration and restarts the services. This is the inner loop after a code change.
+- `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser), serves `dist/` from the lab host on the lab network, installs or upgrades them on `issuer-a`, `issuer-b` and `spire`, writes their configuration and restarts the services. Nothing is compiled in the VMs: they only install packages, as a production host would. This is the inner loop after a code change.
 - `test [-run REGEX]`: runs the acceptance tests.
 - `status`, `ssh <vm>`, `logs <vm> [unit]`: inspection.
 - `down`: destroys the VMs, the network, the storage pool and the state directory. The download cache stays.
