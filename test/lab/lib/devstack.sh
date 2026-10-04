@@ -103,9 +103,10 @@ devstack_wait() {
 }
 
 # devstack_smoke: boots a CirrOS instance that pings the spire VM by address
-# and by name, and reports what its console shows.
+# and by name and reads its vendordata, and reports what its console shows
+# and what Nova logged about the openstack_iid target.
 devstack_smoke() {
-	info "smoke test: an instance reaching spire.lab"
+	info "smoke test: an instance reaching spire.lab and reading its vendordata"
 	local result
 	result="$(vm_ssh devstack "sudo -u stack bash -s -- $(printf '%q ' "$(vm_ip spire)" "$(lab_ip 1)" "$DEVSTACK_DIR")" <<'SCRIPT'
 set -uo pipefail
@@ -122,19 +123,25 @@ cat >/tmp/lab-smoke.sh <<DATA
 #!/bin/sh
 ping -c 3 -W 2 $spire_ip >/dev/null 2>&1 && echo LAB-SMOKE-ADDRESS-OK || echo LAB-SMOKE-ADDRESS-FAIL
 ping -c 3 -W 2 spire.lab >/dev/null 2>&1 && echo LAB-SMOKE-NAME-OK || echo LAB-SMOKE-NAME-FAIL
+curl -s -m 30 http://169.254.169.254/openstack/latest/vendor_data2.json >/dev/null; echo LAB-SMOKE-VENDORDATA-READ
 DATA
 openstack server delete --wait lab-smoke >/dev/null 2>&1 || true
+since="$(date '+%Y-%m-%d %H:%M:%S')"
 openstack server create --image "$image" --flavor m1.tiny --network private \
 	--user-data /tmp/lab-smoke.sh --wait lab-smoke >/dev/null || { echo LAB-SMOKE-BOOT-FAIL; exit 0; }
 for _ in $(seq 60); do
 	log="$(openstack console log show lab-smoke 2>/dev/null)"
-	if grep -q 'LAB-SMOKE-NAME-' <<<"$log"; then
+	if grep -q 'LAB-SMOKE-VENDORDATA-READ' <<<"$log"; then
 		grep -o 'LAB-SMOKE-[A-Z]*-[A-Z]*' <<<"$log"
 		break
 	fi
 	sleep 5
 done
 openstack server delete --wait lab-smoke >/dev/null 2>&1 || true
+# what Nova made of the openstack_iid target
+call="$(sudo journalctl -u devstack@n-api-meta --since "$since" -o cat 2>/dev/null |
+	sed 's/\x1b\[[0-9;]*m//g' | grep -o 'dynamic vendordata service openstack_iid at .*' | tail -n1)"
+echo "LAB-SMOKE-VENDORDATA-LOG ${call:-none}"
 SCRIPT
 )"
 	case "$result" in
@@ -144,4 +151,143 @@ SCRIPT
 	*LAB-SMOKE-ADDRESS-FAIL*) die "an instance cannot reach spire at $(vm_ip spire)" ;;
 	*) die "the smoke test instance reported nothing within 5 minutes" ;;
 	esac
+	smoke_vendordata "$(grep -o 'LAB-SMOKE-VENDORDATA-LOG .*' <<<"$result")"
+}
+
+# smoke_vendordata LOGLINE: interprets what Nova logged about its call to the
+# openstack_iid target. Nova gets a Keystone token as the vendordata user
+# before calling the target, so a failure to connect to the issuer means the
+# credentials worked; an authentication failure means they did not.
+smoke_vendordata() {
+	local line="${1#LAB-SMOKE-VENDORDATA-LOG }"
+	case "$line" in
+	"" | none)
+		if issuer_listening; then
+			info "Nova reached the openstack_iid target (no error logged)"
+		else
+			die "Nova logged nothing about the openstack_iid target (lab.sh logs devstack devstack@n-api-meta)"
+		fi
+		;;
+	*"Unable to establish connection to https://issuer-a.lab:8443/attest"*)
+		info "Nova calls https://issuer-a.lab:8443/attest as $VENDORDATA_USER (no issuer is running yet)"
+		;;
+	*401* | *Unauthorized* | *authenticat*)
+		die "Nova cannot authenticate as $VENDORDATA_USER: $line"
+		;;
+	*) die "unexpected error from Nova's openstack_iid call: $line" ;;
+	esac
+}
+
+# issuer_listening: whether an issuer answers on issuer-a.lab:8443.
+issuer_listening() {
+	vm_ssh devstack "timeout 3 bash -c '</dev/tcp/issuer-a.lab/8443'" 2>/dev/null
+}
+
+# --- OpenStack configuration (chunk 3.5, step 3) --------------------------------
+
+readonly VENDORDATA_USER=nova-vendordata
+readonly GUEST_FLAVOR=lab.guest
+
+# devstack_openstack ARGS...: runs the openstack CLI on devstack as admin of
+# the admin project (or as PROJECT with OS_LAB_PROJECT=PROJECT).
+devstack_openstack() {
+	local project="${OS_LAB_PROJECT:-admin}"
+	vm_ssh devstack "cd /opt/stack && sudo -u stack bash -c $(printf '%q' "set +u; source $DEVSTACK_DIR/openrc admin $project >/dev/null 2>&1; set -u; openstack $(printf '%q ' "$@")")"
+}
+
+vendordata_password() {
+	local file="$LAB_STATE_DIR/$VENDORDATA_USER-password"
+	[[ -f "$file" ]] || openssl rand -hex 16 >"$file"
+	cat "$file"
+}
+
+# devstack_vendordata_user: the dedicated Keystone user Nova authenticates to
+# the issuers with (S-3), with the service role on the service project.
+devstack_vendordata_user() {
+	local id
+	id="$(devstack_openstack user show --domain Default -f value -c id "$VENDORDATA_USER" 2>/dev/null || true)"
+	if [[ -z "$id" ]]; then
+		info "creating the Keystone user $VENDORDATA_USER"
+		id="$(devstack_openstack user create --domain Default --password "$(vendordata_password)" \
+			--description "openstack-spiffe lab: Nova's vendordata calls to the issuers" -f value -c id "$VENDORDATA_USER")"
+	fi
+	devstack_openstack role add --user "$id" --project service --project-domain Default service
+	env_set .openstack.vendordata_user_id "$id"
+}
+
+# devstack_vendordata_config: registers the issuer as Nova's openstack_iid
+# DynamicJSON target, called as the dedicated user and verified against the
+# lab CA.
+devstack_vendordata_config() {
+	info "configuring Nova's DynamicJSON vendordata (openstack_iid at issuer-a.lab)"
+	vm_ssh devstack "sudo tee /etc/nova/lab-ca.pem >/dev/null" <"$(pki_dir)/ca.pem"
+	vm_ssh devstack "sudo bash -s -- $(printf '%q ' "$DEVSTACK_DIR" "$VENDORDATA_USER" "$(vendordata_password)" "$(vm_ip devstack)")" <<'SCRIPT'
+set -euo pipefail
+dir="$1" user="$2" password="$3" keystone="$4"
+# shellcheck disable=SC1091
+source "$dir/inc/ini-config"
+conf=/etc/nova/nova.conf
+iniset -sudo $conf api vendordata_providers StaticJSON,DynamicJSON
+iniset -sudo $conf api vendordata_dynamic_targets openstack_iid@https://issuer-a.lab:8443/attest
+iniset -sudo $conf api vendordata_dynamic_ssl_certfile /etc/nova/lab-ca.pem
+iniset -sudo $conf api vendordata_dynamic_connect_timeout 5
+iniset -sudo $conf api vendordata_dynamic_read_timeout 5
+iniset -sudo $conf api vendordata_dynamic_failure_fatal False
+iniset -sudo $conf vendordata_dynamic_auth auth_type password
+iniset -sudo $conf vendordata_dynamic_auth auth_url "http://$keystone/identity/v3"
+iniset -sudo $conf vendordata_dynamic_auth username "$user"
+iniset -sudo $conf vendordata_dynamic_auth password "$password"
+iniset -sudo $conf vendordata_dynamic_auth user_domain_name Default
+iniset -sudo $conf vendordata_dynamic_auth project_name service
+iniset -sudo $conf vendordata_dynamic_auth project_domain_name Default
+systemctl restart devstack@n-api-meta.service
+SCRIPT
+}
+
+# devstack_images: the guest images in Glance, from the download cache.
+devstack_images() {
+	local os name url sha path
+	for os in ubuntu rhel; do
+		name="lab-$(env_get ".images.$os | \"\(.distro)-\(.release)\"")"
+		if devstack_openstack image show -f value -c id "$name" >/dev/null 2>&1; then
+			env_set ".openstack.images.$os" "$name"
+			continue
+		fi
+		url="$(env_get ".images.$os.url")"
+		sha="$(env_get ".images.$os.sha256")"
+		path="$(fetch "$url" "$sha")"
+		info "uploading the $name image to Glance"
+		scp -q "${SSH_OPTS[@]}" "$path" "$LAB_USER@$(vm_ip devstack):/tmp/$name.qcow2"
+		devstack_openstack image create --public --disk-format qcow2 --container-format bare \
+			--property "lab_sha256=$sha" --file "/tmp/$name.qcow2" "$name" >/dev/null
+		vm_ssh devstack "rm -f /tmp/$name.qcow2"
+		env_set ".openstack.images.$os" "$name"
+	done
+}
+
+# devstack_guest_access: the flavor of the guests, and the lab's SSH key and
+# SSH and ICMP access in the demo project, where the tests boot them.
+devstack_guest_access() {
+	devstack_openstack flavor show "$GUEST_FLAVOR" >/dev/null 2>&1 ||
+		devstack_openstack flavor create --public --vcpus 2 --ram 2048 --disk 20 "$GUEST_FLAVOR" >/dev/null
+	env_set .openstack.flavor "$GUEST_FLAVOR"
+	OS_LAB_PROJECT=demo devstack_openstack keypair show lab >/dev/null 2>&1 || {
+		scp -q "${SSH_OPTS[@]}" "$(ssh_key).pub" "$LAB_USER@$(vm_ip devstack):/tmp/lab.pub"
+		OS_LAB_PROJECT=demo devstack_openstack keypair create --public-key /tmp/lab.pub lab >/dev/null
+	}
+	env_set .openstack.keypair lab
+	env_set .openstack.project demo
+	local rule
+	for rule in "--protocol icmp" "--protocol tcp --dst-port 22"; do
+		# shellcheck disable=SC2086 # rule is a word list
+		OS_LAB_PROJECT=demo devstack_openstack security group rule create --ingress $rule default >/dev/null 2>&1 || true
+	done
+}
+
+# devstack_configure: everything step 3 adds to DevStack.
+devstack_configure() {
+	devstack_vendordata_user
+	devstack_vendordata_config
+	devstack_images
+	devstack_guest_access
 }

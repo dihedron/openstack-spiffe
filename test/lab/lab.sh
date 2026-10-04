@@ -16,6 +16,10 @@ source "$LAB_DIR/lib/versions.sh"
 source "$LAB_DIR/lib/vm.sh"
 # shellcheck source=lib/devstack.sh
 source "$LAB_DIR/lib/devstack.sh"
+# shellcheck source=lib/pki.sh
+source "$LAB_DIR/lib/pki.sh"
+# shellcheck source=lib/snapshot.sh
+source "$LAB_DIR/lib/snapshot.sh"
 
 usage() {
 	cat <<USAGE
@@ -31,6 +35,9 @@ commands:
   ssh <vm> [command]        open a shell, or run a command, on a VM
   logs <vm> [unit]          show a VM's cloud-init log (stack.sh's on
                             devstack), or a systemd unit's journal
+  snapshot                  save the running lab as its baseline (up takes
+                            one when there is none)
+  reset                     return the lab to its baseline, in minutes
   help                      show this help
 
 VMs: ${LAB_VMS[*]}
@@ -88,6 +95,7 @@ cmd_up() {
 	mkdir -p "$LAB_STATE_DIR"
 	ensure_ssh_key
 	resolve_versions
+	ensure_pki
 
 	section "VMs"
 	ensure_pool
@@ -103,10 +111,16 @@ cmd_up() {
 
 	section "DevStack"
 	devstack_up
+	devstack_configure
 	devstack_smoke
 
+	if ! all_snapshots_exist; then
+		section "Snapshot"
+		LAB_ASSUME_YES=1 lab_snapshot
+	fi
+
 	section "Done"
-	info "the lab is up: lab.sh status, lab.sh ssh <vm>"
+	info "the lab is up: lab.sh status, lab.sh ssh <vm>, lab.sh reset"
 }
 
 cmd_down() {
@@ -131,6 +145,12 @@ cmd_status() {
 		state="$(vsh domstate "$(vm_domain "$vm")" 2>/dev/null || echo absent)"
 		printf '        %-9s %-12s %s\n' "$vm" "$(vm_ip "$vm")" "$state"
 	done
+	section "Snapshot"
+	if all_snapshots_exist; then
+		info "taken $(env_get '.snapshot.taken')"
+	else
+		info "none (lab.sh snapshot)"
+	fi
 	section "DevStack"
 	if devstack_stacked; then
 		info "running"
@@ -172,8 +192,16 @@ main() {
 	status) cmd_status ;;
 	ssh) cmd_ssh "$@" ;;
 	logs) cmd_logs "$@" ;;
-	snapshot | reset | deploy | test)
-		die "\"$command\" is not implemented yet (chunk 3.5, steps 3 to 5)"
+	snapshot)
+		require_state
+		lab_snapshot
+		;;
+	reset)
+		require_state
+		lab_reset
+		;;
+	deploy | test)
+		die "\"$command\" is not implemented yet (chunk 3.5, steps 4 and 5)"
 		;;
 	help | -h | --help) usage ;;
 	*)

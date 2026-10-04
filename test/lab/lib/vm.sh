@@ -243,7 +243,8 @@ destroy_all() {
 		vsh dominfo "$domain" >/dev/null 2>&1 || continue
 		info "destroying VM $vm"
 		vsh destroy "$domain" >/dev/null 2>&1 || true
-		vsh undefine "$domain" --remove-all-storage >/dev/null 2>&1 || vsh undefine "$domain" >/dev/null
+		vsh undefine "$domain" --remove-all-storage --snapshots-metadata >/dev/null 2>&1 ||
+			vsh undefine "$domain" --snapshots-metadata >/dev/null
 	done
 	if vsh pool-info "$LAB_POOL" >/dev/null 2>&1; then
 		info "destroying storage pool $LAB_POOL"

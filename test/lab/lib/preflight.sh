@@ -196,7 +196,23 @@ pf_resources() {
 		pf_ok "${available} GiB of memory available, ${need} GiB needed (${detail})"
 	fi
 
-	pf_space "VM disks" "$LAB_POOL_DIR" $((disk * PF_DISK_USE_PERCENT * (100 + PF_DISK_MARGIN_PERCENT) / 10000))
+	# the VMs' disks, plus their memory, which the snapshots save; what the
+	# lab's pool already holds is used, not needed
+	local disk_need held=0
+	disk_need=$(((disk * PF_DISK_USE_PERCENT / 100 + ram) * (100 + PF_DISK_MARGIN_PERCENT) / 100))
+	if have virsh && virsh -q -c qemu:///system pool-info "$LAB_POOL" >/dev/null 2>&1; then
+		# the sum of its volumes: a directory pool's own allocation is the
+		# whole file system's
+		local volume bytes
+		while read -r volume _; do
+			[[ -n "$volume" ]] || continue
+			bytes="$(virsh -q -c qemu:///system vol-info --bytes --pool "$LAB_POOL" "$volume" | awk '/^Allocation:/ { print $2 }')"
+			held=$((held + ${bytes:-0}))
+		done < <(virsh -q -c qemu:///system vol-list "$LAB_POOL")
+		held=$((held / 1024 / 1024 / 1024))
+	fi
+	disk_need=$((disk_need > held ? disk_need - held : 0))
+	pf_space "VM disks and snapshots" "$LAB_POOL_DIR" "$disk_need"
 	pf_space "download cache" "$LAB_CACHE_DIR" "$PF_CACHE_GIB"
 }
 
