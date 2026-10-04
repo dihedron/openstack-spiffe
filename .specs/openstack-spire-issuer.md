@@ -1,6 +1,18 @@
 # OpenStack metadata JWT issuer — implementation spec
 
-Sep 20, 2026 (revised Oct 1 and Oct 2, 2026) · @Andrea Funtò
+Sep 20, 2026 (revised Oct 1, Oct 2 and Oct 4, 2026) · @Andrea Funtò
+
+*Revision notes (Oct 4)*: security revision following the STRIDE threat model (`openstack-spire-threat-model.md`). Changes:
+- Network and mTLS restrictions on `/attest`, and a cap on concurrent Keystone validations (S-3, D-2).
+- Character validation of tags and enrichment claims (T-4).
+- Audit records of issuance and of the key lifecycle (R-1, R-3).
+- Redaction of `metadata` values (I-2).
+- Protection of in-memory keys against dumps and profiles (I-4, I-5).
+- Rate limits on the public endpoints (D-5).
+- New configuration warnings (S-5, E-6).
+- Signed releases (T-7).
+
+Requirements introduced by this revision are tagged with the threat ID they address. They are planned and not implemented yet.
 
 ## Overview
 
@@ -55,9 +67,9 @@ This service is a Nova **DynamicJSON vendordata target**: a REST service that `n
 
 **Nova's metadata cache**: `nova-api-metadata` caches an instance's metadata, vendordata included, for `[api] metadata_cache_expiration` (default 15s), so reads within that window return the same token. The SPIRE Server-side plugin accepts each token only once (companion spec), so the agent plugin waits, bounded, for a fresh token rather than present the same one twice. Operators may lower the cache expiration to shorten such waits, at the cost of more calls to this service.
 
-**Processing order**: per-source rate limit and body cap → caller authentication → decoding and validation → per-instance rate limit → instance verification and enrichment → signing. Each step runs only if the previous ones succeeded, so an unauthenticated or invalid request never costs a lookup or a signature.
+**Processing order**: source allowlist and client certificate (see network restriction of `/attest`) → per-source rate limit and body cap → caller authentication → decoding and validation → per-instance rate limit → instance verification and enrichment → signing → audit record. Each step runs only if the previous ones succeeded, so an unauthenticated or invalid request never costs a lookup or a signature.
 
-**Logging of rejected payloads**: a malformed or invalid body is logged truncated to 512 bytes, with `user-data` redacted: in a JSON object its value is replaced; in a payload that cannot be parsed, everything from the first mention of `user-data` onwards is dropped, since the value cannot be located reliably. An oversized body is logged only with the size cap.
+**Logging of rejected payloads** (I-2): a malformed or invalid body is logged truncated to 512 bytes, with `user-data` and every value of `metadata` redacted. Tenants commonly keep secrets in either of them. The `metadata` keys are kept, since they help diagnose a rejected request. Only a body that parses as a JSON object is logged this way. A payload that cannot be parsed is logged with its size and SHA-256 only, never its content, since the sensitive values cannot be located reliably in it: a member name may be escaped (`"user-data"`). An oversized body is logged only with the size cap.
 
 ## Caller authentication and request-context binding
 
@@ -69,9 +81,12 @@ The request is made by `nova-api-metadata`, not by the user who booted the insta
 - validate the token against Keystone (`GET /v3/auth/tokens`); an invalid or expired token is rejected with `401`;
 - require the token's user to be listed in `keystone.allowed_users` **and** to carry `keystone.required_role` (default `service`); otherwise reject with `403` and log the user ID (never the token);
 - reject with `503` if Keystone cannot be reached;
-- cache successful validations, keyed by the SHA-256 of the token, for at most `keystone.validation_cache_ttl` (default 60s) and never beyond the token's own expiry, in a bounded cache. Failures are not cached, and concurrent validations of the same token (Nova reuses its token across requests) are merged into a single Keystone request.
+- cache successful validations, keyed by the SHA-256 of the token, for at most `keystone.validation_cache_ttl` (default 60s) and never beyond the token's own expiry, in a bounded cache. Failures are not cached, and concurrent validations of the same token (Nova reuses its token across requests) are merged into a single Keystone request;
+- run at most `keystone.max_concurrent_validations` (default 32) Keystone validations at once, across all callers (D-2). A request that would exceed the cap is rejected with `503` at once, without queueing, so a flood of distinct bogus tokens cannot be relayed to Keystone faster than the cap allows. Cache hits and requests merged into an in-flight validation do not count.
 
-**Allowed users**: each `keystone.allowed_users` entry is either a user ID (32 or 64 lowercase hex digits, as Keystone generates them) or `name@domain`, where `domain` is the domain's name or ID. The name may itself contain `@`; the domain follows the last one. Bare names are configuration errors: user names are only unique within a domain, and a same-named user with the same role in another domain would otherwise be accepted.
+**Allowed users**: each `keystone.allowed_users` entry is either a user ID (32 or 64 lowercase hex digits, as Keystone generates them) or `name@domain`, where `domain` is the domain's name or ID. The name may itself contain `@`; the domain follows the last one. Bare names are configuration errors: user names are only unique within a domain, and a same-named user with the same role in another domain would otherwise be accepted. Names are also mutable within a domain, so a user renamed or recreated under an allowed name would be accepted too: `config check` warns about every `name@domain` entry and recommends the user ID (E-6).
+
+**Dedicated vendordata user** (S-3): Nova's `[vendordata_dynamic_auth]` credentials should belong to a dedicated Keystone user (e.g. `nova-vendordata@Default`), configured only on the hosts running `nova-api-metadata`, and listed alone in `keystone.allowed_users`. The general `nova` service user must not be listed: its credentials are in `nova.conf` on every compute node, so any compromised hypervisor could mint a token for any instance in the cloud. The README and the Nova settings in `examples/` follow this rule.
 
 **Service credentials**: the service validates tokens with its own credentials, taken from the `OS_*` environment variables of a standard openrc file and never from the configuration file:
 
@@ -83,6 +98,14 @@ The request is made by `nova-api-metadata`, not by the user who booted the insta
 The service user needs, with default policies, the permissions to validate other users' tokens (`identity:validate_token`), to read any project (`identity:get_project`, for the `project_name` and `domain_id` enrichment) and to read any server (`os_compute_api:servers:show`, for instance verification): typically the `admin` role in the `service` project, as for the other OpenStack service users, or a dedicated role with policy overrides for these rules. It re-authenticates when its own token expires.
 
 Trust in Nova's claims about `project-id` and `instance-id` thus rests on the authenticated identity of the compute control plane, and is independently confirmed by the instance verification described below.
+
+### Network restriction of `/attest` (S-3, D-2)
+
+Keystone authentication proves possession of the credentials, not that the caller is a metadata API host. Two optional, complementary controls restrict `/attest` to where Nova actually calls from. Both apply to `/attest` only. The JWKS and health endpoints stay reachable by their own consumers.
+
+- **Source allowlist** (`attest.allowed_sources`: IP addresses or CIDR ranges): a request to `/attest` whose client address (see client address) is not covered is rejected with `403` before the per-source rate limit, before the body is read and before any Keystone call. The rejection is logged with the client address. Behind a trusted proxy, the client address is the forwarded one, so the proxy must preserve the metadata hosts' addresses. Empty (the default) means any source.
+- **Client certificate** (`attest.client_ca_path`, a PEM CA bundle): when set, `/attest` requires a client certificate that chains to this bundle. A request without one, or with an invalid one, is rejected with `403` before the body is read and before any Keystone call. Since TLS requests client certificates during the handshake, before the path is known, the listener asks for one from every client (`VerifyClientCertIfGiven`, verified against the bundle when presented) and `/attest` enforces its presence. Peers, aggregators and the SPIRE Server keep connecting without one. Nova presents a client certificate through the keystoneauth session options `certfile` and `keyfile` of its `[vendordata_dynamic_auth]` section, which also carry the vendordata request. This must be confirmed on the DevStack test bed (`test/install_devstack_lxd.sh`) before the README documents it.
+- `config check` warns when neither `attest.allowed_sources` nor `attest.client_ca_path` is set. Either one confines stolen vendordata credentials to the metadata API hosts. Together, they also require the client key.
 
 ## Claim schema
 
@@ -114,10 +137,11 @@ The schema must match the companion `openstack_iid` node attestor spec exactly: 
 - **TTL**: `exp - iat` is a short, fixed window: `token_ttl_seconds`, default 300 (5 minutes), never more. This service enforces it, not just documents it: it refuses to start with a longer or non-positive value. `iat` and `nbf` are the issuance time.
 - **Tags and payload bloat protection**: users frequently abuse instance metadata for large cloud-init scripts. To keep JWT-bearing headers within standard HTTP limits (4–8 KB) downstream, the `tags` claim is derived from the incoming `metadata` field as follows:
   - only string values are kept; other entries are dropped (not an error);
+  - keys and values that are not valid UTF-8 or that contain control characters (Unicode category `Cc`) or format characters (`Cf`, e.g. bidirectional overrides and zero-width characters) are dropped (T-4). Such characters could make selectors that look alike differ, or forge log lines. The rule is `iid.ValidateTagKey` and `iid.ValidateTagValue`, shared with the SPIRE Server-side plugin, which rejects a token carrying such a tag;
   - empty keys and keys containing `:` are dropped, since they would make the `openstack_iid:tag:<key>:<value>` selector of the SPIRE plugins ambiguous (the SPIRE Server-side plugin rejects a token carrying one);
   - if `tags.allowlist` is configured, only the listed keys are kept (an empty allowlist keeps every string entry, and `config check` warns about it);
   - the JSON-serialized `tags` object never exceeds 1024 bytes (escaping included): entries are considered in sorted key order and any entry that would not fit is dropped, so the result is deterministic and later, smaller entries can still fit;
-  - every dropped entry is logged with its key and the reason, never its value; the token is still issued.
+  - every dropped entry is logged with its key (quoted and escaped, and truncated to 64 bytes) and the reason, never its value; the token is still issued.
 - **Immutability**: every claim value comes exclusively from the authorized Nova request, except the operator-configured custom claims and the enrichment claims looked up from Nova and Keystone (see below). The service accepts no override of `project_id`, `instance_id` or `hostname` from any other input path.
 - **Custom claims**: the operator can configure static string claims (e.g. `"country": "italy"`) in `custom_claims`; they are added as top-level claims to every token, and their values are strings. Custom claims must not use a reserved claim name (`iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `project_id`, `instance_id`, `hostname`, `tags`, and the enrichment claims `availability_zone`, `flavor`, `user_id`, `project_name`, `domain_id`). The service refuses to start if they do, and re-checks the names right before signing, so it can never emit a token where a custom claim shadows a reserved one. The JSON-serialized `custom_claims` object must not exceed 2048 bytes (escaping included), checked like the names.
 - **Token size**: the compact-serialized token never exceeds `MaxTokenBytes` (16 KiB), the most the SPIRE plugins accept. The caps above (tags at 1024 bytes, custom claims at 2048, bounded IDs, hostname and enrichment values) keep a token at about 6 KiB at most; the minter still checks the size of every token it signs and, should it ever exceed the limit, refuses to issue it (`500`, logged) rather than hand out a token the SPIRE Server would reject.
@@ -151,6 +175,7 @@ Any mismatch is rejected with `403` and logged; no token is issued.
 - **Caching**: to protect nova-api and Keystone during boot storms, server records are cached per instance ID for at most `nova_lookup.cache_ttl` (default 60s, never more than the token TTL, since the availability zone can change on migration or resize); project records are cached for `keystone.project_cache_ttl` (default 10m). The cached record is still checked against each request. Caches are bounded in size, failures are not cached, and concurrent lookups of the same record are merged into a single request.
 - **Unknown project**: if a Keystone lookup finds no project with the request's `project-id`, the request is rejected with `403`, like an instance mismatch.
 - **Failure**: if Nova or Keystone cannot be reached, the request is rejected with `503`. The service never issues a token with missing enrichment claims, or with enrichment claims staler than the TTL: an enabled attribute that is empty in the record (e.g. the availability zone of an instance not scheduled yet) is also rejected with `503`, so that Nova retries on the instance's next metadata read.
+- **Value validation** (T-4): an enrichment value must be valid UTF-8, at most 255 bytes, without control or format characters (`iid.ValidateEnrichmentValue`, shared with the SPIRE Server-side plugin). Some of these values (e.g. `project_name`, a flavor name) are chosen by administrators or, for projects, by domain admins, and they end up in selectors. A value that fails is rejected with `503` and logged with the attribute name, since it is a control-plane anomaly, not a client error.
 
 ## Signing key management
 
@@ -162,6 +187,13 @@ This is the highest-risk component in the whole system: compromise of a signing 
 2. **Ephemeral in-memory keys** (`ephemeral_memory`, recommended for stateless simplicity): each replica generates its key pairs entirely in memory and never persists them; if the replica restarts, it simply generates a new key. The public halves are published through the JWKS endpoint.
 
 The `ephemeral_memory` backend is implemented first; `vault_transit` comes later behind the same interface (until then, the configuration check reports it as not supported).
+
+**Memory protection** (I-4, I-5): with `ephemeral_memory`, process memory is the only place keys exist, so it must not leak through the usual side doors:
+
+- At startup, before generating any key, `service start` marks the process non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`). This disables core dumps and blocks `ptrace` and `/proc/<pid>/mem` access by other processes of the same user. A failure is a startup error.
+- The systemd units set `LimitCORE=0` as a second layer.
+- CPU and heap profiling (enabled through the `*_CPU_PROFILE` and `*_MEM_PROFILE` environment variables) create their files with mode `0600`. When either is enabled, `service start` logs a warning that heap profiles contain private key material.
+- The README requires swap on signer hosts to be disabled or encrypted, since Go cannot lock key pages in memory.
 
 **Algorithms**: RS256 with RSA 2048-bit keys (default) or ES256 with ECDSA P-256 keys (`key_store.algorithm`).
 
@@ -175,6 +207,7 @@ The `ephemeral_memory` backend is implemented first; `vault_transit` comes later
 - **replica_id** is a lowercase DNS label, unique across replicas; if not configured, it is derived from the first label of the hostname (`config check` warns about it).
 - **Publication before use**: a token must never carry a kid the aggregated JWKS cannot serve yet, whether served by a peer replica or by the aggregator. Each new key is generated and published in the replica's JWKS `key_store.publish_ahead` (default 2m) before it is used for signing; `publish_ahead` must exceed `peers.poll_interval` plus `peers.fetch_timeout` plus `peers.cache_max_age` (when peers are configured), and the aggregator's `poll_interval` plus `fetch_timeout` plus `cache_max_age`. The poll and fetch terms bound how late a merged set picks up a new key; the cache term bounds how long a consumer may keep serving itself an older copy of the merged set, so that a new kid reaches the SPIRE Server before its first use without relying on its re-fetch on an unknown kid (which remains as a fallback, e.g. for a peer that was unreachable). At startup, a replica reports not ready (`/readiness` → `503`) until its first key has been published for `publish_ahead`.
 - **Signing**: only the active key signs, and the token header carries its kid. If a rotation lands while a token is being signed, signing is retried once with the new active key; if it fails again, the request is rejected with `503`.
+- **Key lifecycle records** (R-3): every key's transitions are logged at `info` with `audit=key_lifecycle`, the event (`generated`, `published`, `active`, `retired`, `dropped`), the kid, the algorithm and the key's RFC 7638 JWK thumbprint (SHA-256, base64url). Ephemeral keys leave no other trace. These records are what lets an investigator later tie a kid, and the tokens it signed, to a replica, a time window and specific key material, after the replica has restarted.
 
 ## JWKS endpoints (signer replica)
 
@@ -226,7 +259,9 @@ Because Nova calls this service whenever the instance reads its vendordata, the 
   1. **Before the body is read**: a per-source-IP token bucket (`rate_limit_per_source`, default 200/1s, keyed by the client address described below) in the HTTP middleware, together with a cap on the body size (`max_body_bytes`: a larger declared `Content-Length` is rejected with `400` at once, and reading an undeclared body stops at the cap), so spam is rejected cheaply without allocating memory for the payload. IPv6 sources are keyed by their /64 prefix, since a single host usually controls a whole /64 and could otherwise bypass the limit by rotating addresses.
   2. **Right after a size-capped decode**: a per-instance-ID token bucket (`rate_limit_per_instance`, default 1/5s: no more than one token every few seconds per instance), before any lookup or signing operation.
 
-  A `429` carries a `Retry-After` header. A rate `N/period` allows bursts of up to N requests and refills N tokens per period. Limits are enforced per replica, since replicas share nothing. The number of tracked keys is bounded: buckets that have refilled completely are forgotten, and if the bound is still reached, an arbitrary bucket is evicted (its key starts over with a full bucket), so a flood of distinct sources can neither exhaust memory nor lock out every new source.
+  A `429` carries a `Retry-After` header. A rate `N/period` allows bursts of up to N requests and refills N tokens per period. Limits are enforced per replica, since replicas share nothing.
+
+  **Public endpoints** (D-5): `/jwks/local.json`, `/.well-known/jwks.json`, `/liveness` and `/readiness` are unauthenticated, so they get their own per-source token bucket, `rate_limit_per_source_public` (default 50/1s, keyed by the same client address), separate from the `/attest` bucket. A flood against them can therefore never starve Nova's calls. The aggregator limits its own endpoints the same way. It has its own `rate_limit_per_source` (default 50/1s) and `client_address` settings, with the signer's semantics. Their consumers (peers, aggregators, SPIRE Servers, probes) poll at most a few times a minute, far below the limit. The number of tracked keys is bounded: buckets that have refilled completely are forgotten, and if the bound is still reached, an arbitrary bucket is evicted (its key starts over with a full bucket), so a flood of distinct sources can neither exhaust memory nor lock out every new source.
 
 ### Client address
 
@@ -255,7 +290,16 @@ The client address keys the per-source rate limit and identifies the caller in l
 
 **TLS**: each service's `tls_min_version` (`"1.2"` or `"1.3"`, default `"1.3"`) is the minimum TLS version of both its HTTPS server and the connections it makes: the signer's to Keystone, Nova and its peers, the aggregator's to the replicas. `"1.3"` is recommended; `"1.2"` exists for peers that cannot negotiate TLS 1.3 (e.g. an older load balancer in front of the OpenStack APIs) and makes `config check` warn. Any other value is an error.
 
-**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_ISSUER_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials and `user-data` are never logged.
+**Logging**: structured logs (`log/slog`, text format) go to standard error at level `info` by default; `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` selects `debug`, `info`, `warn`, `error` or `off`, and `OPENSTACK_SPIRE_ISSUER_LOG_STREAM` selects `stderr`, `stdout` or `file`. Tokens, keys, credentials, `user-data` and `metadata` values are never logged.
+
+**Issuance audit** (R-1): every issued token produces exactly one `info` record, `token issued`, with `audit=token_issued`, written after the response has been encoded and before it is sent. Its fields are:
+- `request_id`
+- the caller's Keystone user ID
+- the client address, and the TCP peer address when it differs
+- the client certificate's subject and serial, when one was presented
+- `project_id`, `instance_id`, `jti`, `kid`, `iat` and `exp`
+
+The token itself is never part of it. Together with the SPIRE Server-side plugin's `agent attested` record, which carries the same `jti`, it traces every attestation back to the Nova call, the replica and the key that produced it. It also makes tokens minted with stolen credentials (S-3) visible as issuances without a matching metadata request. Operators should ship these records to a central, append-only log store.
 
 **Request IDs**: every response carries an `X-Request-Id` header with a random ID generated by the service (incoming values are ignored), and every log record written while handling the request carries it as `request_id`.
 
@@ -292,7 +336,11 @@ key_store:
 token_ttl_seconds: 300                                  # at most 300
 rate_limit_per_instance: "1/5s"
 rate_limit_per_source: "200/1s"
+rate_limit_per_source_public: "50/1s"                   # JWKS and health endpoints (D-5)
 max_body_bytes: 262144
+attest:                                                 # restrictions on /attest only (S-3)
+  allowed_sources: ["10.0.20.0/24"]                     # default: any; the metadata API hosts
+  client_ca_path: "/etc/openstack-spire-issuer/nova-client-ca.pem"  # optional; requires a Nova client certificate
 client_address:
   trusted_proxies: ["10.0.10.0/24"]                     # default: none (not proxied)
   header: "X-Forwarded-For"                             # used only for trusted proxies
@@ -301,9 +349,10 @@ custom_claims:                                          # static string claims, 
 tags:
   allowlist: ["role", "env"]                            # empty: every string entry
 keystone:
-  allowed_users: ["nova@Default"]                       # required: user IDs or name@domain
+  allowed_users: ["3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60"]   # required: user IDs (recommended) or name@domain; a dedicated vendordata user, never nova
   required_role: "service"
   validation_cache_ttl: "60s"
+  max_concurrent_validations: 32                        # D-2
   project_cache_ttl: "10m"
   ca_cert_path: "/etc/ssl/openstack-ca.pem"             # optional
 nova_lookup:
@@ -336,9 +385,13 @@ replicas:                                              # required, https only
   - "https://signer-b.internal:8443/jwks/local.json"
 poll_interval: "30s"
 fetch_timeout: "5s"
-replica_ca_cert_path: "/etc/ssl/signer-ca.pem"         # optional
+replica_ca_cert_path: "/etc/ssl/signer-ca.pem"         # optional (warning when unset)
 stale_key_retention: "5m"                              # at least 5m
 cache_max_age: "30s"                                   # whole seconds
+rate_limit_per_source: "50/1s"                         # D-5
+client_address:                                        # as for the signer
+  trusted_proxies: []
+  header: "X-Forwarded-For"
 ```
 
 Unknown keys are errors in both files, so that typos are never silently ignored.
@@ -357,7 +410,13 @@ openstack-spire-issuer config check [--signer PATH]... [--aggregator PATH] [--fo
 - **Peer consistency** (within a signer file): when peers are configured, `key_store.publish_ahead` must exceed `peers.poll_interval` plus `peers.fetch_timeout` plus `peers.cache_max_age`.
 - **Cross-file consistency**: when an aggregator file is given, each signer's `key_store.publish_ahead` must exceed the aggregator's `poll_interval` plus `fetch_timeout` plus `cache_max_age` (otherwise tokens could carry a kid the aggregated JWKS does not publish yet), and the aggregator's `stale_key_retention` must be at least each signer's token TTL (always true, since the aggregator itself requires at least the maximum token TTL). `replica_id` must be unique across all signer files.
 - **File checks** (skippable with `--skip-files`): TLS certificate and key exist, parse and match; the certificate is not expired; CA bundles (`peers.ca_cert_path` included) parse. A certificate expiring within 30 days and a private key readable by group or others are warnings.
-- **Warnings** flag valid but risky settings: `tls_min_version` set to `"1.2"`, instance verification disabled, no tags allowlist, keys ignored by the selected backend, `client_address.header` set without `trusted_proxies` (ignored), `trusted_proxies` covering every address (e.g. `0.0.0.0/0` or `::/0`, which lets any client choose its rate-limiting key), `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s, `peers` keys set without `peers.urls` (ignored), an aggregator replica URL whose path ends in `/.well-known/jwks.json` (see the JWKS aggregator).
+- **Warnings** flag valid but risky settings: `tls_min_version` set to `"1.2"`, instance verification disabled, no tags allowlist, keys ignored by the selected backend, `client_address.header` set without `trusted_proxies` (ignored), `trusted_proxies` covering every address (e.g. `0.0.0.0/0` or `::/0`, which lets any client choose its rate-limiting key), `replica_id` derived from the hostname, a per-instance rate limit looser than 1/5s, `peers` keys set without `peers.urls` (ignored), an aggregator replica URL whose path ends in `/.well-known/jwks.json` (see the JWKS aggregator). This revision adds:
+  - neither `attest.allowed_sources` nor `attest.client_ca_path` set (S-3);
+  - `attest.allowed_sources` covering every address (S-3);
+  - an `allowed_users` entry given as `name@domain` rather than a user ID (E-6);
+  - an `allowed_users` entry whose name is `nova` (S-3);
+  - `peers.urls` set without `peers.ca_cert_path`, or an aggregator without `replica_ca_cert_path`, which trusts every public CA for the JWKS fetches (S-5).
+- **Errors added by this revision**: `attest.allowed_sources` entries that are neither IP addresses nor CIDR ranges; an unparseable `attest.client_ca_path` (file check); `keystone.max_concurrent_validations` below 1; a malformed `rate_limit_per_source_public`.
 - **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
 - The services run the same checks at startup, file checks included, as a pre-flight check: they refuse to start on any error (e.g. a missing, mismatched or expired TLS certificate, or an unparseable CA bundle) and log the warnings.
 
@@ -365,14 +424,17 @@ openstack-spire-issuer config check [--signer PATH]... [--aggregator PATH] [--fo
 
 | Failure | Behavior |
 | --- | --- |
+| `/attest` from a source outside `attest.allowed_sources`, or without a valid client certificate when `attest.client_ca_path` is set | Reject with `403` *before* the body is read and before any Keystone call; log the client address |
 | Per-source rate limit exceeded | Reject with `429` *before* the body is read |
+| Public endpoint per-source limit exceeded | Reject with `429` and `Retry-After` |
+| `keystone.max_concurrent_validations` reached | Reject with `503`, do not queue |
 | Malformed, oversized or invalid request body | Reject with `400`; log the payload truncated and with `user-data` redacted |
 | Missing `X-Auth-Token`, or invalid/expired token | Reject with `401`, do not sign |
 | Token user not in `keystone.allowed_users` or lacking `keystone.required_role` | Reject with `403`, do not sign, log the user ID (never the token) |
 | Keystone unreachable while authenticating the caller | Reject with `503` |
 | Per-instance rate limit exceeded | Reject with `429` before any lookup or signing |
 | Instance not found, owned by another project, or in a disallowed status; project not found | Reject with `403`, do not sign, log the mismatch |
-| Nova API / Keystone unreachable during verification or enrichment, or an enabled enrichment attribute missing from the record | Reject with `503` |
+| Nova API / Keystone unreachable during verification or enrichment, or an enabled enrichment attribute missing from the record or failing value validation | Reject with `503` |
 | Key store / Vault proxy unreachable | Reject with `503`; Nova omits this target from the metadata response, and the instance retries on its next metadata poll |
 | Signing fails for any other reason (e.g. a custom claim colliding with a reserved name, or a token over `MaxTokenBytes`) | Reject with `500` |
 
@@ -395,6 +457,18 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 - `/jwks/local.json` never contains peer keys; without peers, `/.well-known/jwks.json` serves the same content and headers as `/jwks/local.json`.
 - Peer aggregation: the merged set always includes the replica's own keys, even with every peer unreachable, and readiness is unaffected; a peer kid that conflicts with an own kid is excluded; a peer URL whose path ends in `/.well-known/jwks.json` is rejected by the configuration check; with two replicas polling each other's local set, a key one of them retires disappears from both merged sets instead of circulating between them.
 - The configuration check reports every finding of a broken file in one run, with correct lines.
+- Tags (T-4): keys and values with control characters, format characters (e.g. U+202E) or invalid UTF-8 are dropped and logged by key only. An enrichment value failing `iid.ValidateEnrichmentValue` gives `503`.
+- Redaction (I-2): `metadata` values are redacted and keys kept. An unparseable payload is logged with size and hash only, including one with an escaped `"user-data"` member name.
+- Audit (R-1, R-3): a successful request produces exactly one `token issued` record whose `jti` and `kid` equal the token's, and no token in it. Every rotation produces `generated`, `published`, `active` and `retired` records with the key's thumbprint.
+- Keystone cap (D-2): with `max_concurrent_validations` validations in flight, the next distinct token gets `503` at once, while a cached or merged token is still served.
+- Configuration check: the new warnings and errors of this revision.
+
+**Security integration tests** (this revision):
+
+- Source allowlist (S-3): a request with a valid Nova token from a source outside `attest.allowed_sources` is rejected with `403`. Neither the body is read nor Keystone called.
+- Client certificate (S-3): with `attest.client_ca_path` set, `/attest` without a client certificate, or with one from another CA, is rejected with `403`. With a valid one it succeeds, and `/.well-known/jwks.json` still answers clients without a certificate.
+- Public endpoint limit (D-5): a burst over `rate_limit_per_source_public` on `/.well-known/jwks.json` gets `429`, while `/attest` from the same source is unaffected.
+- Non-dumpable signer (I-4): `/proc/self/status` of a running `service start` shows it is not dumpable (Linux only).
 
 **Integration tests**:
 
@@ -425,8 +499,27 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
   - after installation, reload systemd and restart only the units that were running, so an upgrade picks up the new binary while a fresh install starts nothing;
   - before removal (not on upgrade), stop and disable both units, and reload systemd afterwards. The user is kept, so that files it owns stay attributed.
 
-  The units run as `openstack-spire-issuer` with no capabilities (the default ports are unprivileged) and a read-only view of the system (`ProtectSystem=strict` and related hardening). They restart on failure after 5 seconds, and allow 30 seconds to stop, above the 15-second graceful drain. Logs go to standard error and thus to the journal; file logging and profiling, which write to the working directory, are not supported under the units.
+  The units run as `openstack-spire-issuer` with no capabilities (the default ports are unprivileged) and a read-only view of the system (`ProtectSystem=strict` and related hardening), and with core dumps disabled (`LimitCORE=0`, I-4). They restart on failure after 5 seconds, and allow 30 seconds to stop, above the 15-second graceful drain. Logs go to standard error and thus to the journal; file logging and profiling, which write to the working directory, are not supported under the units.
+- **Signed releases** (T-7): goreleaser signs the release checksums file, which covers every archive and package, together with the SBOMs. The deb and rpm packages are also signed with the project's packaging key, so that `apt` and `dnf` verify them natively. The signing method (cosign keyless through the CI's OIDC identity, or a GPG key held by CI) is chosen at implementation time. The README documents how to verify the signature before installing. For the SPIRE plugins, verification comes before computing `plugin_checksum` (companion spec).
 - Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
+
+## Implementation plan for the Oct 4 security revision
+
+Planned and not implemented yet. Tests come first, as for every change.
+
+| Area | Change | Threats |
+| --- | --- | --- |
+| `pkg/iid` | `ValidateTagValue`, `ValidateEnrichmentValue`, and control, format and UTF-8 checks in `ValidateTagKey`. `ValidateKeyID` (used by the server plugin) | T-4, T-5 |
+| `internal/metadata/config` | `attest` block, `rate_limit_per_source_public`, `keystone.max_concurrent_validations`, aggregator `rate_limit_per_source` and `client_address`; the new errors and warnings; file check of `attest.client_ca_path` | S-3, S-5, D-2, D-5, E-6 |
+| `internal/metadata/server/signer.go`, `serve.go`, `aggregator.go` | Source-allowlist middleware and `/attest`-only client certificate enforcement ahead of the per-source limit; `VerifyClientCertIfGiven` with the client CA pool in the TLS config; a public per-source limiter on every other route | S-3, D-2, D-5 |
+| `internal/metadata/auth` | Non-blocking semaphore around Keystone validations, outside the merge of identical tokens; `503` when full | D-2 |
+| `internal/metadata/claims` | Drop tags failing the new checks; validate enrichment values | T-4 |
+| `internal/metadata/attest` | `token issued` audit record, which needs the minter to return the `jti`, `kid`, `iat` and `exp`, and the authenticator to put the caller's user ID in the request context; `metadata` redaction, and the size-and-hash fallback in `redact.go` | R-1, I-2 |
+| `internal/metadata/keystore` | Key lifecycle records with RFC 7638 thumbprints | R-3 |
+| `cmd/openstack-spire-issuer` | `PR_SET_DUMPABLE` at `service start` (via `golang.org/x/sys/unix`, Linux only); profiles created `0600` in all three `cmd/*/init.go`, plus a key-material warning | I-4, I-5 |
+| `packaging/systemd` | `LimitCORE=0` in both units | I-4 |
+| `.goreleaser.yaml`, README | Signed checksums, SBOMs and packages; verification instructions | T-7 |
+| `examples/` | Samples updated with the new keys, a dedicated vendordata user, and Nova `[vendordata_dynamic_auth]` `certfile`/`keyfile` once confirmed on DevStack | S-3 |
 
 ## Resolved questions and out of scope
 
