@@ -35,10 +35,10 @@ func listen(t *testing.T) (*net.UnixConn, string) {
 	return conn, path
 }
 
-// datagram is a received RFC 5424 message, split into its fields.
+// datagram is a received message, split into its fields.
 type datagram struct {
-	pri, msgID, app, structuredData string
-	msg                             map[string]any
+	pri, tag string
+	msg      map[string]any
 }
 
 func receive(t *testing.T, conn *net.UnixConn) datagram {
@@ -51,14 +51,17 @@ func receive(t *testing.T, conn *net.UnixConn) datagram {
 	if err != nil {
 		t.Fatalf("no datagram: %v", err)
 	}
-	// <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
-	fields := strings.SplitN(string(buf[:n]), " ", 8)
-	if len(fields) != 8 || !strings.HasSuffix(fields[0], ">1") {
-		t.Fatalf("not an RFC 5424 message: %q", buf[:n])
+	// RFC 3164, as journald parses it: <PRI>Mmm dd hh:mm:ss TAG[PID]: MSG
+	raw := string(buf[:n])
+	end := strings.IndexByte(raw, '>')
+	head, text, ok := strings.Cut(raw[end+1:], ": ")
+	if !strings.HasPrefix(raw, "<") || end < 0 || !ok || len(head) < 16 {
+		t.Fatalf("not an RFC 3164 message: %q", raw)
 	}
-	d := datagram{pri: strings.TrimSuffix(fields[0], "1"), app: fields[3], msgID: fields[5], structuredData: fields[6]}
-	if err := json.Unmarshal([]byte(fields[7]), &d.msg); err != nil {
-		t.Fatalf("MSG %q is not a JSON object: %v", fields[7], err)
+	tag, _, _ := strings.Cut(head[16:], "[")
+	d := datagram{pri: raw[:end+1], tag: tag}
+	if err := json.Unmarshal([]byte(text), &d.msg); err != nil {
+		t.Fatalf("MSG %q is not a JSON object: %v", text, err)
 	}
 	return d
 }
@@ -134,8 +137,8 @@ func TestTokenIssuedReachesSyslogWithLoggingOff(t *testing.T) {
 
 	d := receive(t, conn)
 	// local3 (19) * 8 + informational (6)
-	if d.pri != "<158>" || d.msgID != "token_issued" || d.app != "issuer-test" || d.structuredData != "-" {
-		t.Fatalf("datagram %+v, want PRI <158>, MSGID token_issued, APP-NAME issuer-test, no structured data", d)
+	if d.pri != "<158>" || d.tag != "issuer-test" || d.msg["audit"] != "token_issued" || d.msg["time"] == nil {
+		t.Fatalf("datagram %+v, want PRI <158>, tag issuer-test, audit token_issued and the time", d)
 	}
 	if d.msg["jti"] != "j-1" || d.msg["kid"] != "k-1" || d.msg["request_id"] != id {
 		t.Fatalf("MSG %v, want jti j-1, kid k-1 and request_id %s", d.msg, id)
@@ -155,8 +158,8 @@ func TestDroppedKeyIsNotice(t *testing.T) {
 	logger.Log(context.Background(), syslog.LevelNotice, "signing key dropped", syslog.AuditKey, "key_lifecycle", "event", "dropped")
 
 	// local3 (19) * 8 + notice (5)
-	if d := receive(t, conn); d.pri != "<157>" || d.msgID != "key_lifecycle" {
-		t.Fatalf("datagram %+v, want PRI <157> and MSGID key_lifecycle", d)
+	if d := receive(t, conn); d.pri != "<157>" || d.msg["audit"] != "key_lifecycle" {
+		t.Fatalf("datagram %+v, want PRI <157> and audit key_lifecycle", d)
 	}
 }
 

@@ -66,7 +66,14 @@ func hostname(t *testing.T) string {
 	return name
 }
 
+// open returns a client of the RFC 5424 format, which most of these tests
+// cover; see openRFC3164 for the default format.
 func open(t *testing.T, options ...Option) (*Syslog, *net.UnixConn) {
+	t.Helper()
+	return openRFC3164(t, append([]Option{WithFormat(FormatRFC5424)}, options...)...)
+}
+
+func openRFC3164(t *testing.T, options ...Option) (*Syslog, *net.UnixConn) {
 	t.Helper()
 	conn, path := listen(t)
 	s, err := New(append([]Option{WithSocket(path)}, options...)...)
@@ -373,5 +380,80 @@ func TestValidateAppName(t *testing.T) {
 		if err := ValidateAppName(invalid); err == nil {
 			t.Errorf("ValidateAppName(%q) = nil, want an error", invalid)
 		}
+	}
+}
+
+// rfc3164 splits a message in the form glibc's syslog() sends to /dev/log,
+// "<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG", which journald and rsyslog parse.
+func rfc3164(t *testing.T, datagram string) (pri, timestamp, tag, pid, text string) {
+	t.Helper()
+	end := strings.IndexByte(datagram, '>')
+	if !strings.HasPrefix(datagram, "<") || end < 0 || len(datagram) < end+17 {
+		t.Fatalf("malformed message %q", datagram)
+	}
+	pri, timestamp = datagram[:end+1], datagram[end+1:end+16]
+	rest := datagram[end+16:]
+	if !strings.HasPrefix(rest, " ") {
+		t.Fatalf("no space after the timestamp in %q", datagram)
+	}
+	head, text, ok := strings.Cut(rest[1:], ": ")
+	open, close := strings.IndexByte(head, '['), strings.IndexByte(head, ']')
+	if !ok || open < 1 || close != len(head)-1 {
+		t.Fatalf("no TAG[PID]: in %q", datagram)
+	}
+	return pri, timestamp, head[:open], head[open+1 : close], text
+}
+
+func TestSendRFC3164(t *testing.T) {
+	s, conn := openRFC3164(t, WithApplication("my-app"), WithProcess("4242"))
+	when := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.Local)
+	if err := s.Send(&Message{
+		Facility: FacilityAuthpriv,
+		Severity: SeverityInformational,
+		ID:       "Login",
+		Time:     when,
+		Content:  "a message sent to syslog",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// as glibc's syslog() sends it to /dev/log: local time, no year, no
+	// hostname (journald would take it for the tag), no MSGID
+	if got, want := receive(t, conn), "<86>Jan  2 03:04:05 my-app[4242]: a message sent to syslog"; got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestDefaultFormatIsRFC3164(t *testing.T) {
+	s, conn := openRFC3164(t)
+	if err := s.Send(&Message{Facility: FacilityDaemon, Severity: SeverityNotice, Content: "x"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	pri, timestamp, tag, pid, text := rfc3164(t, receive(t, conn))
+	if pri != "<29>" || tag != filepath.Base(os.Args[0]) || pid != fmt.Sprint(os.Getpid()) || text != "x" {
+		t.Errorf("got %q %q %q %q", pri, tag, pid, text)
+	}
+	if _, err := time.Parse(time.Stamp, timestamp); err != nil {
+		t.Errorf("timestamp %q: %v", timestamp, err)
+	}
+}
+
+func TestRFC3164RejectsStructuredData(t *testing.T) {
+	s, conn := openRFC3164(t, WithEnterprise("32473"))
+	err := s.Send(&Message{Facility: FacilityDaemon, Severity: SeverityNotice, Content: "x",
+		Data: map[string][]string{"origin": {"ip=192.0.2.1"}}})
+	if err == nil {
+		t.Fatal("Send accepted structured data in an RFC 3164 message")
+	}
+	receiveNothing(t, conn)
+}
+
+func TestRFC3164TruncatesToMaxSize(t *testing.T) {
+	s, conn := openRFC3164(t, WithMaxSize(64))
+	if err := s.Send(&Message{Facility: FacilityDaemon, Severity: SeverityNotice, Content: strings.Repeat("é", 100)}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	got := receive(t, conn)
+	if len(got) > 64 || !utf8.ValidString(got) {
+		t.Errorf("message of %d bytes, valid UTF-8 %v: %q", len(got), utf8.ValidString(got), got)
 	}
 }

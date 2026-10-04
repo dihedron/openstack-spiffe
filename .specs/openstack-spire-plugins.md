@@ -175,7 +175,7 @@ Unknown keys are errors. The CA bundle, if set, must exist and parse at `Configu
 
 The `jti` matches the issuer's `token issued` record, which ties every agent identity to the Nova call and the key that produced its token. The re-attestation detection warning is also an audit record, `audit=reattest_alert`.
 
-**Audit records to syslog** (R-2, S-4): when `audit_syslog.enabled` is set, the plugin also sends its audit records (`agent_attested` and `reattest_alert`) to the local syslog daemon. It uses the issuer's syslog audit sink (`pkg/syslog`, same format and delivery rules, see the issuer spec): RFC 5424 with the audit kind as `MSGID`, the record as a JSON `MSG`, and no structured data. `reattest_alert` uses severity `warning`, the others `info`.
+**Audit records to syslog** (R-2, S-4): when `audit_syslog.enabled` is set, the plugin also sends its audit records (`agent_attested` and `reattest_alert`) to the local syslog daemon. It uses the issuer's syslog audit sink (`pkg/syslog`, same format and delivery rules, see the issuer spec): RFC 3164 with `app_name` as the tag and the record as a JSON `MSG` carrying the audit kind (`audit`) and the exact time. `reattest_alert` uses severity `warning`, the others `info`.
 - Only audit records go there. Everything else, audit records included, still goes to SPIRE Server's log through the plugin SDK.
 - Delivery never blocks or fails an attestation: it goes through a bounded queue, and drops are counted and logged.
 - `Configure` fails when the socket cannot be opened. A new `Configure` call replaces the sink only if its settings changed, draining the old one first.

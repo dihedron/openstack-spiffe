@@ -165,6 +165,10 @@ func (h *AuditHandler) Handle(_ context.Context, record slog.Record) error {
 		return nil
 	}
 
+	if record.Time.IsZero() {
+		// the header and the JSON time must agree
+		record.Time = time.Now()
+	}
 	message := &Message{
 		Facility: h.sink.facility,
 		Severity: severity(record.Level),
@@ -177,7 +181,7 @@ func (h *AuditHandler) Handle(_ context.Context, record slog.Record) error {
 		h.sink.drop(fmt.Errorf("audit record %q: %w", kind, err))
 		return nil
 	}
-	message.Content = encode(record.Message, record.Level, fields, room)
+	message.Content = encode(record.Message, record.Level, message.Time, fields, room)
 	h.sink.enqueue(message)
 	return nil
 }
@@ -347,9 +351,12 @@ func flatten(fields []field, prefix string, a slog.Attr) []field {
 
 // encode renders the record as a JSON object of at most room bytes, leaving
 // out attributes, last first, if needed; the audit kind is always kept.
-func encode(msg string, level slog.Level, fields []field, room int) string {
-	members := make([]string, 0, len(fields)+2)
-	members = append(members, member("msg", slog.StringValue(msg)), member("level", slog.StringValue(level.String())))
+func encode(msg string, level slog.Level, when time.Time, fields []field, room int) string {
+	// the exact time: an RFC 3164 header has neither year nor fraction
+	const head = 3
+	members := make([]string, 0, len(fields)+head)
+	members = append(members, member("msg", slog.StringValue(msg)), member("level", slog.StringValue(level.String())),
+		member("time", slog.StringValue(when.UTC().Format(time.RFC3339Nano))))
 	for _, f := range fields {
 		members = append(members, member(f.key, f.value))
 	}
@@ -359,23 +366,26 @@ func encode(msg string, level slog.Level, fields []field, room int) string {
 	}
 
 	const truncated = `"truncated":true`
-	kept := []string{members[0], members[1]}
-	size := len(kept[0]) + len(kept[1]) + len(truncated) + 4 // braces and commas
+	kept := slices.Clone(members[:head])
+	size := len(truncated) + 2 + head // braces and commas
+	for _, m := range kept {
+		size += len(m)
+	}
 	for i, f := range fields {
 		if f.key == AuditKey {
-			kept = append(kept, members[i+2])
-			size += len(members[i+2]) + 1
+			kept = append(kept, members[i+head])
+			size += len(members[i+head]) + 1
 		}
 	}
 	for i, f := range fields {
 		if f.key == AuditKey {
 			continue
 		}
-		if size+len(members[i+2])+1 > room {
+		if size+len(members[i+head])+1 > room {
 			break
 		}
-		kept = append(kept, members[i+2])
-		size += len(members[i+2]) + 1
+		kept = append(kept, members[i+head])
+		size += len(members[i+head]) + 1
 	}
 	return "{" + strings.Join(append(kept, truncated), ",") + "}"
 }

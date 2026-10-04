@@ -1,6 +1,7 @@
-// Package syslog sends RFC 5424 messages to the local syslog daemon over a
-// Unix datagram socket (e.g. /dev/log), and provides AuditHandler, a
-// slog.Handler forwarding audit records there.
+// Package syslog sends messages to the local syslog daemon over a Unix
+// datagram socket (e.g. /dev/log), in the RFC 3164 form glibc's syslog()
+// uses (the default, which journald and rsyslog parse) or in RFC 5424, and
+// provides AuditHandler, a slog.Handler forwarding audit records there.
 package syslog
 
 import (
@@ -41,6 +42,22 @@ var (
 // by sub-identifiers (RFC 5424, section 7.2.2).
 var enterpriseNumber = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
 
+// Format is the wire format of the messages.
+type Format int
+
+const (
+	// FormatRFC3164 is "<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG", as glibc's
+	// syslog() sends it to /dev/log: journald (which provides /dev/log under
+	// systemd) and rsyslog parse it, with the application as
+	// SYSLOG_IDENTIFIER. It has no MSGID nor structured data, and its
+	// timestamp no year nor fraction. It is the default.
+	FormatRFC3164 Format = iota
+	// FormatRFC5424 is the structured format of RFC 5424, which journald
+	// does not parse (the header ends up in the message text): only for a
+	// syslog daemon that owns the socket and understands it.
+	FormatRFC5424
+)
+
 // Option is a functional option type that allows us to configure the Syslog.
 type Option func(*Syslog)
 
@@ -72,6 +89,13 @@ func WithProcess(process string) Option {
 		if process != "" {
 			sl.process = process
 		}
+	}
+}
+
+// WithFormat allows to specify the wire format (default: FormatRFC3164).
+func WithFormat(format Format) Option {
+	return func(sl *Syslog) {
+		sl.format = format
 	}
 }
 
@@ -115,6 +139,7 @@ type Syslog struct {
 	socket      string
 	maxSize     int
 	timeout     time.Duration
+	format      Format
 
 	mu     sync.Mutex
 	conn   net.Conn // nil after a failed redial, until the next send
@@ -189,7 +214,7 @@ func (s *Syslog) Close() error {
 	return err
 }
 
-// Send prepares a message in RFC5424-compliant format and sends it to the
+// Send prepares a message in the client's format and sends it to the
 // syslog socket. The message is validated first, and its text truncated on
 // a UTF-8 character boundary if the whole would exceed the maximum size.
 // If the write fails (e.g. because the syslog daemon restarted), the socket
@@ -309,6 +334,15 @@ func (s *Syslog) head(message *Message) (string, error) {
 	}
 	if err := validateHeaderField("MSGID", message.ID, 32); err != nil {
 		return "", fmt.Errorf("invalid syslog message: %w", err)
+	}
+	if s.format == FormatRFC3164 {
+		if len(message.Data) > 0 {
+			return "", errors.New("invalid syslog message: RFC 3164 has no structured data")
+		}
+		// as glibc's syslog() sends it to a local socket: no hostname, which
+		// journald would take for the tag
+		return fmt.Sprintf("%s%s %s[%s]:", priority(message.Facility, message.Severity),
+			when.Local().Format(time.Stamp), s.application, s.process), nil
 	}
 	data, err := s.structuredData(message.Data)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -44,12 +45,23 @@ func TestAuditForwardsOnlyAuditRecords(t *testing.T) {
 	logger.Info("token issued", "audit", "token_issued", "jti", "j-1", "count", 3, "ok", true)
 	logger.Warn("not an audit record either")
 
-	parts := fields(t, receive(t, conn))
-	if parts[0] != "<86>1" || parts[3] != "issuer" || parts[5] != "token_issued" || parts[6] != "-" {
-		t.Errorf("header: got %q", strings.Join(parts[:7], " "))
+	// RFC 3164, which journald parses: the tag is the application, and the
+	// audit kind and the exact time are in the JSON text
+	pri, _, tag, _, text := rfc3164(t, receive(t, conn))
+	if pri != "<86>" || tag != "issuer" {
+		t.Errorf("header: got %s %s", pri, tag)
 	}
-	if want := `{"msg":"token issued","level":"INFO","audit":"token_issued","jti":"j-1","count":3,"ok":true}`; parts[7] != want {
-		t.Errorf("text: got %q, want %q", parts[7], want)
+	got := decode(t, text)
+	if _, err := time.Parse(time.RFC3339Nano, fmt.Sprint(got["time"])); err != nil {
+		t.Errorf("time: %v", err)
+	}
+	delete(got, "time")
+	want := map[string]any{"msg": "token issued", "level": "INFO", "audit": "token_issued", "jti": "j-1", "count": float64(3), "ok": true}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("text: got %v, want %v", got, want)
+	}
+	if !strings.HasPrefix(text, `{"msg":"token issued","level":"INFO","time":`) {
+		t.Errorf("members out of order: %s", text)
 	}
 	receiveNothing(t, conn)
 }
@@ -63,15 +75,15 @@ func TestAuditSeverities(t *testing.T) {
 		level    slog.Level
 		priority string
 	}{
-		{slog.LevelInfo, "<86>1"},
-		{LevelNotice, "<85>1"},
-		{slog.LevelWarn, "<84>1"},
-		{slog.LevelError, "<83>1"},
-		{slog.LevelError + 8, "<83>1"}, // never alert or emergency
+		{slog.LevelInfo, "<86>"},
+		{LevelNotice, "<85>"},
+		{slog.LevelWarn, "<84>"},
+		{slog.LevelError, "<83>"},
+		{slog.LevelError + 8, "<83>"}, // never alert or emergency
 	}
 	for _, test := range tests {
 		logger.Log(context.Background(), test.level, "event", "audit", "key_lifecycle")
-		if got := fields(t, receive(t, conn))[0]; got != test.priority {
+		if got, _, _, _, _ := rfc3164(t, receive(t, conn)); got != test.priority {
 			t.Errorf("level %v: got %s, want %s", test.level, got, test.priority)
 		}
 	}
@@ -87,14 +99,12 @@ func TestAuditAttributes(t *testing.T) {
 		Info("generated", "kid", "k-1", slog.Group("x", "y", 1),
 			"error", errors.New("boom"), "at", when, "ttl", 5*time.Minute, "text", "line\nbreak \"quoted\" <b>")
 
-	parts := fields(t, receive(t, conn))
-	if parts[5] != "key_lifecycle" {
-		t.Errorf("MSGID: got %q, want key_lifecycle", parts[5])
+	_, _, _, _, text := rfc3164(t, receive(t, conn))
+	if strings.Contains(text, "\n") {
+		t.Errorf("text spans several lines: %q", text)
 	}
-	if strings.Contains(parts[7], "\n") {
-		t.Errorf("text spans several lines: %q", parts[7])
-	}
-	got := decode(t, parts[7])
+	got := decode(t, text)
+	delete(got, "time")
 	want := map[string]any{
 		"msg":       "generated",
 		"level":     "INFO",
@@ -125,8 +135,13 @@ func TestAuditUsesRecordTime(t *testing.T) {
 	if err := h.Handle(context.Background(), record); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if got := fields(t, receive(t, conn))[1]; got != "2026-10-04T12:00:00.987654Z" {
-		t.Errorf("timestamp: got %s", got)
+	_, timestamp, _, _, text := rfc3164(t, receive(t, conn))
+	if want := when.Local().Format(time.Stamp); timestamp != want {
+		t.Errorf("header timestamp: got %q, want %q", timestamp, want)
+	}
+	// the exact time, which the RFC 3164 header cannot carry
+	if got := decode(t, text)["time"]; got != "2026-10-04T12:00:00.987654321Z" {
+		t.Errorf("time: got %v", got)
 	}
 }
 
@@ -138,8 +153,9 @@ func TestAuditTruncatesKeepingValidJSON(t *testing.T) {
 	if len(datagram) > 300 {
 		t.Errorf("message of %d bytes, over the maximum size", len(datagram))
 	}
-	got := decode(t, fields(t, datagram)[7])
-	if got["truncated"] != true || got["audit"] != "token_issued" || got["jti"] != "j-1" || got["msg"] != "token issued" {
+	_, _, _, _, text := rfc3164(t, datagram)
+	got := decode(t, text)
+	if got["truncated"] != true || got["audit"] != "token_issued" || got["jti"] != "j-1" || got["msg"] != "token issued" || got["time"] == nil {
 		t.Errorf("got %v", got)
 	}
 	if _, ok := got["big"]; ok {

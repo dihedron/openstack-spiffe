@@ -304,11 +304,10 @@ The token itself is never part of it. Together with the SPIRE Server-side plugin
 **Syslog audit sink** (R-1, R-3): besides the regular log, audit records can be sent to the local syslog daemon, from which rsyslog or syslog-ng forward them to a central store. Only audit records go there: the records carrying an `audit` attribute (`token_issued`, `key_lifecycle`). The regular log stays on the stream selected by `OPENSTACK_SPIRE_ISSUER_LOG_STREAM`, and audit records keep appearing in it too.
 
 - **Configuration**: `audit.syslog.enabled` (default `false`), `audit.syslog.socket` (default `/dev/log`, a Unix datagram socket), `audit.syslog.facility` (default `authpriv`, or one of `auth`, `daemon`, `local0` to `local7`), and `audit.syslog.app_name` (default `openstack-spire-issuer`). It is enabled in the configuration file rather than the environment, because it is part of the security configuration and `config check` must see it. `config check` warns when it is disabled. `service start` refuses to start when it is enabled and the socket cannot be opened.
-- **Format**: RFC 5424. The project has no IANA private enterprise number, so it uses no custom structured data: RFC 5424 requires an `@<number>` suffix on non-IANA structured-data IDs. Instead:
-  - `MSGID` is the audit kind (`token_issued`, `key_lifecycle`).
-  - `MSG` is a single-line JSON object holding the record's message and all its attributes, with the same keys as in the regular log (`request_id`, `jti`, `kid`, ...).
-  - `HOSTNAME` is the host name, `APP-NAME` is `app_name`, and `PROCID` is the PID.
-  - The structured data is `-`.
+- **Format**: RFC 3164, in the form glibc's `syslog()` sends to a local socket: `<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG`, without a hostname.
+  - `TAG` is `app_name` and `PID` the process ID: journald, which provides `/dev/log` under systemd, records them as `SYSLOG_IDENTIFIER` and `SYSLOG_PID`, and rsyslog parses them too. RFC 5424 was the first choice, but journald does not parse it: the whole header ends up in the message text, with no identifier (found on the lab, Oct 4).
+  - `MSG` is a single-line JSON object holding the record's message, its level, its exact time (`time`, RFC 3339 with nanoseconds: the RFC 3164 timestamp has neither year nor fraction), the audit kind (`audit`: `token_issued`, `key_lifecycle`) and all its attributes, with the same keys as in the regular log (`request_id`, `jti`, `kid`, ...).
+  - `pkg/syslog` still offers RFC 5424 (`syslog.WithFormat`) for syslog daemons that own the socket and understand it; the audit sink does not use it.
 - **Severity**: `info` for `token_issued` and for `key_lifecycle` events, except `notice` for `dropped`. Never `emerg` or `alert`, which journald forwards to every terminal.
 - **Delivery never blocks issuance**:
   - A bounded queue (1024 records) feeds the socket from a dedicated goroutine.
@@ -324,7 +323,7 @@ The token itself is never part of it. Together with the SPIRE Server-side plugin
 
 The sink is implemented by `pkg/syslog`, shared with the SPIRE Server-side plugin (companion spec). Before it is used, that package needs these fixes:
 - A structured-data parameter without `=` is an error, not a panic.
-- Every message is validated against the RFC 5424 syntax (facility, severity, header fields, structured-data names) before it is sent. The package implements the parts of RFC 5424 it needs itself, without a third-party dependency.
+- Every message is validated (facility, severity, header fields, structured-data names) before it is sent, in RFC 3164 (the default) or RFC 5424. The package implements the parts of both RFCs it needs itself, without a third-party dependency.
 - Structured data is serialized in sorted order. It is not used by the audit sink, but stays available for callers that have an enterprise number.
 - The connection is redialed once after a failed send, and the client gets a `Close` method.
 - The socket path, size cap and send timeout are options.
@@ -454,7 +453,7 @@ openstack-spire-issuer config check [--signer PATH]... [--aggregator PATH] [--fo
   - an `allowed_users` entry given as `name@domain` rather than a user ID (E-6);
   - an `allowed_users` entry whose name is `nova` (S-3);
   - `peers.urls` set without `peers.ca_cert_path`, or an aggregator without `replica_ca_cert_path`, which trusts every public CA for the JWKS fetches (S-5).
-- **Errors added by this revision**: `attest.allowed_sources` entries that are neither IP addresses nor CIDR ranges; an unparseable `attest.client_ca_path` (file check); `keystone.max_concurrent_validations` below 1; a malformed `rate_limit_per_source_public`; an unknown `audit.syslog.facility`; an `audit.syslog.app_name` that is not 1 to 48 printable ASCII characters (RFC 5424 `APP-NAME`). `audit.syslog.enabled: false` is a warning (R-1).
+- **Errors added by this revision**: `attest.allowed_sources` entries that are neither IP addresses nor CIDR ranges; an unparseable `attest.client_ca_path` (file check); `keystone.max_concurrent_validations` below 1; a malformed `rate_limit_per_source_public`; an unknown `audit.syslog.facility`; an `audit.syslog.app_name` that is not 1 to 48 printable ASCII characters (the syslog tag, within RFC 5424's `APP-NAME` limits). `audit.syslog.enabled: false` is a warning (R-1).
 - **Exit codes**: 0 when there are no errors (warnings allowed), 1 on errors (or on warnings with `--strict`), 2 when a file cannot be read or the command line is invalid.
 - The services run the same checks at startup, file checks included, as a pre-flight check: they refuse to start on any error (e.g. a missing, mismatched or expired TLS certificate, or an unparseable CA bundle) and log the warnings.
 
@@ -501,7 +500,7 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 - Keystone cap (D-2): with `max_concurrent_validations` validations in flight, the next distinct token gets `503` at once, while a cached or merged token is still served.
 - Configuration check: the new warnings and errors of this revision.
 - Syslog audit sink, against a temporary Unix datagram socket:
-  - an issued token yields exactly one RFC 5424 datagram with `MSGID` `token_issued`, the configured facility, severity `info` and a JSON `MSG` whose `jti` equals the token's;
+  - an issued token yields exactly one RFC 3164 datagram with the configured facility, severity `info`, `app_name` as its tag and a JSON `MSG` whose `audit` is `token_issued` and whose `jti` equals the token's;
   - non-audit records never reach the socket;
   - a full queue drops and counts records without blocking the request;
   - a closed and recreated socket is redialed;

@@ -160,25 +160,25 @@ func newSyslogDaemon(t *testing.T) *syslogDaemon {
 	return d
 }
 
-// received returns the JSON messages of the datagrams with the given MSGID
-// that match, waiting briefly for the sink's asynchronous delivery of the
+// received returns the JSON messages of the datagrams of the given audit
+// kind that match, waiting briefly for the sink's asynchronous delivery of the
 // first one.
-func (d *syslogDaemon) received(t *testing.T, msgID string, match func(map[string]any) bool) []map[string]any {
+func (d *syslogDaemon) received(t *testing.T, kind string, match func(map[string]any) bool) []map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var out []map[string]any
 		d.mu.Lock()
 		for _, datagram := range d.datagrams {
-			// <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
-			fields := strings.SplitN(datagram, " ", 8)
-			if len(fields) != 8 || fields[5] != msgID {
-				continue
-			}
+			// RFC 3164: <PRI>Mmm dd hh:mm:ss TAG[PID]: MSG, the kind in MSG
+			_, text, ok := strings.Cut(datagram, "]: ")
 			var msg map[string]any
-			if err := json.Unmarshal([]byte(fields[7]), &msg); err != nil {
+			if !ok || json.Unmarshal([]byte(text), &msg) != nil {
 				d.mu.Unlock()
-				t.Fatalf("datagram %q: MSG is not a JSON object: %v", datagram, err)
+				t.Fatalf("datagram %q: not RFC 3164 with a JSON MSG", datagram)
+			}
+			if msg["audit"] != kind {
+				continue
 			}
 			if match(msg) {
 				out = append(out, msg)
