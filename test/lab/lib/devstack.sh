@@ -194,11 +194,11 @@ readonly GUEST_FLAVOR=lab.guest
 # DevStack's CA chain, which signs its TLS proxy's certificates
 readonly DEVSTACK_CA=/opt/stack/data/CA/int-ca/ca-chain.pem
 
-# devstack_openstack ARGS...: runs the openstack CLI on devstack as admin of
-# the admin project (or as PROJECT with OS_LAB_PROJECT=PROJECT).
+# devstack_openstack ARGS...: runs the openstack CLI on devstack as the admin
+# user in the admin project, or as OS_LAB_USER in OS_LAB_PROJECT.
 devstack_openstack() {
-	local project="${OS_LAB_PROJECT:-admin}"
-	vm_ssh devstack "cd /opt/stack && sudo -u stack bash -c $(printf '%q' "set +u; source $DEVSTACK_DIR/openrc admin $project >/dev/null 2>&1; set -u; openstack $(printf '%q ' "$@")")"
+	local user="${OS_LAB_USER:-admin}" project="${OS_LAB_PROJECT:-admin}"
+	vm_ssh devstack "cd /opt/stack && sudo -u stack bash -c $(printf '%q' "set +u; source $DEVSTACK_DIR/openrc $user $project >/dev/null 2>&1; set -u; openstack $(printf '%q ' "$@")")"
 }
 
 # user_password USER: the password the lab generated for a Keystone user.
@@ -300,9 +300,10 @@ devstack_guest_access() {
 	devstack_openstack flavor show "$GUEST_FLAVOR" >/dev/null 2>&1 ||
 		devstack_openstack flavor create --public --vcpus 2 --ram 2048 --disk 20 "$GUEST_FLAVOR" >/dev/null
 	env_set .openstack.flavor "$GUEST_FLAVOR"
-	OS_LAB_PROJECT=demo devstack_openstack keypair show lab >/dev/null 2>&1 || {
+	# key pairs belong to a user: the tests boot guests as demo
+	OS_LAB_USER=demo OS_LAB_PROJECT=demo devstack_openstack keypair show lab >/dev/null 2>&1 || {
 		scp -q "${SSH_OPTS[@]}" "$(ssh_key).pub" "$LAB_USER@$(vm_ip devstack):/tmp/lab.pub"
-		OS_LAB_PROJECT=demo devstack_openstack keypair create --public-key /tmp/lab.pub lab >/dev/null
+		OS_LAB_USER=demo OS_LAB_PROJECT=demo devstack_openstack keypair create --public-key /tmp/lab.pub lab >/dev/null
 	}
 	env_set .openstack.keypair lab
 	env_set .openstack.project demo

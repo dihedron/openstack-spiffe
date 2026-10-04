@@ -130,7 +130,11 @@ Downloads are verified like an operator would: cloud images against their distri
 
 The acceptance tests are Go tests in `test/lab/acceptance`, behind the `lab` build tag, so that `go test ./...` never runs them. They read `env.json` from the state directory (addresses, SSH key, project and image IDs, trust domain, resolved versions). They reach the VMs through the system `ssh` client and OpenStack through the `openstack` CLI on `devstack`, so they add no dependencies to `go.mod` and depend on nothing specific to the lab host.
 
-Each test boots the instances it needs and deletes them afterwards, so tests are independent and can run in any order. The scenarios of later chunks are written together with those chunks; until then they do not exist, rather than being skipped.
+Each test boots the instances it needs and deletes them afterwards, so tests are independent and can run in any order. They run one after another, since some reconfigure or restart the issuers, and each restores what it changes. The scenarios of later chunks are written together with those chunks; until then they do not exist, rather than being skipped.
+
+- `lab.sh test [-run REGEX] [-long]` runs them (`go test -tags lab` in `test/lab/acceptance`). The long scenarios (E2E-3, about 20 minutes) run only with `-long`; the others take about 20 minutes together.
+- Guests are booted in the `demo` project (or `alt_demo` for E2E-4, on `demo`'s private network shared with it), with the `lab.guest` flavor and the configuration `deploy` wrote. They are reached, when a test needs a shell in them, over SSH from the `devstack` VM's OVN metadata namespace, which sits on their private network: no floating IP is needed.
+- Every token check joins the issuer's regular log (the `token issued` records) with what journald recorded from the syslog socket, by `jti`.
 
 | ID | Scenario | Checks | Chunk |
 | --- | --- | --- | --- |
@@ -158,7 +162,7 @@ Every failing check prints what it observed (HTTP status, journal lines, agent l
 2. `up` (network, pool, VMs, DevStack, version resolution), `down`, `status`, `ssh`, `logs`. Done when `stack.sh` completes and `openstack server create` boots an instance that reaches `spire.lab`. This step settles how instances reach the lab network.
 3. Lab PKI, the dedicated vendordata user, Nova's DynamicJSON configuration, the Glance images, `snapshot` and `reset`.
 4. `deploy`: packages from `make snapshot`, configuration of both issuers (peered, syslog sink enabled), of SPIRE Server and of the guests' cloud-init. Done when an Ubuntu guest booted by Nova with that configuration attests (done Oct 4: the first real attestation; it also found a contract bug the in-process tests could not see, Nova's nesting of the vendordata response, now covered by them).
-5. The acceptance test harness and the 3.5 scenarios above. Chunk 3's open item is closed by AUD-1 and AUD-2.
+5. The acceptance test harness and the 3.5 scenarios above. Chunk 3's open item is closed by AUD-1 and AUD-2, which also found that journald does not parse RFC 5424: the syslog sink now sends RFC 3164 (issuer spec).
 6. README: a short "Lab" section (requirements, `preflight`, `up`, `test`). Issuer spec: the references to `test/install_devstack_lxd.sh` point to `test/lab/lab.sh` instead.
 
 Chunks 4 to 8 each add their own scenarios from the table and run them before their commit.

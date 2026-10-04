@@ -21,14 +21,21 @@ package() {
 	echo "${found[0]}"
 }
 
-# install_package VM FILE: installs, upgrades or reinstalls a local package.
+# install_package VM FILE BINARY: installs, upgrades, reinstalls or
+# downgrades a local package, then checks that /usr/bin/BINARY on VM is the
+# one goreleaser built. Snapshot versions carry the commit hash, which is not
+# ordered: a newer build can look older to the package manager.
 install_package() {
-	local vm="$1" file="$2" remote="/tmp/${2##*/}"
+	local vm="$1" file="$2" binary="$3" remote="/tmp/${2##*/}"
 	scp -q "${SSH_OPTS[@]}" "$file" "$LAB_USER@$(vm_ip "$vm"):$remote"
 	case "$remote" in
-	*.deb) vm_ssh "$vm" "sudo dpkg -i $remote >/dev/null && rm -f $remote" ;;
-	*.rpm) vm_ssh "$vm" "sudo rpm -U --replacepkgs --quiet $remote && rm -f $remote" ;;
-	esac
+	*.deb) vm_ssh "$vm" "sudo dpkg -i $remote >/dev/null 2>&1 && rm -f $remote" ;;
+	*.rpm) vm_ssh "$vm" "sudo rpm -U --replacepkgs --oldpackage --quiet $remote && rm -f $remote" ;;
+	esac || die "cannot install ${file##*/} on $vm"
+	local built installed
+	built="$(sha256sum "$REPO_DIR/dist/${binary}_linux_amd64_v1/$binary" | awk '{ print $1 }')"
+	installed="$(vm_ssh "$vm" "sha256sum /usr/bin/$binary" | awk '{ print $1 }')"
+	[[ "$built" == "$installed" ]] || die "/usr/bin/$binary on $vm is not the binary just built: the package manager kept another version"
 }
 
 # put VM FILE PATH OWNER MODE: writes the local FILE (- for standard input)
@@ -90,7 +97,7 @@ deploy_issuer() {
 	[[ "$(vm_attr "$vm" os)" == rhel ]] && format=rpm || format=deb
 	pki="$(pki_dir)"
 	info "installing $ISSUER_SERVICE ($format) on $vm"
-	install_package "$vm" "$(package "$ISSUER_SERVICE" "$format")"
+	install_package "$vm" "$(package "$ISSUER_SERVICE" "$format")" "$ISSUER_SERVICE"
 	issuer_config "$vm" | put "$vm" - "$ISSUER_ETC/signer.yaml" "$owner" 0640
 	issuer_env | put "$vm" - "$ISSUER_ETC/signer.env" "$owner" 0640
 	put "$vm" "$pki/$vm.lab.pem" "$ISSUER_ETC/tls.crt" "$owner" 0644
@@ -218,7 +225,7 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 SCRIPT
-	install_package spire "$(package openstack-server-plugin deb)"
+	install_package spire "$(package openstack-server-plugin deb)" openstack-server-plugin
 	put spire "$(pki_dir)/ca.pem" /etc/spire/lab-ca.pem root:root 0644
 	local checksum
 	checksum="$(vm_ssh spire "sha256sum /usr/bin/openstack-server-plugin" | awk '{ print $1 }')"
@@ -348,6 +355,8 @@ deploy_guests() {
 }
 
 lab_deploy() {
+	# idempotent: also brings a lab restored from an older snapshot up to date
+	devstack_guest_access
 	section "Build"
 	deploy_build
 	section "Issuers"

@@ -42,6 +42,8 @@ commands:
   reset                     return the lab to its baseline, in minutes
   deploy                    build the packages here and install them on the
                             VMs, configured for the lab
+  test [-run REGEX] [-long] run the acceptance tests (-long: also the long
+                            scenarios, e.g. key rotation)
   help                      show this help
 
 VMs: ${LAB_VMS[*]}
@@ -184,6 +186,27 @@ cmd_logs() {
 	fi
 }
 
+cmd_test() {
+	local args=() long=""
+	while (($#)); do
+		case "$1" in
+		-run)
+			[[ $# -ge 2 ]] || die "usage: lab.sh test [-run REGEX] [-long]"
+			args+=(-run "$2")
+			shift 2
+			;;
+		-long)
+			long=1
+			shift
+			;;
+		*) die "usage: lab.sh test [-run REGEX] [-long]" ;;
+		esac
+	done
+	[[ -n "$(env_get '.spire.trust_domain // ""')" ]] || die "the lab is not deployed: run lab.sh deploy"
+	cd "$LAB_DIR/acceptance"
+	LAB_STATE_DIR="$LAB_STATE_DIR" LAB_LONG="$long" go test -tags lab -count=1 -v -timeout 90m "${args[@]}" .
+}
+
 main() {
 	local command="${1:-help}"
 	shift || true
@@ -209,7 +232,8 @@ main() {
 		lab_deploy
 		;;
 	test)
-		die "\"test\" is not implemented yet (chunk 3.5, step 5)"
+		require_state
+		cmd_test "$@"
 		;;
 	help | -h | --help) usage ;;
 	*)
