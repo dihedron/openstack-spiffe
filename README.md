@@ -41,6 +41,13 @@ make                       # or: go build ./cmd/openstack-spire-issuer
 
 `make go-snapshot` builds release artifacts in `dist/` with goreleaser. Each application gets its own archive and its own `deb` and `rpm` packages: `openstack-spire-issuer` (which also installs the sample configurations under `/etc/openstack-spire-issuer/`), `openstack-server-plugin` and `openstack-agent-plugin`.
 
+**Supported CPUs.** All three applications (the issuer, the agent plugin and the server plugin) run on any 64-bit x86 CPU, and on arm64. For amd64, every release includes three builds of each archive and package:
+
+- the baseline build (`x86_64` archives, `_amd64` packages), for any x86-64 CPU (`GOAMD64=v1`): use it unless you know your CPUs;
+- two optimized builds, suffixed `v2` and `v3`, for CPUs of the x86-64-v2 level (roughly 2009 onwards) and x86-64-v3 level (AVX2, roughly 2015 onwards).
+
+The optimized builds behave identically and are only faster where the compiler can use the newer instructions; on an older CPU they fail at startup. The agent plugin runs inside every instance, so prefer the baseline build for it unless all your hypervisors expose an x86-64-v3 CPU model to their guests. `make` builds for the CPU level set in `GOAMD64` (default: baseline).
+
 ### Configure
 
 Annotated samples are in [examples/](examples): [signer.yaml](examples/signer.yaml), [aggregator.yaml](examples/aggregator.yaml), [signer.env](examples/signer.env) (credentials) and [nova.conf](examples/nova.conf). Unknown keys are errors, so typos never go unnoticed. Validate the files before every rollout:

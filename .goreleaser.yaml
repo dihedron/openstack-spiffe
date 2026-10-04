@@ -31,9 +31,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    # v1 runs on any x86-64 CPU; v2 and v3 are optimized variants
     goamd64:
-#      - v1
-#      - v2
+      - v1
+      - v2
       - v3
     tags:
       - osusergo
@@ -73,9 +74,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    # v1 runs on any x86-64 CPU; v2 and v3 are optimized variants
     goamd64:
- #     - v1
- #     - v2
+      - v1
+      - v2
       - v3
     tags:
       - osusergo
@@ -115,9 +117,10 @@ builds:
     goarch:
       - amd64
       - arm64
+    # v1 runs on any x86-64 CPU; v2 and v3 are optimized variants
     goamd64:
- #     - v1
- #     - v2
+      - v1
+      - v2
       - v3
     tags:
       - osusergo
@@ -163,7 +166,7 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}{{ .Arm }}{{ end }}
-      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+      {{- if and .Amd64 (ne .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
     format_overrides:
       - goos: windows
         formats:
@@ -181,7 +184,7 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}{{ .Arm }}{{ end }}
-      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+      {{- if and .Amd64 (ne .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
     format_overrides:
       - goos: windows
         formats:
@@ -199,7 +202,7 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}{{ .Arm }}{{ end }}
-      {{- if .Amd64 }}{{ .Amd64 }}{{ end }}
+      {{- if and .Amd64 (ne .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
     format_overrides:
       - goos: windows
         formats:

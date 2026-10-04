@@ -141,7 +141,6 @@ go-dev: ## perform a development build (targeting the current GOOS/GOARCH) using
 	_GO_MK_VARS_METADATA_PACKAGE="${_GO_MK_VARS_METADATA_PACKAGE}" \
 	_GO_MK_VARS_DOTENV_VAR_NAME="${_GO_MK_VARS_DOTENV_VAR_NAME}" \
 	_GORELEASER_VERSION=${_GORELEASER_VERSION} \
-	GOAMD64=$${GOAMD64:-v3} \
 	goreleaser build --single-target --snapshot --clean
 
 #
@@ -184,7 +183,6 @@ go-build: ## perform a development build for all platforms using goreleaser
 	_GO_MK_VARS_METADATA_PACKAGE="${_GO_MK_VARS_METADATA_PACKAGE}" \
 	_GO_MK_VARS_DOTENV_VAR_NAME="${_GO_MK_VARS_DOTENV_VAR_NAME}" \
 	_GORELEASER_VERSION=${_GORELEASER_VERSION} \
-	GOAMD64=$${GOAMD64:-v3} \
 	goreleaser build --snapshot --clean --single-target
 
 #

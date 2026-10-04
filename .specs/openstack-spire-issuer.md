@@ -528,6 +528,7 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
 ## Build, packaging, deployment
 
 - A standalone HTTP service written in Go, for consistency with the SPIRE plugins of the companion specs.
+- **Supported CPUs**: linux/amd64 and linux/arm64. The amd64 builds come in three levels: the baseline (`GOAMD64=v1`), which runs on any x86-64 CPU and has unsuffixed artifact names, and two optimized variants suffixed `v2` and `v3`. The baseline is the default everywhere, including in the lab; nothing in the design requires a particular CPU level. The same holds for the SPIRE plugins (companion spec).
 - Deployed close to the Nova control plane's network segment, since `nova-api-metadata` must reach it on every vendordata request; its availability is coupled to that of the metadata service. It runs as several share-nothing signer replicas behind a load balancer (the target of Nova's DynamicJSON configuration), in one of two topologies:
   - **Peered signers**: each replica lists all the others as peers, and the SPIRE Server-side plugin fetches `/.well-known/jwks.json` through a load balancer in front of the replicas, pinning the signers' certificate. No other deployment is needed.
   - **Signers plus aggregator**: one or more JWKS aggregator instances behind their own load balancer poll the replicas' `/jwks/local.json` and serve the SPIRE Server-side plugin, for when it must not reach the Nova-facing network.
