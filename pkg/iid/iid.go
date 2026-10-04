@@ -360,19 +360,23 @@ func ParseClaims(payload []byte) (Claims, error) {
 	return c, nil
 }
 
-// VendorDataResponse is the body returned to Nova; its only key must match
-// TargetName so that the agent plugin can rely on a fixed lookup path.
+// VendorDataResponse is the part of vendor_data2.json the agent plugin
+// reads: Nova nests every DynamicJSON target's response under the target's
+// name, so the issuer's VendorData appears under TargetName. Other targets
+// may sit next to it.
 type VendorDataResponse struct {
 	Target VendorData `json:"openstack_iid"`
 }
 
-// VendorData is the per-target content of the vendordata response.
+// VendorData is the body the issuer returns to Nova for the TargetName
+// target.
 type VendorData struct {
 	// JWT is the compact-serialized signed token.
 	JWT string `json:"jwt"`
 }
 
-// NewVendorDataResponse wraps a signed token into the vendordata response.
+// NewVendorDataResponse returns the vendor_data2.json content an instance
+// sees for a token (e.g. to fake Nova's metadata service in tests).
 func NewVendorDataResponse(token string) VendorDataResponse {
 	return VendorDataResponse{Target: VendorData{JWT: token}}
 }

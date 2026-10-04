@@ -322,11 +322,24 @@ func (s *system) attest(t *testing.T, replica, token, instance string) (int, str
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, ""
 	}
+	return resp.StatusCode, instanceToken(t, data)
+}
+
+// instanceToken returns the token an instance finds in vendor_data2.json for
+// the issuer's /attest response body: Nova nests every DynamicJSON target's
+// response under the target's name, and the agent plugin reads it back with
+// iid.VendorDataResponse.
+func instanceToken(t *testing.T, body []byte) string {
+	t.Helper()
+	vendorData := fmt.Appendf(nil, `{"static":{},%q:%s}`, iid.TargetName, body)
 	var vd iid.VendorDataResponse
-	if err := json.Unmarshal(data, &vd); err != nil {
-		t.Fatalf("decoding %s: %v", data, err)
+	if err := json.Unmarshal(vendorData, &vd); err != nil {
+		t.Fatalf("decoding vendor_data2.json %s: %v", vendorData, err)
 	}
-	return resp.StatusCode, vd.Target.JWT
+	if vd.Target.JWT == "" {
+		t.Fatalf("no token at %s.jwt in vendor_data2.json %s", iid.TargetName, vendorData)
+	}
+	return vd.Target.JWT
 }
 
 // keysAt fetches the JWK Set at url, by kid.

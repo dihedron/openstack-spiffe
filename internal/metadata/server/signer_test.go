@@ -235,9 +235,14 @@ func (h *harness) verify(t *testing.T, jwt string) (iid.Header, iid.Claims) {
 func attestToken(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	body, _ := io.ReadAll(resp.Body)
+	// as an instance finds it: Nova nests the response under the target name
+	vendorData := fmt.Appendf(nil, `{%q:%s}`, iid.TargetName, body)
 	var vd iid.VendorDataResponse
-	if err := json.Unmarshal(body, &vd); err != nil {
-		t.Fatalf("decoding %s: %v", body, err)
+	if err := json.Unmarshal(vendorData, &vd); err != nil {
+		t.Fatalf("decoding vendor_data2.json %s: %v", vendorData, err)
+	}
+	if vd.Target.JWT == "" {
+		t.Fatalf("no token at %s.jwt in vendor_data2.json %s", iid.TargetName, vendorData)
 	}
 	return vd.Target.JWT
 }

@@ -133,7 +133,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := json.Marshal(iid.NewVendorDataResponse(issued.Token))
+	// Nova nests the body under the target name: vendor_data2.json then
+	// holds the token at openstack_iid.jwt (iid.VendorDataResponse)
+	response, err := json.Marshal(iid.VendorData{JWT: issued.Token})
 	if err != nil {
 		log.ErrorContext(ctx, "cannot encode response", "error", err)
 		fail(w, http.StatusInternalServerError)

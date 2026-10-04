@@ -143,7 +143,9 @@ func TestHappyPath(t *testing.T) {
 	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("Cache-Control %q, want no-store", cc)
 	}
-	if got, want := strings.TrimSpace(w.Body.String()), `{"openstack_iid":{"jwt":"h.p.s"}}`; got != want {
+	// Nova nests it under the target name: vendor_data2.json then holds
+	// openstack_iid.jwt, where the agent plugin looks
+	if got, want := strings.TrimSpace(w.Body.String()), `{"jwt":"h.p.s"}`; got != want {
 		t.Fatalf("body %s, want %s", got, want)
 	}
 	if f.limiter.keys[0] != instanceID {
@@ -381,13 +383,13 @@ func TestWithRealComponents(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
-	var resp iid.VendorDataResponse
+	var resp iid.VendorData
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	parts := strings.Split(resp.Target.JWT, ".")
+	parts := strings.Split(resp.JWT, ".")
 	if len(parts) != 3 {
-		t.Fatalf("jwt %q is not a compact JWS", resp.Target.JWT)
+		t.Fatalf("jwt %q is not a compact JWS", resp.JWT)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
