@@ -30,7 +30,7 @@ All VMs run on the lab host's libvirt (`qemu:///system`) and share a dedicated N
 
 | VM | OS (default) | Role | Default size (vCPU / RAM / disk) |
 | --- | --- | --- | --- |
-| `devstack` | Ubuntu 24.04 LTS | DevStack all-in-one: Keystone, Nova (with `nova-api-metadata` and nested KVM compute), Neutron, Glance | 8 / 24 GiB / 100 GiB |
+| `devstack` | Ubuntu 24.04 LTS | DevStack all-in-one: Keystone, Nova (with `nova-api-metadata` and nested KVM compute), Neutron, Glance, every API behind DevStack's TLS proxy | 8 / 24 GiB / 100 GiB |
 | `issuer-a` | Ubuntu 24.04 LTS | Signer replica, installed from the deb package | 2 / 3 GiB / 20 GiB |
 | `issuer-b` | AlmaLinux 10 | Signer replica, installed from the rpm package | 2 / 3 GiB / 20 GiB |
 | `spire` | Ubuntu 24.04 LTS | SPIRE Server with `openstack-server-plugin` (deb package) | 2 / 3 GiB / 20 GiB |
@@ -44,10 +44,12 @@ Inside DevStack, Nova boots the instances under test from two Glance images: the
 1. An instance reads `vendor_data2.json` from `169.254.169.254`. Neutron's metadata proxy forwards the request to `nova-api-metadata` on `devstack`.
 2. `nova-api-metadata` calls `https://issuer-a.lab:8443/attest` as the dedicated vendordata user (S-3), from `devstack`'s address.
 3. The issuer replicas peer with each other: each serves the merged JWK Set on `/.well-known/jwks.json`.
-4. SPIRE Agent in the instance sends the token to SPIRE Server on `spire.lab:8081`. The server plugin fetches the JWK Set from `issuer-a.lab` and `issuer-b.lab`, pinned to the lab CA.
+4. SPIRE Agent in the instance sends the token to SPIRE Server on `spire.lab:8081`. The server plugin fetches the merged JWK Set from `https://issuer-a.lab:8443/.well-known/jwks.json`, pinned to the lab CA: the replicas peer, so it carries both replicas' keys.
 5. Both issuers and the server plugin send their audit records to their host's journald through `/dev/log`.
 
 There is no load balancer. Nova calls a single target URL, so `issuer-a` serves every vendordata call; `issuer-b` takes part through peering and key rotation, and the acceptance tests call its `/attest` directly as the vendordata user from `devstack`. A TLS-terminating load balancer would hide Nova's client certificate from the issuers, which NET-2 needs; `client_address.trusted_proxies` stays covered by the unit and integration tests.
+
+**OpenStack over TLS**: the issuer refuses an `OS_AUTH_URL` that is not https, since its own credentials must not travel in clear. DevStack therefore runs with its TLS proxy (`tls-proxy`), which puts every API behind https with DevStack's own CA; the issuers pin that CA as `keystone.ca_cert_path`, and Nova's `[vendordata_dynamic_auth]` uses it as `cafile` (Nova's Python stack does not use the system's trust store). The issuers call Keystone and Nova as their own service user, `spire-issuer`, with the `admin` role on the `service` project, as the README prescribes.
 
 **Lab PKI**: the bring-up creates a lab CA (ECDSA P-256). It issues the issuers' server certificates (`issuer-a.lab` and `issuer-b.lab`, with their names and addresses) and the client certificate Nova presents to `/attest` (chunk 4). SPIRE Server needs none: it runs its own CA, and the server plugin only needs to trust the issuers. The CA bundle is what `jwks_ca_cert_path`, `peers.ca_cert_path` and Nova's `vendordata_dynamic_ssl_certfile` pin. Keys never leave the lab's state directory.
 
@@ -111,7 +113,13 @@ Everything lives in `test/lab/`. `lab.sh` is the entry point. Each command is id
 - `preflight [--no-install]`: see above.
 - `up`: runs `preflight`, generates the lab PKI, creates the storage pool, network and VMs from cloud images with cloud-init, runs DevStack's `stack.sh`, then configures DevStack for the lab: the dedicated vendordata user (`nova-vendordata`, with the `service` role on the `service` project), Nova's DynamicJSON target (`openstack_iid` at `https://issuer-a.lab:8443/attest`, verified against the lab CA, not fatal on failure), the guest images in Glance, a `lab.guest` flavor, and the lab's SSH key with SSH and ICMP access in the `demo` project. A smoke test then boots a CirrOS instance that reaches `spire.lab` by address and by name and reads its vendordata; Nova's log tells whether it called the target as the vendordata user (a connection failure while no issuer runs) or could not authenticate. On its first success, `up` takes the snapshot, then runs `deploy`. Most of the time goes into DevStack's `stack.sh`, which runs as a systemd unit on `devstack` so that a dropped SSH connection cannot interrupt it; `up` reports its progress. A second `up` on a complete lab only verifies it, so `up` can always be rerun after a failure.
 - `snapshot` / `reset`: saves the running VMs as the lab's baseline (refusing while DevStack has instances, and asking before replacing a snapshot), or returns every VM to it, in under a minute. This is the normal way to start a test session. Snapshots are internal to the VMs' disks and include their memory: DevStack does not survive a cold reboot (the public bridge's address and its NAT rule are not persistent), so reverting resumes the running VMs rather than booting them. The VMs then resume at the snapshot's time, so `reset` sets each VM's clock from the lab host's, waits for Nova's compute service to report in again, and runs the smoke test.
-- `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser), serves `dist/` from the lab host on the lab network, installs or upgrades them on `issuer-a`, `issuer-b` and `spire`, writes their configuration and restarts the services. Nothing is compiled in the VMs: they only install packages, as a production host would. This is the inner loop after a code change.
+- `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser) and installs the baseline amd64 ones, as an operator would; nothing is compiled in the VMs. It then:
+  - installs `openstack-spire-issuer` on `issuer-a` (deb) and `issuer-b` (rpm) and writes their configuration: peered with each other, the syslog sink enabled, `nova-vendordata` listed by ID in `keystone.allowed_users`, DevStack's CA for Keystone and Nova, the lab CA for the peer, the server certificate with its key readable by the service user only, and `signer.env` with the `spire-issuer` credentials. `config check` runs as the service user, the service starts, and `deploy` waits for both replicas' `/readiness` (about 2 minutes: each first key is published ahead of use);
+  - installs the pinned SPIRE release (verified) and `openstack-server-plugin` (deb) on `spire`, with a systemd unit, the trust domain `openstack.lab`, the plugin's checksum, the merged JWK Set URL and `allowed_project_ids` set to the `demo` project, and waits for SPIRE Server's health check;
+  - publishes what the guests install (the SPIRE tarball and the agent plugin's deb and rpm) on `http://spire.lab:8080/`, served from `spire` (instances cannot be reached with `scp`, and the lab host runs no services);
+  - writes the guests' cloud-init configurations (`guest/ubuntu.yaml`, `guest/rhel.yaml` in the state directory): they install the agent plugin package and SPIRE (verifying the tarball's checksum again), with SPIRE's trust bundle embedded rather than downloaded, the plugin's checksum, and a SPIRE Agent unit.
+
+  `deploy` after `reset` is the inner loop after a code change.
 - `test [-run REGEX]`: runs the acceptance tests.
 - `status`, `ssh <vm>`, `logs <vm> [unit]`: inspection.
 - `down`: destroys the VMs with their snapshots, the network, the storage pool and the state directory, after confirmation. The download cache stays.
@@ -149,7 +157,7 @@ Every failing check prints what it observed (HTTP status, journal lines, agent l
 1. `lab.env` and `lab.sh preflight`, with every check above. Done when preflight reports correctly on this machine, and, with `--no-install`, in a clean Ubuntu and a clean Fedora or RHEL-like container (the OS and software checks; the virtualization checks need a real host).
 2. `up` (network, pool, VMs, DevStack, version resolution), `down`, `status`, `ssh`, `logs`. Done when `stack.sh` completes and `openstack server create` boots an instance that reaches `spire.lab`. This step settles how instances reach the lab network.
 3. Lab PKI, the dedicated vendordata user, Nova's DynamicJSON configuration, the Glance images, `snapshot` and `reset`.
-4. `deploy`: packages from `make snapshot`, configuration of both issuers (peered, syslog sink enabled), of SPIRE Server and of the guests' cloud-init.
+4. `deploy`: packages from `make snapshot`, configuration of both issuers (peered, syslog sink enabled), of SPIRE Server and of the guests' cloud-init. Done when an Ubuntu guest booted by Nova with that configuration attests (done Oct 4: the first real attestation; it also found a contract bug the in-process tests could not see, Nova's nesting of the vendordata response, now covered by them).
 5. The acceptance test harness and the 3.5 scenarios above. Chunk 3's open item is closed by AUD-1 and AUD-2.
 6. README: a short "Lab" section (requirements, `preflight`, `up`, `test`). Issuer spec: the references to `test/install_devstack_lxd.sh` point to `test/lab/lab.sh` instead.
 

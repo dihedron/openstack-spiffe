@@ -68,6 +68,9 @@ LIBVIRT_TYPE=kvm
 LIBVIRT_CPU_MODE=host-passthrough
 LOGFILE=$DEVSTACK_LOG
 LOG_COLOR=False
+# every API behind DevStack's TLS proxy, with its own CA: the issuer only
+# talks to Keystone and Nova over https
+enable_service tls-proxy
 # only what the lab needs: Keystone, Nova (with the metadata API), Neutron,
 # Glance and Placement
 disable_service horizon
@@ -186,7 +189,10 @@ issuer_listening() {
 # --- OpenStack configuration (chunk 3.5, step 3) --------------------------------
 
 readonly VENDORDATA_USER=nova-vendordata
+readonly ISSUER_USER=spire-issuer
 readonly GUEST_FLAVOR=lab.guest
+# DevStack's CA chain, which signs its TLS proxy's certificates
+readonly DEVSTACK_CA=/opt/stack/data/CA/int-ca/ca-chain.pem
 
 # devstack_openstack ARGS...: runs the openstack CLI on devstack as admin of
 # the admin project (or as PROJECT with OS_LAB_PROJECT=PROJECT).
@@ -195,24 +201,45 @@ devstack_openstack() {
 	vm_ssh devstack "cd /opt/stack && sudo -u stack bash -c $(printf '%q' "set +u; source $DEVSTACK_DIR/openrc admin $project >/dev/null 2>&1; set -u; openstack $(printf '%q ' "$@")")"
 }
 
-vendordata_password() {
-	local file="$LAB_STATE_DIR/$VENDORDATA_USER-password"
+# user_password USER: the password the lab generated for a Keystone user.
+user_password() {
+	local file="$LAB_STATE_DIR/$1-password"
 	[[ -f "$file" ]] || openssl rand -hex 16 >"$file"
 	cat "$file"
 }
 
-# devstack_vendordata_user: the dedicated Keystone user Nova authenticates to
-# the issuers with (S-3), with the service role on the service project.
-devstack_vendordata_user() {
+vendordata_password() { user_password "$VENDORDATA_USER"; }
+
+# devstack_keystone_url: Keystone's public endpoint, behind the TLS proxy.
+devstack_keystone_url() { echo "https://$(vm_ip devstack)/identity/v3"; }
+
+# devstack_service_user USER ROLE DESCRIPTION: a Keystone user with ROLE on
+# the service project, and a password the lab generated; prints its ID.
+devstack_service_user() {
 	local id
-	id="$(devstack_openstack user show --domain Default -f value -c id "$VENDORDATA_USER" 2>/dev/null || true)"
+	id="$(devstack_openstack user show --domain Default -f value -c id "$1" 2>/dev/null || true)"
 	if [[ -z "$id" ]]; then
-		info "creating the Keystone user $VENDORDATA_USER"
-		id="$(devstack_openstack user create --domain Default --password "$(vendordata_password)" \
-			--description "openstack-spiffe lab: Nova's vendordata calls to the issuers" -f value -c id "$VENDORDATA_USER")"
+		info "creating the Keystone user $1" >&2
+		id="$(devstack_openstack user create --domain Default --password "$(user_password "$1")" \
+			--description "openstack-spiffe lab: $3" -f value -c id "$1")"
 	fi
-	devstack_openstack role add --user "$id" --project service --project-domain Default service
-	env_set .openstack.vendordata_user_id "$id"
+	devstack_openstack role add --user "$id" --project service --project-domain Default "$2"
+	echo "$id"
+}
+
+# devstack_users: the dedicated user Nova authenticates to the issuers with
+# (S-3), and the issuers' own service user, which validates Nova's tokens and
+# reads projects and servers (admin on the service project, as the README
+# prescribes).
+devstack_users() {
+	env_set .openstack.vendordata_user_id "$(devstack_service_user "$VENDORDATA_USER" service "Nova's vendordata calls to the issuers")"
+	env_set .openstack.issuer_user_id "$(devstack_service_user "$ISSUER_USER" admin "the issuers' own Keystone and Nova calls")"
+}
+
+# devstack_ca: copies DevStack's CA chain into the lab's PKI directory, for
+# the issuers to verify Keystone and Nova.
+devstack_ca() {
+	vm_ssh devstack "sudo cat $DEVSTACK_CA" >"$(pki_dir)/openstack-ca.pem"
 }
 
 # devstack_vendordata_config: registers the issuer as Nova's openstack_iid
@@ -234,7 +261,9 @@ iniset -sudo $conf api vendordata_dynamic_connect_timeout 5
 iniset -sudo $conf api vendordata_dynamic_read_timeout 5
 iniset -sudo $conf api vendordata_dynamic_failure_fatal False
 iniset -sudo $conf vendordata_dynamic_auth auth_type password
-iniset -sudo $conf vendordata_dynamic_auth auth_url "http://$keystone/identity/v3"
+iniset -sudo $conf vendordata_dynamic_auth auth_url "https://$keystone/identity/v3"
+# Nova's Python stack has its own CA bundle, not the system's
+iniset -sudo $conf vendordata_dynamic_auth cafile /opt/stack/data/CA/int-ca/ca-chain.pem
 iniset -sudo $conf vendordata_dynamic_auth username "$user"
 iniset -sudo $conf vendordata_dynamic_auth password "$password"
 iniset -sudo $conf vendordata_dynamic_auth user_domain_name Default
@@ -277,16 +306,24 @@ devstack_guest_access() {
 	}
 	env_set .openstack.keypair lab
 	env_set .openstack.project demo
-	local rule
+	local project group rule output
+	project="$(devstack_openstack project show demo -f value -c id)"
+	env_set .openstack.project_id "$project"
+	# by ID: several groups named "default" are visible to demo
+	group="$(devstack_openstack security group list --project "$project" -f value -c ID -c Name | awk '$2 == "default" { print $1 }')"
+	[[ -n "$group" ]] || die "the demo project has no default security group"
 	for rule in "--protocol icmp" "--protocol tcp --dst-port 22"; do
 		# shellcheck disable=SC2086 # rule is a word list
-		OS_LAB_PROJECT=demo devstack_openstack security group rule create --ingress $rule default >/dev/null 2>&1 || true
+		output="$(devstack_openstack security group rule create --ingress $rule "$group" 2>&1)" ||
+			[[ "$output" == *"already exists"* || "$output" == *Conflict* ]] ||
+			die "cannot open the demo project's default security group: $output"
 	done
 }
 
 # devstack_configure: everything step 3 adds to DevStack.
 devstack_configure() {
-	devstack_vendordata_user
+	devstack_users
+	devstack_ca
 	devstack_vendordata_config
 	devstack_images
 	devstack_guest_access

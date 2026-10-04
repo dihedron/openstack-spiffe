@@ -20,6 +20,8 @@ source "$LAB_DIR/lib/devstack.sh"
 source "$LAB_DIR/lib/pki.sh"
 # shellcheck source=lib/snapshot.sh
 source "$LAB_DIR/lib/snapshot.sh"
+# shellcheck source=lib/deploy.sh
+source "$LAB_DIR/lib/deploy.sh"
 
 usage() {
 	cat <<USAGE
@@ -38,6 +40,8 @@ commands:
   snapshot                  save the running lab as its baseline (up takes
                             one when there is none)
   reset                     return the lab to its baseline, in minutes
+  deploy                    build the packages here and install them on the
+                            VMs, configured for the lab
   help                      show this help
 
 VMs: ${LAB_VMS[*]}
@@ -200,8 +204,12 @@ main() {
 		require_state
 		lab_reset
 		;;
-	deploy | test)
-		die "\"$command\" is not implemented yet (chunk 3.5, steps 4 and 5)"
+	deploy)
+		require_state
+		lab_deploy
+		;;
+	test)
+		die "\"test\" is not implemented yet (chunk 3.5, step 5)"
 		;;
 	help | -h | --help) usage ;;
 	*)
