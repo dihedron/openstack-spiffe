@@ -46,6 +46,30 @@ resolve_spire() {
 	echo "$version $sha"
 }
 
+# resolve_otelcol: prints "VERSION SHA256" of the OpenTelemetry Collector
+# release (core distribution) to use: LAB_OTELCOL_VERSION with
+# LAB_OTELCOL_SHA256, or the most recent release, with the SHA-256 published
+# next to its tarball.
+resolve_otelcol() {
+	local version="$LAB_OTELCOL_VERSION" sha="$LAB_OTELCOL_SHA256"
+	if [[ -n "$version" ]]; then
+		[[ -n "$sha" ]] || die "LAB_OTELCOL_VERSION=$version is pinned without LAB_OTELCOL_SHA256"
+		echo "$version $sha"
+		return
+	fi
+	version="$(curl -fsSL 'https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/releases/latest' |
+		jq -r '.tag_name | ltrimstr("v")')"
+	[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot find the latest OpenTelemetry Collector release"
+	sha="$(curl -fsSL "$(otelcol_url "$version").sha256" | awk '{ print $1; exit }')"
+	[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "cannot read the SHA-256 of the OpenTelemetry Collector $version"
+	echo "$version $sha"
+}
+
+# otelcol_url VERSION: the linux-amd64 tarball of a collector release.
+otelcol_url() {
+	echo "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$1/otelcol_$1_linux_amd64.tar.gz"
+}
+
 # spire_url VERSION: the linux-amd64 tarball of a SPIRE release.
 spire_url() {
 	echo "https://github.com/spiffe/spire/releases/download/v$1/spire-$1-linux-amd64-musl.tar.gz"

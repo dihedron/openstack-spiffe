@@ -143,7 +143,34 @@ attest:
 audit:
   syslog:
     enabled: true
+$(issuer_metrics "$vm")
 YAML
+}
+
+# issuer_metrics VM: the metrics of an issuer replica. issuer-a serves them
+# for scraping on loopback, with per-project counts (MET-1); issuer-b pushes
+# them to the collector on spire (MET-2).
+issuer_metrics() {
+	if [[ "$1" == issuer-a ]]; then
+		cat <<YAML
+metrics:
+  enabled: true
+  exporter: prometheus
+  project_attribute: true
+YAML
+	else
+		cat <<YAML
+metrics:
+  enabled: true
+  exporter: otlp
+  runtime: false                                          # keeps the collector's debug output short
+  otlp:
+    endpoint: "https://spire.lab:$OTELCOL_PORT"
+    ca_cert_path: "$ISSUER_ETC/lab-ca.pem"
+    interval: "10s"
+    timeout: "5s"
+YAML
+	fi
 }
 
 issuer_env() {
@@ -199,6 +226,86 @@ wait_issuer_ready() {
 	info "$vm is ready"
 }
 
+# ensure_otelcol_version: resolves the collector release once, at the first
+# deploy, and records it in env.json.
+ensure_otelcol_version() {
+	[[ -n "$(env_get '.versions.otelcol // empty')" ]] && return
+	local otelcol
+	otelcol="$(resolve_otelcol)"
+	env_set .versions.otelcol "${otelcol% *}"
+	env_set .versions.otelcol_sha256 "${otelcol#* }"
+}
+
+# deploy_collector: the OpenTelemetry Collector (core distribution) on spire,
+# receiving OTLP/HTTP over TLS with the lab's spire.lab certificate and
+# writing what it receives to its journal (the debug exporter), under its own
+# user. The tarball is verified on the lab host and copied: the VM downloads
+# nothing.
+deploy_collector() {
+	ensure_otelcol_version
+	pki_issue spire.lab serverAuth "DNS:spire.lab,IP:$(vm_ip spire)"
+	local version tarball
+	version="$(env_get .versions.otelcol)"
+	info "installing the OpenTelemetry Collector $version on spire"
+	tarball="$(fetch "$(otelcol_url "$version")" "$(env_get .versions.otelcol_sha256)")"
+	scp -q "${SSH_OPTS[@]}" "$tarball" "$LAB_USER@$(vm_ip spire):/tmp/otelcol.tar.gz"
+	vm_ssh spire "sudo bash -s -- $OTELCOL_PORT" <<'SCRIPT'
+set -euo pipefail
+port="$1"
+id otelcol >/dev/null 2>&1 || useradd --system --home-dir /var/lib/otelcol --shell /usr/sbin/nologin otelcol
+mkdir -p /opt/otelcol /etc/otelcol
+tar -xzf /tmp/otelcol.tar.gz -C /opt/otelcol otelcol && rm -f /tmp/otelcol.tar.gz
+cat >/etc/otelcol/config.yaml <<YAML
+# written by the lab's deploy (test/lab/lib/deploy.sh)
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:$port"
+        tls:
+          cert_file: /etc/otelcol/tls.crt
+          key_file: /etc/otelcol/tls.key
+exporters:
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+  telemetry:
+    metrics:
+      level: none
+YAML
+cat >/etc/systemd/system/otelcol.service <<UNIT
+[Unit]
+Description=OpenTelemetry Collector (openstack-spiffe lab)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=otelcol
+ExecStart=/opt/otelcol/otelcol --config /etc/otelcol/config.yaml
+Restart=on-failure
+# the debug exporter is verbose: journald must keep all of it
+LogRateLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+SCRIPT
+	put spire "$(pki_dir)/spire.lab.pem" /etc/otelcol/tls.crt root:otelcol 0644
+	put spire "$(pki_dir)/spire.lab.key" /etc/otelcol/tls.key root:otelcol 0640
+	vm_ssh spire "sudo systemctl enable --quiet otelcol && sudo systemctl restart otelcol"
+	local deadline=$((SECONDS + 60))
+	until vm_ssh spire "sudo ss -ltn | grep -q ':$OTELCOL_PORT '"; do
+		((SECONDS < deadline)) || die "the OpenTelemetry Collector does not listen on spire:$OTELCOL_PORT (lab.sh logs spire otelcol)"
+		sleep 2
+	done
+	info "the OpenTelemetry Collector listens on spire.lab:$OTELCOL_PORT"
+}
+
 # deploy_issuers: both replicas, which peer with each other.
 deploy_issuers() {
 	local vm
@@ -218,6 +325,8 @@ readonly SPIRE_HOME=/opt/spire
 readonly SPIRE_SOCKET=/var/lib/spire/server/api.sock
 readonly ARTIFACTS=/srv/lab-artifacts
 readonly ARTIFACTS_PORT=8080
+# the OpenTelemetry Collector's OTLP/HTTP port on spire (MET-2)
+readonly OTELCOL_PORT=4318
 
 spire_tarball() {
 	fetch "$(spire_url "$(env_get .versions.spire)")" "$(env_get .versions.spire_sha256)"
@@ -455,6 +564,9 @@ lab_deploy() {
 	devstack_vendordata_config
 	section "Build"
 	deploy_build
+	section "Metrics"
+	# before the issuers: issuer-b pushes its metrics to it
+	deploy_collector
 	section "Issuers"
 	deploy_issuers
 	section "SPIRE"

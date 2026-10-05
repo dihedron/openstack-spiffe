@@ -75,6 +75,8 @@ ensure_pki() {
 	done
 	# presented by nova-api-metadata to /attest (chunk 4)
 	pki_issue nova-vendordata clientAuth
+	# the OpenTelemetry Collector receiving issuer-b's metrics (metrics)
+	pki_issue spire.lab serverAuth "DNS:spire.lab,IP:$(vm_ip spire)"
 	# signs the lab's builds (chunk 8)
 	pki_packaging_key
 }
