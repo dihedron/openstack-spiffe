@@ -161,7 +161,22 @@ Merge [examples/agent.conf](examples/agent.conf) and [examples/server.conf](exam
 - **Server: `jwks_url`.** Point it at the merged JWK Set, never at a single replica's `/jwks/local.json`. That is either the JWKS aggregator's `/.well-known/jwks.json`, or the peered signer replicas' `/.well-known/jwks.json` behind their load balancer.
 - **Server: `jwks_ca_cert_path`.** Pin the endpoint's CA with it: whoever can tamper with the JWK Set can add a key.
 - **Server: trust domain.** It comes from SPIRE Server's own configuration.
-- **Server: `allowed_project_ids`.** Optionally restricts attestation to the listed projects.
+- **Server: `allowed_project_ids`.** Optionally restricts attestation to the listed projects. Without it, every SPIRE Server trusting the same issuer accepts every instance.
+- **Server: `allowed_tag_keys`.** Optionally limits `tag` selectors to the listed keys; other tags are ignored.
+- **Server: `reattest`.** `true` (the default) lets an agent renew its SVID by re-attesting with a fresh token, so its identity lapses at the next renewal once its instance is deleted; a stolen token, though, can displace the agent at any time. `false` is trust on first use: a token stolen after the first attestation is useless, but an agent that lost its state, and every agent of a deleted instance, must be evicted by an operator (`spire-server agent evict`).
+- **Server: `reattest_alert_window`.** An instance attesting again within this window (5m by default) is logged as `possible token theft: instance re-attested`. The attestation is still accepted.
+- **Server: `audit_syslog`.** With `enabled = true`, the audit records (`agent_attested`, whose `jti` matches the issuer's `token_issued` record, and `reattest_alert`) also go to the local syslog daemon, independently of SPIRE Server's log level.
+- **Server: `agent_ttl`.** Keep SPIRE Server's `agent_ttl` at 1h or less (its default): it bounds how long the identity of a deleted instance, or a stolen one, stays usable.
+
+`Configure` logs a warning for each of `jwks_ca_cert_path`, `allowed_project_ids` and `allowed_tag_keys` left unset, and for `audit_syslog` disabled.
+
+**Registration entries.** `tag` and `hostname` selectors carry values that any member of the instance's project sets through the OpenStack API. A registration entry using them must also carry an `openstack_iid:project_id` or `openstack_iid:instance_id` selector: an entry selecting only on `openstack_iid:tag:role:db` matches an instance of any project that sets that tag.
+
+```sh
+# the database nodes of one project
+spire-server entry create -node -spiffeID spiffe://example.org/db-nodes \
+  -selector openstack_iid:project_id:<project_id> -selector openstack_iid:tag:role:db
+```
 
 ### Replay protection
 

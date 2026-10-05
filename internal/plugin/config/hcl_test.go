@@ -140,3 +140,45 @@ plugins {
 		t.Fatal("PluginData found a plugin that is not configured")
 	}
 }
+
+type withBlock struct {
+	URL   string       `hcl:"url"`
+	Block *blockConfig `hcl:"block"`
+}
+
+type blockConfig struct {
+	Enabled bool   `hcl:"enabled"`
+	Socket  string `hcl:"socket"`
+}
+
+var withBlockKeys = []string{"url", "block.enabled", "block.socket"}
+
+func TestDecodeBlock(t *testing.T) {
+	for name, doc := range map[string]string{
+		"hcl":  "url = \"x\"\nblock {\n  enabled = true\n  socket = \"/run/log\"\n}\n",
+		"json": `{"url": "x", "block": {"enabled": true, "socket": "/run/log"}}`,
+	} {
+		var v withBlock
+		if err := Decode(doc, &v, withBlockKeys); err != nil {
+			t.Fatalf("%s: Decode: %v", name, err)
+		}
+		if v.Block == nil || !v.Block.Enabled || v.Block.Socket != "/run/log" {
+			t.Fatalf("%s: decoded %+v", name, v.Block)
+		}
+	}
+	var v withBlock
+	if err := Decode("url = \"x\"\n", &v, withBlockKeys); err != nil || v.Block != nil {
+		t.Fatalf("without the block: %+v, %v", v.Block, err)
+	}
+}
+
+func TestDecodeUnknownBlockKeys(t *testing.T) {
+	var v withBlock
+	err := Decode("block {\n  enabled = true\n  sockt = \"/run/log\"\n}\n", &v, withBlockKeys)
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "block.sockt") {
+		t.Fatalf("a typo in a block: %v, want ErrInvalid naming block.sockt", err)
+	}
+	if err := Decode("bloc {\n  enabled = true\n}\n", &v, withBlockKeys); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "bloc") {
+		t.Fatalf("an unknown block: %v, want ErrInvalid", err)
+	}
+}

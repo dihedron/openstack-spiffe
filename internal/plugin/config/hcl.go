@@ -21,24 +21,15 @@ import (
 var ErrInvalid = errors.New("invalid plugin configuration")
 
 // Decode parses the configuration into v, a pointer to a struct with hcl
-// tags, after checking that every top-level key is one of known.
+// tags, after checking that every key is one of known. A block's keys are
+// listed as "block.key" (e.g. "audit_syslog.enabled"), and checked too.
 func Decode(configuration string, v any, known []string) error {
 	file, err := hcl.Parse(configuration)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	if list, ok := file.Node.(*ast.ObjectList); ok {
-		var unknown []string
-		for _, item := range list.Items {
-			if len(item.Keys) == 0 {
-				continue
-			}
-			key := strings.Trim(item.Keys[0].Token.Text, `"`)
-			if !slices.Contains(known, key) && !slices.Contains(unknown, key) {
-				unknown = append(unknown, key)
-			}
-		}
-		if len(unknown) > 0 {
+		if unknown := unknownKeys(list, "", known); len(unknown) > 0 {
 			return fmt.Errorf("%w: unknown keys %s (known: %s)", ErrInvalid, strings.Join(unknown, ", "), strings.Join(known, ", "))
 		}
 	}
@@ -46,6 +37,38 @@ func Decode(configuration string, v any, known []string) error {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return nil
+}
+
+// unknownKeys returns the keys of list, under prefix, that known does not
+// list, descending into the blocks known lists keys of.
+func unknownKeys(list *ast.ObjectList, prefix string, known []string) []string {
+	var unknown []string
+	add := func(key string) {
+		if !slices.Contains(unknown, key) {
+			unknown = append(unknown, key)
+		}
+	}
+	for _, item := range list.Items {
+		if len(item.Keys) == 0 {
+			continue
+		}
+		key := prefix + strings.Trim(item.Keys[0].Token.Text, `"`)
+		isBlock := slices.ContainsFunc(known, func(k string) bool { return strings.HasPrefix(k, key+".") })
+		switch {
+		case isBlock:
+			object, ok := item.Val.(*ast.ObjectType)
+			if !ok {
+				add(key + " (a block is expected)")
+				continue
+			}
+			for _, k := range unknownKeys(object.List, key+".", known) {
+				add(k)
+			}
+		case !slices.Contains(known, key):
+			add(key)
+		}
+	}
+	return unknown
 }
 
 // Duration parses the duration set for key, returning def if the value is

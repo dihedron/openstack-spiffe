@@ -379,7 +379,7 @@ func TestSPIFFEIDAndSelectors(t *testing.T) {
 		"tag:role:jboss",
 		"tag:url:https://example.org:8443/x",
 	}
-	if got := Selectors(c); !slices.Equal(got, want) {
+	if got := Selectors(c, nil); !slices.Equal(got, want) {
 		t.Fatalf("Selectors = %v, want %v", got, want)
 	}
 
@@ -387,7 +387,7 @@ func TestSPIFFEIDAndSelectors(t *testing.T) {
 	c.Custom = map[string]string{"country": "italy"}
 	want = append(want,
 		"availability_zone:az-1", "flavor:m1.large", "user_id:9f8e", "project_name:billing", "domain_id:default")
-	if got := Selectors(c); !slices.Equal(got, want) {
+	if got := Selectors(c, nil); !slices.Equal(got, want) {
 		t.Fatalf("Selectors with enrichment = %v, want %v (custom claims never become selectors)", got, want)
 	}
 }
