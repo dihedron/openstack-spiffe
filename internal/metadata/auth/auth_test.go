@@ -453,3 +453,77 @@ func TestIdentityFromWithoutMiddleware(t *testing.T) {
 		t.Fatalf("IdentityFrom = %+v on a bare context", id)
 	}
 }
+
+// TestValidationCap: with max_concurrent_validations validations in flight,
+// the next distinct token is refused at once (ErrUnavailable, 503), while a
+// cached token is still served and an identical token joins the in-flight
+// validation (D-2).
+func TestValidationCap(t *testing.T) {
+	v := newValidator()
+	tokens := []string{"bogus-1", "bogus-2", "bogus-3"}
+	a := newAuthenticator(t, v, &testClock{now: testNow}, WithMaxConcurrentValidations(2))
+
+	// cache the service token before Keystone gets slow
+	if _, err := a.Authenticate(context.Background(), serviceToken); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	v.gate = make(chan struct{})
+	done := make(chan error, 3)
+	for _, token := range tokens[:2] {
+		go func() {
+			_, err := a.Authenticate(context.Background(), token)
+			done <- err
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for v.calls.Load() < 3 && time.Now().Before(deadline) { // 1 earlier + 2 in flight
+		time.Sleep(time.Millisecond)
+	}
+	// an identical token joins its in-flight validation: no slot needed
+	go func() {
+		_, err := a.Authenticate(context.Background(), tokens[0])
+		done <- err
+	}()
+
+	start := time.Now()
+	_, err := a.Authenticate(context.Background(), tokens[2])
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, ErrBusy) {
+		t.Fatalf("a third distinct token: %v, want ErrUnavailable and ErrBusy", err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("refused after %v: it must not queue", elapsed)
+	}
+	if _, err := a.Authenticate(context.Background(), serviceToken); err != nil {
+		t.Errorf("a cached token while the cap is reached: %v", err)
+	}
+	if n := v.calls.Load(); n != 3 {
+		t.Errorf("%d validations, want 3: the refused one and the merged one never reach Keystone", n)
+	}
+
+	close(v.gate)
+	for range 3 {
+		if err := <-done; !errors.Is(err, ErrInvalidToken) {
+			t.Errorf("an in-flight bogus token: %v, want ErrInvalidToken", err)
+		}
+	}
+	// the slots are free again
+	if _, err := a.Authenticate(context.Background(), tokens[2]); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("after the flood: %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestValidationCapIs503(t *testing.T) {
+	v := newValidator()
+	v.gate = make(chan struct{})
+	defer close(v.gate)
+	a := newAuthenticator(t, v, &testClock{now: testNow}, WithMaxConcurrentValidations(1))
+	go a.Authenticate(context.Background(), "bogus-1") //nolint:errcheck // blocks until the test ends
+	deadline := time.Now().Add(5 * time.Second)
+	for v.calls.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	h, _ := protected(a)
+	if resp := post(h, "bogus-2"); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", resp.StatusCode)
+	}
+}

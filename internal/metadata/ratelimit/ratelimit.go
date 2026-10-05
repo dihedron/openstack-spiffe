@@ -152,14 +152,10 @@ func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (
 		return nil, errors.New("creating source rate limiter: no handler")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		source := sourceKey(r)
-		if ok, retryAfter := limiter.Allow(source); !ok {
-			// debug level: a flood must not turn into a logging flood
-			slog.DebugContext(r.Context(), "per-source rate limit exceeded", "source", source)
-			w.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(retryAfter.Seconds())), 10))
-			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+		if !allowSource(limiter, w, r) {
 			return
 		}
+		source := sourceKey(r)
 		if r.ContentLength > maxBodyBytes {
 			slog.WarnContext(r.Context(), "request body too large", "source", source, "content_length", r.ContentLength, "max_body_bytes", maxBodyBytes)
 			http.Error(w, "request body too large", http.StatusBadRequest)
@@ -168,6 +164,35 @@ func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		next.ServeHTTP(w, r)
 	}), nil
+}
+
+// LimitSources applies a per-source rate limit (429 with Retry-After),
+// keyed like SourceMiddleware, to the requests of next. It is the limit of
+// the unauthenticated endpoints (JWKS and health), which never read a body
+// (D-5).
+func LimitSources(limiter *Limiter, next http.Handler) (http.Handler, error) {
+	if limiter == nil || next == nil {
+		return nil, errors.New("creating source rate limiter: no limiter or no handler")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowSource(limiter, w, r) {
+			next.ServeHTTP(w, r)
+		}
+	}), nil
+}
+
+// allowSource takes a token for the request's source, or answers 429 and
+// reports false.
+func allowSource(limiter *Limiter, w http.ResponseWriter, r *http.Request) bool {
+	source := sourceKey(r)
+	ok, retryAfter := limiter.Allow(source)
+	if !ok {
+		// debug level: a flood must not turn into a logging flood
+		slog.DebugContext(r.Context(), "per-source rate limit exceeded", "source", source)
+		w.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(retryAfter.Seconds())), 10))
+		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+	}
+	return ok
 }
 
 // sourceKey returns the rate-limiting key of a request's client address:

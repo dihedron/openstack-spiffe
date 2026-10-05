@@ -31,6 +31,9 @@ var (
 	// ErrForbidden is returned (wrapped) when the token's user is not
 	// allowlisted or lacks the required role (403).
 	ErrForbidden = errors.New("caller not authorized")
+	// ErrBusy is returned (wrapped, with ErrUnavailable) when the
+	// validations in flight already reach the cap (503, D-2).
+	ErrBusy = errors.New("too many Keystone validations in flight")
 	// ErrUnavailable is returned (wrapped) when the token cannot be validated
 	// because Keystone cannot be reached or fails (503).
 	ErrUnavailable = errors.New("token validation unavailable")
@@ -67,6 +70,9 @@ type Authenticator struct {
 	maxEntries int
 	timeout    time.Duration
 	now        func() time.Time
+	// inFlight holds a slot per Keystone validation in flight; nil means no
+	// cap.
+	inFlight chan struct{}
 
 	// cache holds successful validations by the SHA-256 of the token (never
 	// the token itself) and merges concurrent validations of the same token.
@@ -96,6 +102,19 @@ func WithMaxCacheEntries(n int) Option {
 // WithValidationTimeout bounds each Keystone validation (default: 5s).
 func WithValidationTimeout(d time.Duration) Option {
 	return func(a *Authenticator) { a.timeout = d }
+}
+
+// WithMaxConcurrentValidations caps the Keystone validations in flight
+// (default: no cap). Beyond it, a token that is neither cached nor being
+// validated already is refused at once with ErrBusy, rather than queued: a
+// flood of distinct bogus tokens is never relayed to Keystone faster than
+// the cap allows (D-2).
+func WithMaxConcurrentValidations(n int) Option {
+	return func(a *Authenticator) {
+		if n > 0 {
+			a.inFlight = make(chan struct{}, n)
+		}
+	}
 }
 
 // NewAuthenticator creates an Authenticator accepting the tokens of the
@@ -159,6 +178,10 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		case errors.Is(err, ErrForbidden):
 			slog.WarnContext(ctx, "rejecting unauthorized caller", "client_address", clientaddr.String(r), "user_id", identity.UserID, "reason", err)
 			status = http.StatusForbidden
+		case errors.Is(err, ErrBusy):
+			// debug level: a flood must not turn into a logging flood
+			slog.DebugContext(ctx, "refusing caller: Keystone validation cap reached", "client_address", clientaddr.String(r))
+			status = http.StatusServiceUnavailable
 		default:
 			slog.ErrorContext(ctx, "cannot validate caller token", "error", err)
 			status = http.StatusServiceUnavailable
@@ -211,6 +234,16 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (Identit
 // are not cached.
 func (a *Authenticator) validate(ctx context.Context, token string) (Identity, error) {
 	identity, err := a.cache.Get(ctx, sha256.Sum256([]byte(token)), func(ctx context.Context) (Identity, time.Time, error) {
+		// only a real validation takes a slot: cache hits and callers merged
+		// into this one never get here
+		if a.inFlight != nil {
+			select {
+			case a.inFlight <- struct{}{}:
+				defer func() { <-a.inFlight }()
+			default:
+				return Identity{}, time.Time{}, fmt.Errorf("%w: %w", ErrUnavailable, ErrBusy)
+			}
+		}
 		identity, err := a.validator.Validate(ctx, token)
 		if err != nil {
 			return Identity{}, time.Time{}, err

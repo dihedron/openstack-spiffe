@@ -47,7 +47,8 @@ type Signer struct {
 // check (attest), the per-source limit and body cap and the Keystone
 // authentication; GET /jwks/local.json (the replica's own keys),
 // /.well-known/jwks.json (the own keys merged with the peers', or the own keys
-// alone without peers), /liveness and /readiness unauthenticated. The client
+// alone without peers), /liveness and /readiness unauthenticated, behind
+// their own per-source limit. The client
 // address is resolved, and a request ID assigned, before anything else.
 func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client) (*Signer, error) {
 	if cfg == nil || client == nil {
@@ -114,7 +115,8 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
 	authenticator, err := auth.NewAuthenticator(validator, cfg.Keystone.AllowedUsers, cfg.Keystone.RequiredRole,
-		auth.WithCacheTTL(cfg.Keystone.ValidationCacheTTL))
+		auth.WithCacheTTL(cfg.Keystone.ValidationCacheTTL),
+		auth.WithMaxConcurrentValidations(cfg.Keystone.MaxConcurrentValidations))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
@@ -151,12 +153,25 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
 
+	// the unauthenticated endpoints get their own bucket per source, so
+	// that a flood against them never starves Nova's calls (D-5)
+	publicLimiter, err := ratelimit.NewLimiter(cfg.RateLimitPerSourcePublic.Events, cfg.RateLimitPerSourcePublic.Per)
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: public per-source limit: %w", err)
+	}
+	public := http.NewServeMux()
+	public.Handle("/jwks/local.json", localHandler)
+	public.Handle("/.well-known/jwks.json", mergedHandler)
+	public.Handle("/liveness", health.Liveness())
+	public.Handle("/readiness", readiness)
+	limitedPublic, err := ratelimit.LimitSources(publicLimiter, public)
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/attest", protected)
-	mux.Handle("/jwks/local.json", localHandler)
-	mux.Handle("/.well-known/jwks.json", mergedHandler)
-	mux.Handle("/liveness", health.Liveness())
-	mux.Handle("/readiness", readiness)
+	mux.Handle("/", limitedPublic)
 
 	return &Signer{
 		cfg:               cfg,

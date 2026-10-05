@@ -37,6 +37,11 @@ type Aggregator struct {
 	StaleKeyRetention time.Duration `yaml:"stale_key_retention"`
 	// CacheMaxAge is the Cache-Control max-age of the merged JWKS.
 	CacheMaxAge time.Duration `yaml:"cache_max_age"`
+	// RateLimitPerSource limits requests per source IP (D-5).
+	RateLimitPerSource Rate `yaml:"rate_limit_per_source"`
+	// ClientAddress configures how the client address is determined, as
+	// for the signer.
+	ClientAddress ClientAddress `yaml:"client_address"`
 }
 
 func defaultAggregator() *Aggregator {
@@ -47,6 +52,8 @@ func defaultAggregator() *Aggregator {
 		FetchTimeout:      5 * time.Second,
 		StaleKeyRetention: iid.TTL,
 		CacheMaxAge:       30 * time.Second,
+		// its consumers (SPIRE Servers, probes) poll a few times a minute
+		RateLimitPerSource: Rate{Events: 50, Per: time.Second},
 	}
 }
 
@@ -62,6 +69,7 @@ func CheckAggregator(file string, data []byte, opts CheckOptions) *Result[Aggreg
 	result.Config = cfg
 	cfg.validate(result)
 	cfg.warn(result)
+	cfg.ClientAddress.applyDefaults()
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "replica_ca_cert_path", cfg.ReplicaCACertPath)
@@ -88,6 +96,7 @@ func (a *Aggregator) validate(r *Result[Aggregator]) {
 	}
 	checkJWKSURLs(r, "replicas", a.Replicas)
 	checkPolling(r, "", a.PollInterval, a.FetchTimeout, a.StaleKeyRetention, a.CacheMaxAge)
+	checkClientAddress(r, a.ClientAddress)
 }
 
 // warn flags valid but risky settings.
@@ -95,6 +104,7 @@ func (a *Aggregator) warn(r *Result[Aggregator]) {
 	if a.ReplicaCACertPath == "" {
 		r.warnf("replica_ca_cert_path", "not set: every public CA is trusted for the replicas' keys")
 	}
+	warnClientAddress(r, a.ClientAddress)
 	for i, replica := range a.Replicas {
 		if u, err := url.Parse(replica); err == nil && strings.HasSuffix(u.Path, mergedJWKSPath) {
 			r.warnf(fmt.Sprintf("replicas[%d]", i),

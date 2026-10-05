@@ -18,3 +18,8 @@ poll_interval: "30s"
 fetch_timeout: "5s"                                      # < poll_interval
 stale_key_retention: "5m"                                # at least 5m
 cache_max_age: "30s"                                     # whole seconds
+rate_limit_per_source: "50/1s"                           # every endpoint (D-5)
+
+# client_address:                                        # only behind a proxy/LB that hides client addresses
+#   trusted_proxies: ["10.0.10.0/24"]
+#   header: "X-Forwarded-For"

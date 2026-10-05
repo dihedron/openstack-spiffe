@@ -361,3 +361,32 @@ func TestSourceMiddlewareValidation(t *testing.T) {
 		t.Fatal("accepted a nil handler")
 	}
 }
+
+func TestLimitSources(t *testing.T) {
+	clock := &testClock{now: testNow}
+	reached := 0
+	h, err := LimitSources(newLimiter(t, 2, time.Second, clock), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached++
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if resp := request(t, h, "192.0.2.1:1", http.NoBody, 0); resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d", i, resp.StatusCode)
+		}
+	}
+	resp := request(t, h, "192.0.2.1:1", explodingBody{t}, 0)
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("third request: status %d, Retry-After %q; want 429 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if resp := request(t, h, "192.0.2.2:1", http.NoBody, 0); resp.StatusCode != http.StatusOK {
+		t.Fatalf("another source: status %d, want 200", resp.StatusCode)
+	}
+	if reached != 3 {
+		t.Fatalf("handler reached %d times, want 3", reached)
+	}
+	if _, err := LimitSources(nil, http.NotFoundHandler()); err == nil {
+		t.Error("LimitSources accepted no limiter")
+	}
+}

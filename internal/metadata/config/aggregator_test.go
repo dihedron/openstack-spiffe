@@ -46,6 +46,8 @@ func TestAggregatorDefaults(t *testing.T) {
 		{"fetch_timeout", cfg.FetchTimeout, 5 * time.Second},
 		{"stale_key_retention", cfg.StaleKeyRetention, 5 * time.Minute},
 		{"cache_max_age", cfg.CacheMaxAge, 30 * time.Second},
+		{"rate_limit_per_source", cfg.RateLimitPerSource, Rate{Events: 50, Per: time.Second}},
+		{"client_address.trusted_proxies", len(cfg.ClientAddress.TrustedProxies), 0},
 		{"replicas", len(cfg.Replicas), 2},
 	}
 	for _, c := range checks {
@@ -62,6 +64,9 @@ func TestAggregatorInvalid(t *testing.T) {
 		want string
 	}{
 		{"unknown key", minimalAggregator + "bogus: 1\n", "bogus"},
+		{"bad rate", minimalAggregator + "rate_limit_per_source: \"fast\"\n", "rate_limit_per_source"},
+		{"trusted proxy host name", minimalAggregator + "client_address:\n  trusted_proxies: [proxy.internal]\n", "client_address.trusted_proxies[0]"},
+		{"invalid client address header", minimalAggregator + "client_address:\n  trusted_proxies: [10.0.0.1]\n  header: \"X Forwarded\"\n", "client_address.header"},
 		{"no replicas", "tls_cert_path: /c\ntls_key_path: /k\n", "replicas"},
 		{"missing tls", "replicas: [https://a/jwks]\n", "tls_cert_path"},
 		{"http replica", "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [http://a/jwks]\n", "replicas"},
@@ -103,5 +108,30 @@ func TestLoadAggregator(t *testing.T) {
 	}
 	if _, _, err := LoadAggregator(broken); !errors.Is(err, ErrInvalidConfig) || !strings.Contains(err.Error(), "tls_cert_path") {
 		t.Fatalf("missing TLS files: err = %v, want ErrInvalidConfig mentioning tls_cert_path", err)
+	}
+}
+
+func TestAggregatorClientAddress(t *testing.T) {
+	cfg, err := parseAggregator(strings.NewReader(minimalAggregator + "client_address:\n  trusted_proxies: [10.0.10.0/24]\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.ClientAddress.Header != "X-Forwarded-For" {
+		t.Errorf("client_address.header = %q, want the default X-Forwarded-For with trusted proxies", cfg.ClientAddress.Header)
+	}
+
+	warned := func(doc, path string) bool {
+		for _, f := range CheckAggregator("aggregator.yaml", []byte(doc), checkOptions()).Warnings() {
+			if f.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	if !warned(minimalAggregator+"client_address:\n  header: X-Real-IP\n", "client_address.header") {
+		t.Error("no warning for a header without trusted proxies")
+	}
+	if !warned(minimalAggregator+"client_address:\n  trusted_proxies: [\"::/0\"]\n", "client_address.trusted_proxies[0]") {
+		t.Error("no warning for a trusted proxy range covering every address")
 	}
 }

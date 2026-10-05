@@ -63,6 +63,8 @@ func TestSignerDefaults(t *testing.T) {
 		{"token_ttl_seconds", cfg.TokenTTLSeconds, 300},
 		{"rate_limit_per_instance", cfg.RateLimitPerInstance, Rate{Events: 1, Per: 5 * time.Second}},
 		{"rate_limit_per_source", cfg.RateLimitPerSource, Rate{Events: 200, Per: time.Second}},
+		{"rate_limit_per_source_public", cfg.RateLimitPerSourcePublic, Rate{Events: 50, Per: time.Second}},
+		{"keystone.max_concurrent_validations", cfg.Keystone.MaxConcurrentValidations, 32},
 		{"max_body_bytes", cfg.MaxBodyBytes, int64(256 * 1024)},
 		{"keystone.required_role", cfg.Keystone.RequiredRole, "service"},
 		{"keystone.validation_cache_ttl", cfg.Keystone.ValidationCacheTTL, time.Minute},
@@ -214,6 +216,8 @@ func TestSignerInvalid(t *testing.T) {
 		{"duplicate attest source", [2]string{}, "attest:\n  allowed_sources: [10.0.0.1, 10.0.0.1]\n", "attest.allowed_sources"},
 		{"empty attest source", [2]string{}, "attest:\n  allowed_sources: [\"\"]\n", "attest.allowed_sources"},
 		{"unknown attest key", [2]string{}, "attest:\n  allowed_source: [10.0.0.1]\n", "allowed_source"},
+		{"bad public rate", [2]string{}, "rate_limit_per_source_public: \"fast\"\n", "rate_limit_per_source_public"},
+		{"no concurrent validations", [2]string{"  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n", "  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n  max_concurrent_validations: 0\n"}, "", "keystone.max_concurrent_validations"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

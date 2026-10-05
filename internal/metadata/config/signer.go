@@ -71,6 +71,10 @@ type Signer struct {
 	RateLimitPerInstance Rate `yaml:"rate_limit_per_instance"`
 	// RateLimitPerSource limits requests per source IP, before the body is read.
 	RateLimitPerSource Rate `yaml:"rate_limit_per_source"`
+	// RateLimitPerSourcePublic limits requests per source IP to the
+	// unauthenticated endpoints (JWKS, health), separately from /attest
+	// (D-5).
+	RateLimitPerSourcePublic Rate `yaml:"rate_limit_per_source_public"`
 	// MaxBodyBytes caps the size of the Nova request body.
 	MaxBodyBytes int64 `yaml:"max_body_bytes"`
 	// ClientAddress configures how the client address is determined.
@@ -154,6 +158,43 @@ type ClientAddress struct {
 	Header string `yaml:"header"`
 }
 
+// applyDefaults sets the header used with trusted proxies. It runs after
+// the warnings, so that they can tell an explicitly set (and ignored) header
+// apart.
+func (ca *ClientAddress) applyDefaults() {
+	if len(ca.TrustedProxies) > 0 && ca.Header == "" {
+		ca.Header = clientaddr.DefaultHeader
+	}
+}
+
+// checkClientAddress reports the errors of a client_address block, for the
+// signer and the aggregator alike.
+func checkClientAddress[T any](r *Result[T], ca ClientAddress) {
+	checkList(r, "client_address.trusted_proxies", ca.TrustedProxies)
+	for i, entry := range ca.TrustedProxies {
+		if _, err := clientaddr.ParseTrustedProxy(entry); entry != "" && err != nil {
+			r.errorf(KindRuleViolation, fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%v", err)
+		}
+	}
+	if ca.Header != "" {
+		if err := clientaddr.ValidateHeaderName(ca.Header); err != nil {
+			r.errorf(KindRuleViolation, "client_address.header", "%v", err)
+		}
+	}
+}
+
+// warnClientAddress flags the risky settings of a client_address block.
+func warnClientAddress[T any](r *Result[T], ca ClientAddress) {
+	if ca.Header != "" && len(ca.TrustedProxies) == 0 {
+		r.warnf("client_address.header", "ignored without client_address.trusted_proxies: the TCP peer address is used")
+	}
+	for i, entry := range ca.TrustedProxies {
+		if p, err := clientaddr.ParseTrustedProxy(entry); err == nil && p.Bits() == 0 {
+			r.warnf(fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%q trusts every address: any client can choose its own rate-limiting key", entry)
+		}
+	}
+}
+
 // Tags configures the "tags" claim.
 type Tags struct {
 	// Allowlist restricts the metadata keys copied into the claim; empty
@@ -171,6 +212,9 @@ type Keystone struct {
 	RequiredRole string `yaml:"required_role"`
 	// ValidationCacheTTL bounds how long a validated caller token is cached.
 	ValidationCacheTTL time.Duration `yaml:"validation_cache_ttl"`
+	// MaxConcurrentValidations bounds the Keystone validations in flight;
+	// beyond it, requests get 503 at once (D-2).
+	MaxConcurrentValidations int `yaml:"max_concurrent_validations"`
 	// ProjectCacheTTL bounds how long project records are cached.
 	ProjectCacheTTL time.Duration `yaml:"project_cache_ttl"`
 	// CACertPath is an optional CA bundle for Keystone and Nova endpoints.
@@ -200,13 +244,18 @@ func defaultSigner() *Signer {
 		TokenTTLSeconds:      int(iid.TTL / time.Second),
 		RateLimitPerInstance: recommendedInstanceRate,
 		RateLimitPerSource:   Rate{Events: 200, Per: time.Second},
+		// JWKS and health consumers poll a few times a minute
+		RateLimitPerSourcePublic: Rate{Events: 50, Per: time.Second},
 		// Nova forwards user-data (up to 64 KiB, base64-encoded) and metadata
 		// in the same body, so legitimate requests can exceed 150 KiB.
 		MaxBodyBytes: 256 * 1024,
 		Keystone: Keystone{
 			RequiredRole:       "service",
 			ValidationCacheTTL: time.Minute,
-			ProjectCacheTTL:    10 * time.Minute,
+			// beyond what Keystone answers in parallel, a flood of distinct
+			// bogus tokens only queues up
+			MaxConcurrentValidations: 32,
+			ProjectCacheTTL:          10 * time.Minute,
 		},
 		NovaLookup: NovaLookup{
 			Enabled:         true,
@@ -245,11 +294,7 @@ func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
 	}
 	cfg.validate(result)
 	cfg.warn(result)
-	if len(cfg.ClientAddress.TrustedProxies) > 0 && cfg.ClientAddress.Header == "" {
-		// defaulted here rather than in defaultSigner, so that warn can tell
-		// an explicitly set (and ignored) header apart
-		cfg.ClientAddress.Header = clientaddr.DefaultHeader
-	}
+	cfg.ClientAddress.applyDefaults()
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
@@ -305,16 +350,9 @@ func (s *Signer) validate(r *Result[Signer]) {
 	if s.MaxBodyBytes < minMaxBodyBytes || s.MaxBodyBytes > maxMaxBodyBytes {
 		r.errorf(KindRuleViolation, "max_body_bytes", "%d must be between %d and %d", s.MaxBodyBytes, minMaxBodyBytes, maxMaxBodyBytes)
 	}
-	checkList(r, "client_address.trusted_proxies", s.ClientAddress.TrustedProxies)
-	for i, entry := range s.ClientAddress.TrustedProxies {
-		if _, err := clientaddr.ParseTrustedProxy(entry); entry != "" && err != nil {
-			r.errorf(KindRuleViolation, fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%v", err)
-		}
-	}
-	if s.ClientAddress.Header != "" {
-		if err := clientaddr.ValidateHeaderName(s.ClientAddress.Header); err != nil {
-			r.errorf(KindRuleViolation, "client_address.header", "%v", err)
-		}
+	checkClientAddress(r, s.ClientAddress)
+	if s.Keystone.MaxConcurrentValidations < 1 {
+		r.errorf(KindRuleViolation, "keystone.max_concurrent_validations", "%d must be at least 1", s.Keystone.MaxConcurrentValidations)
 	}
 	for _, name := range slices.Sorted(maps.Keys(s.CustomClaims)) {
 		switch {
@@ -433,14 +471,7 @@ func (s *Signer) warn(r *Result[Signer]) {
 	if s.KeyStore.VaultProxyEndpoint != "" && s.KeyStore.Backend != BackendVaultTransit {
 		r.warnf("key_store.vault_proxy_endpoint", "ignored by the %q backend", s.KeyStore.Backend)
 	}
-	if s.ClientAddress.Header != "" && len(s.ClientAddress.TrustedProxies) == 0 {
-		r.warnf("client_address.header", "ignored without client_address.trusted_proxies: the TCP peer address is used")
-	}
-	for i, entry := range s.ClientAddress.TrustedProxies {
-		if p, err := clientaddr.ParseTrustedProxy(entry); err == nil && p.Bits() == 0 {
-			r.warnf(fmt.Sprintf("client_address.trusted_proxies[%d]", i), "%q trusts every address: any client can choose its own rate-limiting key", entry)
-		}
-	}
+	warnClientAddress(r, s.ClientAddress)
 	if limit := s.RateLimitPerInstance; limit.Events > 0 && time.Duration(limit.Events)*recommendedInstanceRate.Per > limit.Per*time.Duration(recommendedInstanceRate.Events) {
 		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)
 	}

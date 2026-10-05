@@ -8,9 +8,11 @@ import (
 	"net/http"
 
 	"github.com/dihedron/openstack-spiffe/internal/metadata/aggregator"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/clientaddr"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/health"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/jwks"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/ratelimit"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/requestid"
 )
 
@@ -27,7 +29,8 @@ type Aggregator struct {
 // Routes: GET /.well-known/jwks.json (the merged set, with Cache-Control
 // max-age = cache_max_age), /liveness and /readiness (ready while at least
 // one replica has been fetched within stale_key_retention), all
-// unauthenticated.
+// unauthenticated and behind a per-source rate limit (D-5). The client
+// address is resolved, and a request ID assigned, before anything else.
 func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 	if cfg == nil {
 		return nil, errors.New("creating aggregator: missing configuration")
@@ -52,11 +55,24 @@ func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 		return nil, fmt.Errorf("creating aggregator: %w", err)
 	}
 
+	limiter, err := ratelimit.NewLimiter(cfg.RateLimitPerSource.Events, cfg.RateLimitPerSource.Per)
+	if err != nil {
+		return nil, fmt.Errorf("creating aggregator: per-source limit: %w", err)
+	}
+	resolver, err := clientaddr.NewResolver(cfg.ClientAddress.TrustedProxies, cfg.ClientAddress.Header)
+	if err != nil {
+		return nil, fmt.Errorf("creating aggregator: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/.well-known/jwks.json", jwksHandler)
 	mux.Handle("/liveness", health.Liveness())
 	mux.Handle("/readiness", readiness)
-	return &Aggregator{cfg: cfg, merged: merged, readiness: readiness, handler: requestid.Middleware(mux)}, nil
+	limited, err := ratelimit.LimitSources(limiter, mux)
+	if err != nil {
+		return nil, fmt.Errorf("creating aggregator: %w", err)
+	}
+	return &Aggregator{cfg: cfg, merged: merged, readiness: readiness, handler: requestid.Middleware(resolver.Middleware(limited))}, nil
 }
 
 // Run listens on the configured address and serves until the context ends.
