@@ -21,6 +21,7 @@ import (
 	"github.com/dihedron/openstack-spiffe/internal/issuer/auth"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/claims"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/novalookup"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/token"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
@@ -50,11 +51,21 @@ type Handler struct {
 	verifier     Verifier
 	minter       Minter
 	maxBodyBytes int64
+	metrics      *metrics.Metrics // nil: none recorded
+}
+
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithMetrics records the issued tokens in m. The reasons of refusals are
+// named whether or not it is set (see metrics.Reject).
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(h *Handler) { h.metrics = m }
 }
 
 // NewHandler creates the /attest handler. maxBodyBytes caps the request
 // body (max_body_bytes), independently of any cap set by the middleware.
-func NewHandler(limiter InstanceLimiter, verifier Verifier, minter Minter, maxBodyBytes int64) (*Handler, error) {
+func NewHandler(limiter InstanceLimiter, verifier Verifier, minter Minter, maxBodyBytes int64, options ...Option) (*Handler, error) {
 	switch {
 	case limiter == nil:
 		return nil, errors.New("creating attest handler: no per-instance limiter")
@@ -65,17 +76,21 @@ func NewHandler(limiter InstanceLimiter, verifier Verifier, minter Minter, maxBo
 	case maxBodyBytes <= 0:
 		return nil, fmt.Errorf("creating attest handler: body cap %d must be positive", maxBodyBytes)
 	}
-	return &Handler{limiter: limiter, verifier: verifier, minter: minter, maxBodyBytes: maxBodyBytes}, nil
+	h := &Handler{limiter: limiter, verifier: verifier, minter: minter, maxBodyBytes: maxBodyBytes}
+	for _, option := range options {
+		option(h)
+	}
+	return h, nil
 }
 
 // ServeHTTP handles a Nova vendordata request.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		fail(w, http.StatusMethodNotAllowed)
+		fail(ctx, w, http.StatusMethodNotAllowed, metrics.ReasonInvalidRequest)
 		return
 	}
-	ctx := r.Context()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
 	if err != nil {
@@ -84,18 +99,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			slog.WarnContext(ctx, "cannot read request body", "error", err)
 		}
-		fail(w, http.StatusBadRequest)
+		fail(ctx, w, http.StatusBadRequest, metrics.ReasonInvalidRequest)
 		return
 	}
 	var req claims.NovaRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		slog.WarnContext(ctx, "rejecting malformed request body", append([]any{"error", err}, redact(body)...)...)
-		fail(w, http.StatusBadRequest)
+		fail(ctx, w, http.StatusBadRequest, metrics.ReasonInvalidRequest)
 		return
 	}
 	if err := req.Validate(); err != nil {
 		slog.WarnContext(ctx, "rejecting invalid request", append([]any{"error", err}, redact(body)...)...)
-		fail(w, http.StatusBadRequest)
+		fail(ctx, w, http.StatusBadRequest, metrics.ReasonInvalidRequest)
 		return
 	}
 	log := slog.With("project_id", req.ProjectID, "instance_id", req.InstanceID)
@@ -103,17 +118,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ok, retryAfter := h.limiter.Allow(req.InstanceID); !ok {
 		log.WarnContext(ctx, "per-instance rate limit exceeded")
 		w.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(retryAfter.Seconds())), 10))
-		fail(w, http.StatusTooManyRequests)
+		fail(ctx, w, http.StatusTooManyRequests, metrics.ReasonRateLimitedInstance)
 		return
 	}
 
 	enrichment, err := h.verifier.Verify(ctx, req.ProjectID, req.InstanceID)
 	if err != nil {
 		// the verifier logs the details
-		if errors.Is(err, novalookup.ErrInstanceMismatch) {
-			fail(w, http.StatusForbidden)
-		} else {
-			fail(w, http.StatusServiceUnavailable)
+		switch {
+		case errors.Is(err, novalookup.ErrInstanceMismatch):
+			fail(ctx, w, http.StatusForbidden, metrics.ReasonInstanceNotAllowed)
+		case errors.Is(err, novalookup.ErrEnrichmentInvalid):
+			fail(ctx, w, http.StatusServiceUnavailable, metrics.ReasonEnrichmentInvalid)
+		default:
+			fail(ctx, w, http.StatusServiceUnavailable, metrics.ReasonLookupUnavailable)
 		}
 		return
 	}
@@ -123,12 +141,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// the minter logs the details
 		switch {
 		case errors.Is(err, token.ErrKeyStoreUnavailable):
-			fail(w, http.StatusServiceUnavailable)
+			fail(ctx, w, http.StatusServiceUnavailable, metrics.ReasonKeyStoreUnavailable)
 		case errors.Is(err, claims.ErrInvalidRequest):
-			fail(w, http.StatusBadRequest)
+			fail(ctx, w, http.StatusBadRequest, metrics.ReasonInvalidRequest)
 		default:
 			log.ErrorContext(ctx, "cannot mint token", "error", err)
-			fail(w, http.StatusInternalServerError)
+			fail(ctx, w, http.StatusInternalServerError, metrics.ReasonSigningFailed)
 		}
 		return
 	}
@@ -138,10 +156,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response, err := json.Marshal(iid.VendorData{JWT: issued.Token})
 	if err != nil {
 		log.ErrorContext(ctx, "cannot encode response", "error", err)
-		fail(w, http.StatusInternalServerError)
+		fail(ctx, w, http.StatusInternalServerError, metrics.ReasonSigningFailed)
 		return
 	}
 	auditIssued(ctx, r, req, issued)
+	h.metrics.TokenIssued(ctx, issued.Algorithm, req.ProjectID, len(issued.Token))
 	w.Header().Set("Content-Type", "application/json")
 	// the body is a credential: nobody may store it
 	w.Header().Set("Cache-Control", "no-store")
@@ -183,9 +202,10 @@ func auditIssued(ctx context.Context, r *http.Request, req claims.NovaRequest, i
 	slog.InfoContext(ctx, "token issued", attrs...)
 }
 
-// fail replies with a bare status: details are logged, never sent to the
-// client.
-func fail(w http.ResponseWriter, status int) {
+// fail replies with a bare status, naming the reason for the metrics:
+// details are logged, never sent to the client.
+func fail(ctx context.Context, w http.ResponseWriter, status int, reason string) {
+	metrics.Reject(ctx, reason)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, http.StatusText(status), status)
 }

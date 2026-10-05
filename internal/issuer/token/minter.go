@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/claims"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
@@ -41,6 +43,8 @@ type Issued struct {
 	Token string
 	// KeyID is the kid of the key that signed it.
 	KeyID string
+	// Algorithm is its JWS algorithm.
+	Algorithm string
 	// ID is its jti.
 	ID string
 	// IssuedAt and Expiry are its iat and exp, in seconds since the Unix
@@ -55,18 +59,31 @@ type Issued struct {
 type Minter struct {
 	keys    keystore.KeyStore
 	builder ClaimsBuilder
+	metrics *metrics.Metrics // nil: none recorded
+}
+
+// Option configures a Minter.
+type Option func(*Minter)
+
+// WithMetrics records the signing operations in m.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(mi *Minter) { mi.metrics = m }
 }
 
 // NewMinter creates a Minter signing with the given key store the claims
 // produced by the given builder.
-func NewMinter(keys keystore.KeyStore, builder ClaimsBuilder) (*Minter, error) {
+func NewMinter(keys keystore.KeyStore, builder ClaimsBuilder, options ...Option) (*Minter, error) {
 	if keys == nil {
 		return nil, errors.New("creating minter: no key store")
 	}
 	if builder == nil {
 		return nil, errors.New("creating minter: no claims builder")
 	}
-	return &Minter{keys: keys, builder: builder}, nil
+	m := &Minter{keys: keys, builder: builder}
+	for _, option := range options {
+		option(m)
+	}
+	return m, nil
 }
 
 // Mint builds the claims for the request (with the enrichment claims looked
@@ -96,7 +113,7 @@ func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment cl
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 
 	for attempt := 1; ; attempt++ {
-		token, kid, err := m.sign(ctx, encodedPayload)
+		token, kid, algorithm, err := m.sign(ctx, encodedPayload)
 		if err == nil && len(token) > iid.MaxTokenBytes {
 			// cannot happen with the claims builder's own caps: refuse rather
 			// than hand out a token the SPIRE Server would reject
@@ -104,7 +121,7 @@ func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment cl
 			return Issued{}, fmt.Errorf("minting token: %w: %d bytes, at most %d allowed", ErrTokenTooLarge, len(token), iid.MaxTokenBytes)
 		}
 		if err == nil {
-			return Issued{Token: token, KeyID: kid, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}, nil
+			return Issued{Token: token, KeyID: kid, Algorithm: algorithm, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}, nil
 		}
 		if errors.Is(err, keystore.ErrKeyNotActive) && attempt < signAttempts {
 			slog.DebugContext(ctx, "signing key rotated while signing, retrying", "project_id", req.ProjectID, "instance_id", req.InstanceID, "kid", kid)
@@ -116,25 +133,31 @@ func (m *Minter) Mint(ctx context.Context, req claims.NovaRequest, enrichment cl
 }
 
 // sign signs the encoded payload with the currently active key and returns
-// the compact JWS and the kid used.
-func (m *Minter) sign(ctx context.Context, encodedPayload string) (string, string, error) {
+// the compact JWS, the kid and the algorithm used.
+func (m *Minter) sign(ctx context.Context, encodedPayload string) (string, string, string, error) {
 	active, err := m.keys.Active(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: getting active key: %w", ErrKeyStoreUnavailable, err)
+		return "", "", "", fmt.Errorf("%w: getting active key: %w", ErrKeyStoreUnavailable, err)
 	}
 	// both supported algorithms sign SHA-256 digests
 	if active.Algorithm != "RS256" && active.Algorithm != "ES256" {
-		return "", active.ID, fmt.Errorf("active key %q has unsupported algorithm %q", active.ID, active.Algorithm)
+		return "", active.ID, "", fmt.Errorf("active key %q has unsupported algorithm %q", active.ID, active.Algorithm)
 	}
 	header, err := json.Marshal(iid.Header{Algorithm: active.Algorithm, KeyID: active.ID, Type: "JWT"})
 	if err != nil {
-		return "", active.ID, fmt.Errorf("encoding header: %w", err)
+		return "", active.ID, "", fmt.Errorf("encoding header: %w", err)
 	}
 	signingInput := base64.RawURLEncoding.EncodeToString(header) + "." + encodedPayload
 	digest := sha256.Sum256([]byte(signingInput))
+	start := time.Now()
 	signature, err := m.keys.Sign(ctx, active.ID, digest[:])
+	result := metrics.ResultOK
 	if err != nil {
-		return "", active.ID, fmt.Errorf("%w: %w", ErrKeyStoreUnavailable, err)
+		result = metrics.ResultError
 	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), active.ID, nil
+	m.metrics.Signing(ctx, active.Algorithm, result, time.Since(start))
+	if err != nil {
+		return "", active.ID, "", fmt.Errorf("%w: %w", ErrKeyStoreUnavailable, err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), active.ID, active.Algorithm, nil
 }

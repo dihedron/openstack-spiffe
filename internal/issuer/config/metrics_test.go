@@ -207,3 +207,19 @@ func TestMetricsFileChecks(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsSettings(t *testing.T) {
+	cfg, err := parseSignerString(t, minimalSigner+metricsDoc(otlpSettings+"\n  protocol: grpc\n  interval: 20s\n  timeout: 4s\n  client_cert_path: /c.crt\n  client_key_path: /c.key\n  headers_env: H\nproject_attribute: true\nmax_projects: 7\nruntime: false"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Metrics.Settings()
+	if !s.Enabled || s.Exporter != ExporterOTLP || s.Runtime || !s.ProjectAttribute || s.MaxProjects != 7 {
+		t.Errorf("settings %+v", s)
+	}
+	o := s.OTLP
+	if o.Endpoint != "https://collector.internal:4318" || o.Protocol != ProtocolGRPC || o.Interval != 20*time.Second || o.Timeout != 4*time.Second ||
+		o.CACertPath != "/ca.pem" || o.ClientCertPath != "/c.crt" || o.ClientKeyPath != "/c.key" || o.HeadersEnv != "H" {
+		t.Errorf("OTLP settings %+v", o)
+	}
+}

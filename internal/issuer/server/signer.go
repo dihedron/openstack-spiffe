@@ -56,10 +56,21 @@ type Signer struct {
 // alone without peers), /liveness and /readiness unauthenticated, behind
 // their own per-source limit. The client
 // address is resolved, and a request ID assigned, before anything else.
-func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client) (*Signer, error) {
+func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client) (_ *Signer, err error) {
 	if cfg == nil || client == nil {
 		return nil, errors.New("creating signer: missing configuration or OpenStack client")
 	}
+	m, err := metrics.New(ctx, cfg.Metrics.Settings(),
+		metrics.Resource{Component: "signer", InstanceID: cfg.ReplicaID, Version: metadata.Version},
+		cfg.MinTLSVersion())
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = m.Shutdown(ctx) // the construction error is the one worth reporting
+		}
+	}()
 	identity, err := client.Identity()
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
@@ -74,11 +85,12 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	builder, err := claims.NewBuilder(
 		claims.WithTTL(cfg.TokenTTL()),
 		claims.WithAllowlist(cfg.Tags.Allowlist),
-		claims.WithCustomClaims(cfg.CustomClaims))
+		claims.WithCustomClaims(cfg.CustomClaims),
+		claims.WithMetrics(m))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
-	minter, err := token.NewMinter(keys, builder)
+	minter, err := token.NewMinter(keys, builder, token.WithMetrics(m))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
@@ -103,7 +115,8 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 		novalookup.WithAllowedStatuses(cfg.NovaLookup.AllowedStatuses),
 		novalookup.WithEnrichment(cfg.Enrich),
 		novalookup.WithServerCacheTTL(cfg.NovaLookup.CacheTTL),
-		novalookup.WithProjectCacheTTL(cfg.Keystone.ProjectCacheTTL))
+		novalookup.WithProjectCacheTTL(cfg.Keystone.ProjectCacheTTL),
+		novalookup.WithMetrics(m))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
@@ -122,11 +135,12 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	}
 	authenticator, err := auth.NewAuthenticator(validator, cfg.Keystone.AllowedUsers, cfg.Keystone.RequiredRole,
 		auth.WithCacheTTL(cfg.Keystone.ValidationCacheTTL),
-		auth.WithMaxConcurrentValidations(cfg.Keystone.MaxConcurrentValidations))
+		auth.WithMaxConcurrentValidations(cfg.Keystone.MaxConcurrentValidations),
+		auth.WithMetrics(m))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
-	attestHandler, err := attest.NewHandler(instanceLimiter, verifier, minter, cfg.MaxBodyBytes)
+	attestHandler, err := attest.NewHandler(instanceLimiter, verifier, minter, cfg.MaxBodyBytes, attest.WithMetrics(m))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
@@ -176,16 +190,11 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/attest", protected)
+	// outermost: every call is recorded, with the reason named by the layer
+	// that answered it
+	mux.Handle("/attest", m.AttestMiddleware(protected))
 	mux.Handle("/", limitedPublic)
 
-	// last: nothing can fail after it, so it never needs shutting down here
-	m, err := metrics.New(ctx, cfg.Metrics,
-		metrics.Resource{Component: "signer", InstanceID: cfg.ReplicaID, Version: metadata.Version},
-		cfg.MinTLSVersion())
-	if err != nil {
-		return nil, fmt.Errorf("creating signer: %w", err)
-	}
 	return &Signer{
 		cfg:               cfg,
 		keys:              keys,

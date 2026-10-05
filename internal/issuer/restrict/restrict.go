@@ -18,6 +18,7 @@ import (
 	"slices"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 )
 
 // Guard enforces the restrictions; the zero restriction lets every request
@@ -65,7 +66,8 @@ func (g *Guard) RequestsClientCertificates() bool { return g.roots != nil }
 // client address, never with anything the client sent beyond it.
 func (g *Guard) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := g.check(r); err != nil {
+		if reason, err := g.check(r); err != nil {
+			metrics.Reject(r.Context(), reason)
 			slog.WarnContext(r.Context(), "rejecting /attest request", "client_address", clientaddr.String(r), "reason", err)
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
@@ -75,23 +77,24 @@ func (g *Guard) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-func (g *Guard) check(r *http.Request) error {
+// check returns the metrics reason and the error of a refused request.
+func (g *Guard) check(r *http.Request) (string, error) {
 	if len(g.sources) > 0 {
 		addr, ok := clientaddr.From(r)
 		if !ok || !slices.ContainsFunc(g.sources, func(p netip.Prefix) bool { return p.Contains(addr) }) {
-			return errors.New("source not in attest.allowed_sources")
+			return metrics.ReasonSourceNotAllowed, errors.New("source not in attest.allowed_sources")
 		}
 	}
 	if g.roots == nil {
-		return nil
+		return "", nil
 	}
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return errors.New("no client certificate")
+		return metrics.ReasonClientCertificate, errors.New("no client certificate")
 	}
 	chain := r.TLS.PeerCertificates
 	if chain[0].IsCA {
 		// Go accepts a root as its own leaf: a CA identifies no client
-		return errors.New("invalid client certificate: a CA certificate")
+		return metrics.ReasonClientCertificate, errors.New("invalid client certificate: a CA certificate")
 	}
 	intermediates := x509.NewCertPool()
 	for _, c := range chain[1:] {
@@ -102,7 +105,7 @@ func (g *Guard) check(r *http.Request) error {
 		Intermediates: intermediates,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
-		return fmt.Errorf("invalid client certificate: %w", err)
+		return metrics.ReasonClientCertificate, fmt.Errorf("invalid client certificate: %w", err)
 	}
-	return nil
+	return "", nil
 }

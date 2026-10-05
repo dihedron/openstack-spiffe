@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
+
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics/metricstest"
 )
 
 var testNow = time.Date(2026, 9, 29, 14, 32, 11, 0, time.UTC)
@@ -388,5 +391,23 @@ func TestLimitSources(t *testing.T) {
 	}
 	if _, err := LimitSources(nil, http.NotFoundHandler()); err == nil {
 		t.Error("LimitSources accepted no limiter")
+	}
+}
+
+func TestSourceMiddlewareReasons(t *testing.T) {
+	m, r := metricstest.New(t, metrics.Config{})
+	clock := &testClock{now: testNow}
+	h, err := SourceMiddleware(newLimiter(t, 1, time.Minute, clock), 16, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := m.AttestMiddleware(h)
+	request(t, wrapped, "10.0.0.1:40000", io.NopCloser(strings.NewReader(strings.Repeat("x", 32))), 32) // declared over the cap
+	request(t, wrapped, "10.0.0.1:40000", io.NopCloser(strings.NewReader("{}")), 2)                     // the bucket is now empty
+	if got := r.Value(t, "openstack_spire.attest.requests", "reason", metrics.ReasonInvalidRequest, "http.response.status_code", "400"); got != 1 {
+		t.Errorf("%d oversized requests counted, want 1", got)
+	}
+	if got := r.Value(t, "openstack_spire.attest.requests", "reason", metrics.ReasonRateLimitedSource, "http.response.status_code", "429"); got != 1 {
+		t.Errorf("%d rate-limited requests counted, want 1", got)
 	}
 }

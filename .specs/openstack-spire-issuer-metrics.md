@@ -24,7 +24,7 @@ This spec adds metrics, instrumented with OpenTelemetry and exported either for 
 
 ## Design
 
-**Instrumentation**: the OpenTelemetry metrics API (`go.opentelemetry.io/otel/metric`) and SDK (`go.opentelemetry.io/otel/sdk/metric`). A new package, `internal/issuer/metrics`, creates every instrument once, behind a small typed API (`metrics.TokenIssued(ctx, attrs)`, ...), so that instrument names, units and attribute sets are defined in one place and the components never touch the OpenTelemetry API directly. When metrics are disabled, the package uses OpenTelemetry's no-op provider: instrumentation costs nothing and needs no branches in the components.
+**Instrumentation**: the OpenTelemetry metrics API (`go.opentelemetry.io/otel/metric`) and SDK (`go.opentelemetry.io/otel/sdk/metric`). A new package, `internal/issuer/metrics`, creates every instrument once, behind a small typed API (`metrics.TokenIssued(ctx, attrs)`, ...), so that instrument names, units and attribute sets are defined in one place and the components never touch the OpenTelemetry API directly. When metrics are disabled, no provider is created at all: every recording method returns at once (a nil check), so instrumentation costs nothing and needs no branches in the components.
 
 **Exporters**, one per process, selected by `metrics.exporter`:
 
@@ -49,7 +49,9 @@ This spec adds metrics, instrumented with OpenTelemetry and exported either for 
 | `openstack_spire.token.size` | histogram `By` | — | Serialized token size, to watch the margin to `iid.MaxTokenBytes` |
 | `openstack_spire.tags.dropped` | counter `{tag}` | `reason` (`not_string`, `not_allowed`, `too_large`, `not_encodable`, `invalid_key`, `invalid_value`: the `claims.Reason` values) | Instance tags left out of tokens |
 
-`reason` is a closed set, one value per row of the issuer spec's failure table: `source_not_allowed`, `client_certificate`, `rate_limited_source`, `rate_limited_instance`, `invalid_request`, `unauthenticated`, `caller_not_allowed`, `keystone_busy`, `keystone_unavailable`, `instance_not_allowed` (unknown instance, project mismatch, disallowed status, unknown project), `nova_unavailable`, `enrichment_invalid`, `key_store_unavailable`, `signing_failed`; and `none` for issued tokens. A rejection path without a reason fails the tests.
+`reason` is a closed set, one value per row of the issuer spec's failure table: `source_not_allowed`, `client_certificate`, `rate_limited_source`, `rate_limited_instance`, `invalid_request` (a malformed, oversized or invalid body, or a method other than `POST`: the status tells them apart), `unauthenticated`, `caller_not_allowed`, `keystone_busy`, `keystone_unavailable`, `instance_not_allowed` (unknown instance, project mismatch, disallowed status, unknown project), `lookup_unavailable` (Nova, or Keystone for the project lookup, unreachable during verification), `enrichment_invalid` (an enabled enrichment attribute missing or failing value validation), `key_store_unavailable`, `signing_failed`; and `none` for issued tokens.
+
+Each layer of `/attest` (the source and certificate guard, the source rate limit and body cap, the Keystone authentication, the handler) names its reason in the request context just before it answers; an outermost wrapper records the request once it ends. A rejection path that names no reason is still counted, under `unspecified`, and the tests fail if any path produces it.
 
 Instances attested per hour is `rate(openstack_spire_tokens_issued_total)` divided by the expected tokens per instance; the issuer does not count distinct instances, which would mean tracking instance IDs in memory for metrics alone.
 
@@ -60,8 +62,8 @@ Instances attested per hour is `rate(openstack_spire_tokens_issued_total)` divid
 | `openstack_spire.keystone.validations` | counter | `result` (`valid`, `invalid`, `not_allowed`, `error`, `busy`), `source` (`cache`, `merged`, `keystone`) | Caller token validations, and how they were answered |
 | `openstack_spire.keystone.validation.duration` | histogram `s` | `result` | Calls actually made to Keystone. Buckets: 5ms to 10s |
 | `openstack_spire.keystone.validations.in_flight` | up-down counter | — | Against `keystone.max_concurrent_validations` |
-| `openstack_spire.nova.lookups` | counter | `result` (`found`, `not_found`, `error`), `source` (`cache`, `nova`) | Instance verification lookups |
-| `openstack_spire.nova.lookup.duration` | histogram `s` | `result` | Calls actually made to Nova. Buckets: 5ms to 10s |
+| `openstack_spire.verification.lookups` | counter | `kind` (`server`: the Nova server record; `project`: the Keystone project record), `result` (`found`, `not_found`, `error`), `source` (`cache`, `merged`, `backend`) | Instance verification lookups |
+| `openstack_spire.verification.lookup.duration` | histogram `s` | `kind`, `result` | Calls actually made to Nova or Keystone. Buckets: 5ms to 10s |
 | `openstack_spire.signing.duration` | histogram `s` | `algorithm`, `result` | Signing operations. Buckets: 100µs to 1s |
 
 ### Keys and key sets
@@ -199,3 +201,9 @@ The review accepted every proposal of the draft:
 3. **The default listener is loopback without TLS** (`127.0.0.1:9464`), for a collector agent on the same host. TLS and client certificates are required on any other address.
 4. **Go runtime metrics are on by default** (`runtime: true`): they cost little and explain most latency anomalies (GC, memory).
 5. **The aggregator takes the same `metrics` block** as the signer, with the metrics that apply to it (HTTP, key sets, fetches, rate limits, readiness, runtime).
+
+Settled while implementing (Oct 5):
+
+6. **`lookup_unavailable`** replaces `nova_unavailable`: the same `503` path covers the Keystone project lookup, needed for the `project_name` and `domain_id` enrichment claims.
+7. **Verification lookups** (`verification.lookups`, `verification.lookup.duration`) replace `nova.lookups` and `nova.lookup.duration`, with a `kind` attribute, so that Keystone project lookups are measured too.
+8. **A method other than `POST`** on `/attest` counts as `invalid_request`; the status attribute (`405`) tells it apart.

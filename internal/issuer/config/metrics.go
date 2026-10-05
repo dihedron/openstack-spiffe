@@ -7,19 +7,21 @@ import (
 	"regexp"
 	"slices"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 )
 
 // Metrics exporters and OTLP protocols (see openstack-spire-issuer-metrics.md).
 const (
 	// ExporterPrometheus serves the metrics for scraping, on their own
 	// listener.
-	ExporterPrometheus = "prometheus"
+	ExporterPrometheus = metrics.ExporterPrometheus
 	// ExporterOTLP pushes the metrics to an OpenTelemetry Collector.
-	ExporterOTLP = "otlp"
+	ExporterOTLP = metrics.ExporterOTLP
 	// ProtocolHTTP is OTLP over HTTP with protobuf payloads.
-	ProtocolHTTP = "http/protobuf"
+	ProtocolHTTP = metrics.ProtocolHTTP
 	// ProtocolGRPC is OTLP over gRPC.
-	ProtocolGRPC = "grpc"
+	ProtocolGRPC = metrics.ProtocolGRPC
 )
 
 const minOTLPInterval = 5 * time.Second
@@ -90,6 +92,27 @@ type MetricsOTLP struct {
 	// to the collector ("key=value,..."), e.g. credentials, which never
 	// belong in the file.
 	HeadersEnv string `yaml:"headers_env"`
+}
+
+// Settings returns what the metrics package needs of the configuration.
+func (m Metrics) Settings() metrics.Config {
+	return metrics.Config{
+		Enabled:          m.Enabled,
+		Exporter:         m.Exporter,
+		Runtime:          m.Runtime,
+		ProjectAttribute: m.ProjectAttribute,
+		MaxProjects:      m.MaxProjects,
+		OTLP: metrics.OTLPConfig{
+			Endpoint:       m.OTLP.Endpoint,
+			Protocol:       m.OTLP.Protocol,
+			Interval:       m.OTLP.Interval,
+			Timeout:        m.OTLP.Timeout,
+			CACertPath:     m.OTLP.CACertPath,
+			ClientCertPath: m.OTLP.ClientCertPath,
+			ClientKeyPath:  m.OTLP.ClientKeyPath,
+			HeadersEnv:     m.OTLP.HeadersEnv,
+		},
+	}
 }
 
 func defaultMetrics() Metrics {

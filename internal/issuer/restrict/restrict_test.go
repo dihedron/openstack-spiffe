@@ -17,6 +17,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics/metricstest"
 )
 
 // issuer is a test CA.
@@ -230,5 +233,22 @@ func TestNewRejectsBadInput(t *testing.T) {
 	}
 	if _, err := New(nil, garbage); err == nil {
 		t.Error("a CA bundle without certificates accepted")
+	}
+}
+
+func TestRejectionReasons(t *testing.T) {
+	ca := newCA(t, "nova client CA")
+	other := newCA(t, "another CA")
+	foreign := issue(t, &other, "nova-vendordata", false, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, time.Now().Add(time.Hour))
+	m, r := metricstest.New(t, metrics.Config{})
+	h, _ := guarded(t, []string{"10.0.20.0/24"}, writeBundle(t, ca.cert))
+	wrapped := m.AttestMiddleware(h)
+	serve(wrapped, request(t, "10.0.21.7:40000"))
+	serve(wrapped, request(t, "10.0.20.7:40000"))
+	serve(wrapped, request(t, "10.0.20.7:40000", foreign.cert))
+	for reason, want := range map[string]int64{metrics.ReasonSourceNotAllowed: 1, metrics.ReasonClientCertificate: 2} {
+		if got := r.Value(t, "openstack_spire.attest.requests", "reason", reason, "http.response.status_code", "403"); got != want {
+			t.Errorf("%s: %d, want %d", reason, got, want)
+		}
 	}
 }

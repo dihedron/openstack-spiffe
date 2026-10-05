@@ -584,7 +584,7 @@ func TestIssuedDescribesTheToken(t *testing.T) {
 			t.Fatalf("rotate=%v: Mint: %v", rotate, err)
 		}
 		h, c := verify(t, ks, issued.Token)
-		want := Issued{Token: issued.Token, KeyID: h.KeyID, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}
+		want := Issued{Token: issued.Token, KeyID: h.KeyID, Algorithm: h.Algorithm, ID: c.ID, IssuedAt: c.IssuedAt, Expiry: c.Expiry}
 		if issued != want {
 			t.Fatalf("rotate=%v: Issued %+v, want %+v", rotate, issued, want)
 		}

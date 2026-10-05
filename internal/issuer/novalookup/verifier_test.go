@@ -203,7 +203,7 @@ func TestBackendUnavailable(t *testing.T) {
 			tt.setup(b)
 			v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment(tt.enrich))
 			_, err := v.Verify(context.Background(), projectID, instanceID)
-			if !errors.Is(err, ErrLookupUnavailable) || errors.Is(err, ErrInstanceMismatch) {
+			if !errors.Is(err, ErrLookupUnavailable) || errors.Is(err, ErrInstanceMismatch) || errors.Is(err, ErrEnrichmentInvalid) {
 				t.Fatalf("Verify error %v, want ErrLookupUnavailable only", err)
 			}
 		})
@@ -274,8 +274,8 @@ func TestMissingEnrichmentAttributeIsUnavailable(t *testing.T) {
 	b.setServer(Server{ProjectID: projectID, UserID: "u1", Status: "BUILD"}) // not scheduled yet: no zone
 	v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment([]string{iid.ClaimAvailabilityZone}))
 	_, err := v.Verify(context.Background(), projectID, instanceID)
-	if !errors.Is(err, ErrLookupUnavailable) {
-		t.Fatalf("Verify error %v, want ErrLookupUnavailable (never a token with a missing enrichment claim)", err)
+	if !errors.Is(err, ErrLookupUnavailable) || !errors.Is(err, ErrEnrichmentInvalid) {
+		t.Fatalf("Verify error %v, want ErrLookupUnavailable and ErrEnrichmentInvalid (never a token with a missing enrichment claim)", err)
 	}
 }
 
@@ -307,8 +307,8 @@ func TestInvalidEnrichmentValueIsUnavailable(t *testing.T) {
 			b.projects[projectID] = tc.project
 			v := newVerifier(t, b, &testClock{now: testNow}, WithEnrichment(iid.EnrichmentClaims()))
 			e, err := v.Verify(context.Background(), projectID, instanceID)
-			if !errors.Is(err, ErrLookupUnavailable) {
-				t.Fatalf("Verify = %+v, %v, want ErrLookupUnavailable (never a token the SPIRE Server would reject)", e, err)
+			if !errors.Is(err, ErrLookupUnavailable) || !errors.Is(err, ErrEnrichmentInvalid) {
+				t.Fatalf("Verify = %+v, %v, want ErrLookupUnavailable and ErrEnrichmentInvalid (never a token the SPIRE Server would reject)", e, err)
 			}
 		})
 	}

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -27,7 +26,7 @@ const otlpHTTPPath = "/v1/metrics"
 
 // newOTLPExporter builds the OTLP exporter, over verified TLS, with every
 // option set explicitly so that no OTEL_* variable applies.
-func newOTLPExporter(ctx context.Context, cfg config.MetricsOTLP, minTLSVersion uint16) (sdkmetric.Exporter, error) {
+func newOTLPExporter(ctx context.Context, cfg OTLPConfig, minTLSVersion uint16) (sdkmetric.Exporter, error) {
 	tlsConfig, err := otlpTLSConfig(cfg, minTLSVersion)
 	if err != nil {
 		return nil, err
@@ -43,7 +42,7 @@ func newOTLPExporter(ctx context.Context, cfg config.MetricsOTLP, minTLSVersion 
 
 	var exporter sdkmetric.Exporter
 	switch cfg.Protocol {
-	case config.ProtocolHTTP:
+	case ProtocolHTTP:
 		if endpoint.Path == "" || endpoint.Path == "/" {
 			endpoint.Path = otlpHTTPPath
 		}
@@ -55,7 +54,7 @@ func newOTLPExporter(ctx context.Context, cfg config.MetricsOTLP, minTLSVersion 
 			otlpmetrichttp.WithCompression(otlpmetrichttp.GzipCompression),
 			otlpmetrichttp.WithTemporalitySelector(sdkmetric.DefaultTemporalitySelector),
 			otlpmetrichttp.WithAggregationSelector(sdkmetric.DefaultAggregationSelector))
-	case config.ProtocolGRPC:
+	case ProtocolGRPC:
 		exporter, err = otlpmetricgrpc.New(ctx,
 			otlpmetricgrpc.WithEndpoint(endpoint.Host),
 			otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig)),
@@ -75,7 +74,7 @@ func newOTLPExporter(ctx context.Context, cfg config.MetricsOTLP, minTLSVersion 
 
 // otlpTLSConfig verifies the collector against ca_cert_path (default: the
 // system roots) and presents the client certificate, if configured.
-func otlpTLSConfig(cfg config.MetricsOTLP, minTLSVersion uint16) (*tls.Config, error) {
+func otlpTLSConfig(cfg OTLPConfig, minTLSVersion uint16) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: minTLSVersion}
 	if cfg.CACertPath != "" {
 		data, err := os.ReadFile(filepath.Clean(cfg.CACertPath))

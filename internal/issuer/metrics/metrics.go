@@ -5,7 +5,7 @@
 // Every instrument is created here, behind a typed API, so that names,
 // units and attribute sets are defined in one place and the components never
 // touch the OpenTelemetry API. A nil *Metrics, like a disabled one, records
-// nothing.
+// nothing and costs a nil check.
 //
 // The configuration comes from the file only: every exporter option is set
 // explicitly, so that the OTEL_* environment variables cannot redirect the
@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -30,7 +29,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelprometheus "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -64,6 +62,7 @@ type Metrics struct {
 	handler  http.Handler             // the Prometheus endpoint, if any
 
 	httpDuration metric.Float64Histogram
+	issuance     *issuance
 }
 
 type options struct {
@@ -81,7 +80,7 @@ func WithReader(r sdkmetric.Reader) Option { return func(o *options) { o.reader 
 // New builds the metrics of a process from a checked configuration;
 // minTLSVersion applies to the connection to the collector. Disabled
 // metrics cost nothing: the instruments are no-ops.
-func New(ctx context.Context, cfg config.Metrics, res Resource, minTLSVersion uint16, opts ...Option) (*Metrics, error) {
+func New(ctx context.Context, cfg Config, res Resource, minTLSVersion uint16, opts ...Option) (*Metrics, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -92,8 +91,8 @@ func New(ctx context.Context, cfg config.Metrics, res Resource, minTLSVersion ui
 	case o.reader != nil:
 		reader = o.reader
 	case !cfg.Enabled:
-		return m, m.instrument(noop.NewMeterProvider().Meter(scope))
-	case cfg.Exporter == config.ExporterPrometheus:
+		return m, nil // every recording method returns at once
+	case cfg.Exporter == ExporterPrometheus:
 		registry := prometheus.NewRegistry()
 		exporter, err := otelprometheus.New(otelprometheus.WithRegisterer(registry))
 		if err != nil {
@@ -101,7 +100,7 @@ func New(ctx context.Context, cfg config.Metrics, res Resource, minTLSVersion ui
 		}
 		reader = exporter
 		m.handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError})
-	case cfg.Exporter == config.ExporterOTLP:
+	case cfg.Exporter == ExporterOTLP:
 		exporter, err := newOTLPExporter(ctx, cfg.OTLP, minTLSVersion)
 		if err != nil {
 			return nil, err
@@ -129,6 +128,11 @@ func New(ctx context.Context, cfg config.Metrics, res Resource, minTLSVersion ui
 		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
 		sdkmetric.WithCardinalityLimit(cardinalityLimit),
 	)
+	m.issuance = &issuance{
+		projectAttribute: cfg.ProjectAttribute,
+		maxProjects:      max(cfg.MaxProjects, 1),
+		projects:         map[string]struct{}{},
+	}
 	if err := m.instrument(m.provider.Meter(scope)); err != nil {
 		return nil, errors.Join(err, m.provider.Shutdown(ctx))
 	}
@@ -150,7 +154,7 @@ func (m *Metrics) instrument(meter metric.Meter) error {
 	if err != nil {
 		return fmt.Errorf("creating the metrics instruments: %w", err)
 	}
-	return nil
+	return m.issuance.instrument(meter)
 }
 
 // Handler returns the Prometheus endpoint, or nil when the metrics are not

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 )
 
 type bucket struct {
@@ -157,6 +158,7 @@ func SourceMiddleware(limiter *Limiter, maxBodyBytes int64, next http.Handler) (
 		}
 		source := sourceKey(r)
 		if r.ContentLength > maxBodyBytes {
+			metrics.Reject(r.Context(), metrics.ReasonInvalidRequest)
 			slog.WarnContext(r.Context(), "request body too large", "source", source, "content_length", r.ContentLength, "max_body_bytes", maxBodyBytes)
 			http.Error(w, "request body too large", http.StatusBadRequest)
 			return
@@ -187,6 +189,7 @@ func allowSource(limiter *Limiter, w http.ResponseWriter, r *http.Request) bool 
 	source := sourceKey(r)
 	ok, retryAfter := limiter.Allow(source)
 	if !ok {
+		metrics.Reject(r.Context(), metrics.ReasonRateLimitedSource)
 		// debug level: a flood must not turn into a logging flood
 		slog.DebugContext(r.Context(), "per-source rate limit exceeded", "source", source)
 		w.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(retryAfter.Seconds())), 10))

@@ -75,22 +75,56 @@ func New[K comparable, V any](cfg Config) (*Cache[K, V], error) {
 	return c, nil
 }
 
+// Source tells how GetSource obtained a value.
+type Source int8
+
+const (
+	// Hit is a value found in the cache.
+	Hit Source = iota + 1
+	// Merged is a value loaded for another caller asking at the same time.
+	Merged
+	// Loaded is a value this caller's request loaded.
+	Loaded
+)
+
+// String returns the name of the source as the metrics record it: cache,
+// merged or backend.
+func (s Source) String() string {
+	switch s {
+	case Hit:
+		return "cache"
+	case Merged:
+		return "merged"
+	case Loaded:
+		return "backend"
+	}
+	return fmt.Sprintf("Source(%d)", int8(s))
+}
+
 // Get returns the entry for key if it has not expired, or else loads it,
 // sharing the load with any concurrent caller of the same key. The load runs
 // detached from the caller's context, bounded by the load timeout, so that a
 // caller going away does not fail the others; a caller whose context ends
 // first gets its context's error.
 func (c *Cache[K, V]) Get(ctx context.Context, key K, load Loader[V]) (V, error) {
+	value, _, err := c.GetSource(ctx, key, load)
+	return value, err
+}
+
+// GetSource is Get, also telling where the value (or the error) came from.
+func (c *Cache[K, V]) GetSource(ctx context.Context, key K, load Loader[V]) (V, Source, error) {
 	c.mu.Lock()
 	if e, ok := c.entries[key]; ok {
 		if c.now().Before(e.expires) {
 			c.mu.Unlock()
-			return e.value, nil
+			return e.value, Hit, nil
 		}
 		delete(c.entries, key)
 	}
+	source := Merged
 	cl, ok := c.inflight[key]
 	if !ok {
+		source = Loaded
 		cl = &call[V]{done: make(chan struct{})}
 		c.inflight[key] = cl
 		go c.load(context.WithoutCancel(ctx), key, load, cl)
@@ -99,10 +133,10 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K, load Loader[V]) (V, error)
 
 	select {
 	case <-cl.done:
-		return cl.value, cl.err
+		return cl.value, source, cl.err
 	case <-ctx.Done():
 		var zero V
-		return zero, ctx.Err()
+		return zero, source, ctx.Err()
 	}
 }
 

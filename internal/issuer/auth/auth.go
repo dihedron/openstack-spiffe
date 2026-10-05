@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/ttlcache"
 )
 
@@ -77,6 +78,8 @@ type Authenticator struct {
 	// cache holds successful validations by the SHA-256 of the token (never
 	// the token itself) and merges concurrent validations of the same token.
 	cache *ttlcache.Cache[[sha256.Size]byte, Identity]
+
+	metrics *metrics.Metrics // nil: none recorded
 }
 
 // Option configures an Authenticator.
@@ -97,6 +100,11 @@ func WithCacheTTL(d time.Duration) Option {
 // 1024).
 func WithMaxCacheEntries(n int) Option {
 	return func(a *Authenticator) { a.maxEntries = n }
+}
+
+// WithMetrics records the validations in m.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(a *Authenticator) { a.metrics = m }
 }
 
 // WithValidationTimeout bounds each Keystone validation (default: 5s).
@@ -173,16 +181,20 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(WithIdentity(ctx, identity)))
 			return
 		case errors.Is(err, ErrMissingToken), errors.Is(err, ErrInvalidToken):
+			metrics.Reject(ctx, metrics.ReasonUnauthenticated)
 			slog.WarnContext(ctx, "rejecting unauthenticated request", "client_address", clientaddr.String(r), "reason", err)
 			status = http.StatusUnauthorized
 		case errors.Is(err, ErrForbidden):
+			metrics.Reject(ctx, metrics.ReasonCallerNotAllowed)
 			slog.WarnContext(ctx, "rejecting unauthorized caller", "client_address", clientaddr.String(r), "user_id", identity.UserID, "reason", err)
 			status = http.StatusForbidden
 		case errors.Is(err, ErrBusy):
+			metrics.Reject(ctx, metrics.ReasonKeystoneBusy)
 			// debug level: a flood must not turn into a logging flood
 			slog.DebugContext(ctx, "refusing caller: Keystone validation cap reached", "client_address", clientaddr.String(r))
 			status = http.StatusServiceUnavailable
 		default:
+			metrics.Reject(ctx, metrics.ReasonKeystoneUnavailable)
 			slog.ErrorContext(ctx, "cannot validate caller token", "error", err)
 			status = http.StatusServiceUnavailable
 		}
@@ -210,12 +222,19 @@ func IdentityFrom(ctx context.Context) (Identity, bool) {
 // the (unauthorized) caller's, for logging.
 func (a *Authenticator) Authenticate(ctx context.Context, token string) (Identity, error) {
 	if token == "" {
-		return Identity{}, ErrMissingToken
+		return Identity{}, ErrMissingToken // no validation at all
 	}
-	identity, err := a.validate(ctx, token)
-	if err != nil {
-		return Identity{}, err
+	identity, source, err := a.validate(ctx, token)
+	if err == nil {
+		identity, err = a.authorize(identity)
 	}
+	a.metrics.KeystoneValidation(ctx, validationResult(err), source.String())
+	return identity, err
+}
+
+// authorize checks a validated identity: not expired, allowlisted and
+// carrying the required role. On ErrForbidden it returns the identity.
+func (a *Authenticator) authorize(identity Identity) (Identity, error) {
 	if !a.now().Before(identity.ExpiresAt) {
 		return Identity{}, fmt.Errorf("%w: expired at %s", ErrInvalidToken, identity.ExpiresAt.Format(time.RFC3339))
 	}
@@ -228,12 +247,27 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (Identit
 	return identity, nil
 }
 
+// validationResult is the metrics result of a validation.
+func validationResult(err error) string {
+	switch {
+	case err == nil:
+		return metrics.ResultValid
+	case errors.Is(err, ErrInvalidToken):
+		return metrics.ResultInvalid
+	case errors.Is(err, ErrForbidden):
+		return metrics.ResultNotAllowed
+	case errors.Is(err, ErrBusy):
+		return metrics.ResultBusy
+	}
+	return metrics.ResultError
+}
+
 // validate returns the identity behind the token, from the cache or from a
-// (possibly shared) Keystone validation. Successful validations are cached
-// for at most the cache TTL and never beyond the token's expiry; failures
-// are not cached.
-func (a *Authenticator) validate(ctx context.Context, token string) (Identity, error) {
-	identity, err := a.cache.Get(ctx, sha256.Sum256([]byte(token)), func(ctx context.Context) (Identity, time.Time, error) {
+// (possibly shared) Keystone validation, and where it came from. Successful
+// validations are cached for at most the cache TTL and never beyond the
+// token's expiry; failures are not cached.
+func (a *Authenticator) validate(ctx context.Context, token string) (Identity, ttlcache.Source, error) {
+	identity, source, err := a.cache.GetSource(ctx, sha256.Sum256([]byte(token)), func(ctx context.Context) (Identity, time.Time, error) {
 		// only a real validation takes a slot: cache hits and callers merged
 		// into this one never get here
 		if a.inFlight != nil {
@@ -244,7 +278,11 @@ func (a *Authenticator) validate(ctx context.Context, token string) (Identity, e
 				return Identity{}, time.Time{}, fmt.Errorf("%w: %w", ErrUnavailable, ErrBusy)
 			}
 		}
+		a.metrics.KeystoneInFlight(ctx, 1)
+		start := time.Now()
 		identity, err := a.validator.Validate(ctx, token)
+		a.metrics.KeystoneCall(ctx, validationResult(err), time.Since(start))
+		a.metrics.KeystoneInFlight(ctx, -1)
 		if err != nil {
 			return Identity{}, time.Time{}, err
 		}
@@ -258,5 +296,5 @@ func (a *Authenticator) validate(ctx context.Context, token string) (Identity, e
 		// Keystone failures, timeouts and the caller going away
 		err = fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	return identity, err
+	return identity, source, err
 }

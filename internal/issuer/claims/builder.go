@@ -9,6 +9,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
@@ -22,6 +23,12 @@ type Builder struct {
 	allowlist    []string
 	maxTagsBytes int
 	custom       map[string]string
+	metrics      *metrics.Metrics // nil: none recorded
+}
+
+// WithMetrics records the tags left out in m.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(b *Builder) { b.metrics = m }
 }
 
 // Option configures a Builder.
@@ -110,6 +117,7 @@ func (b *Builder) Build(ctx context.Context, req NovaRequest, enrichment Enrichm
 
 	tags, dropped := FilterTags(req.Metadata, b.allowlist, b.maxTagsBytes)
 	for _, d := range dropped {
+		b.metrics.TagDropped(ctx, d.Reason.Name())
 		slog.InfoContext(ctx, "metadata entry left out of tags", "project_id", req.ProjectID, "instance_id", req.InstanceID, "key", LoggedKey(d.Key), "reason", d.Reason)
 	}
 

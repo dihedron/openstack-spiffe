@@ -232,3 +232,46 @@ func TestNewValidation(t *testing.T) {
 		t.Fatal("accepted a negative timeout")
 	}
 }
+
+func TestGetSource(t *testing.T) {
+	clock := &testClock{now: testNow}
+	c := newCache(t, clock, Config{})
+	gate := make(chan struct{})
+	var calls atomic.Int32
+	slow := func(context.Context) (string, time.Time, error) {
+		calls.Add(1)
+		<-gate
+		return "v", clock.Now().Add(time.Minute), nil
+	}
+	var mu sync.Mutex
+	sources := map[Source]int{}
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Go(func() {
+			_, source, err := c.GetSource(context.Background(), "k", slow)
+			if err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			sources[source]++
+			mu.Unlock()
+		})
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+	if sources[Loaded] != 1 || sources[Merged] != 4 {
+		t.Errorf("sources %v, want 1 loaded and 4 merged", sources)
+	}
+	if _, source, _ := c.GetSource(context.Background(), "k", slow); source != Hit {
+		t.Errorf("source %v after the load, want a hit", source)
+	}
+	for source, name := range map[Source]string{Hit: "cache", Merged: "merged", Loaded: "backend"} {
+		if source.String() != name {
+			t.Errorf("%d.String() = %q, want %q", source, source, name)
+		}
+	}
+}

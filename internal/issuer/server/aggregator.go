@@ -85,7 +85,7 @@ func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 	if err != nil {
 		host = "unknown"
 	}
-	m, err := metrics.New(context.Background(), cfg.Metrics,
+	m, err := metrics.New(context.Background(), cfg.Metrics.Settings(),
 		metrics.Resource{Component: "aggregator", InstanceID: host, Version: metadata.Version},
 		cfg.MinTLSVersion())
 	if err != nil {

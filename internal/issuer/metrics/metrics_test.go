@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	collectorpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -28,13 +27,12 @@ import (
 
 var testResource = Resource{Component: "signer", InstanceID: "signer-a", Version: "1.2.3"}
 
-func enabled(exporter string) config.Metrics {
-	return config.Metrics{
+func enabled(exporter string) Config {
+	return Config{
 		Enabled:     true,
 		Exporter:    exporter,
 		MaxProjects: 500,
-		Prometheus:  config.MetricsPrometheus{ListenAddr: "127.0.0.1:0"},
-		OTLP:        config.MetricsOTLP{Protocol: config.ProtocolHTTP, Interval: time.Hour, Timeout: 5 * time.Second},
+		OTLP:        OTLPConfig{Protocol: ProtocolHTTP, Interval: time.Hour, Timeout: 5 * time.Second},
 	}
 }
 
@@ -62,7 +60,7 @@ func scrape(t *testing.T, m *Metrics) string {
 }
 
 func TestDisabled(t *testing.T) {
-	for name, m := range map[string]*Metrics{"nil": nil, "disabled": mustNew(t, config.Metrics{Enabled: false})} {
+	for name, m := range map[string]*Metrics{"nil": nil, "disabled": mustNew(t, Config{Enabled: false})} {
 		t.Run(name, func(t *testing.T) {
 			if m.Handler() != nil {
 				t.Error("a Prometheus handler while disabled")
@@ -75,7 +73,7 @@ func TestDisabled(t *testing.T) {
 	}
 }
 
-func mustNew(t *testing.T, cfg config.Metrics, opts ...Option) *Metrics {
+func mustNew(t *testing.T, cfg Config, opts ...Option) *Metrics {
 	t.Helper()
 	m, err := New(context.Background(), cfg, testResource, tls.VersionTLS13, opts...)
 	if err != nil {
@@ -89,7 +87,7 @@ func TestPrometheus(t *testing.T) {
 	// the resource attributes set here win over the environment's
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "service.instance.id=from-env")
 	t.Setenv("OTEL_SERVICE_NAME", "from-env")
-	cfg := enabled(config.ExporterPrometheus)
+	cfg := enabled(ExporterPrometheus)
 	cfg.Runtime = true
 	m := mustNew(t, cfg)
 	serve(m, http.MethodPost, "/attest", http.StatusOK)
@@ -122,7 +120,7 @@ func TestPrometheus(t *testing.T) {
 }
 
 func TestPrometheusWithoutRuntime(t *testing.T) {
-	m := mustNew(t, enabled(config.ExporterPrometheus))
+	m := mustNew(t, enabled(ExporterPrometheus))
 	if strings.Contains(scrape(t, m), "go_goroutine_count") {
 		t.Error("runtime metrics while runtime is false")
 	}
@@ -246,10 +244,10 @@ func hasMetric(req *collectorpb.ExportMetricsServiceRequest, name string) (metri
 }
 
 func TestOTLP(t *testing.T) {
-	for _, protocol := range []string{config.ProtocolHTTP, config.ProtocolGRPC} {
+	for _, protocol := range []string{ProtocolHTTP, ProtocolGRPC} {
 		t.Run(protocol, func(t *testing.T) {
 			var c *collector
-			if protocol == config.ProtocolHTTP {
+			if protocol == ProtocolHTTP {
 				c = newHTTPCollector(t)
 			} else {
 				c = newGRPCCollector(t)
@@ -258,7 +256,7 @@ func TestOTLP(t *testing.T) {
 			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://elsewhere.invalid:4318")
 			t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "X-From-Env=leak")
 			t.Setenv("TEST_OTLP_HEADERS", "Authorization=Bearer%20secret,X-Tenant=lab")
-			cfg := enabled(config.ExporterOTLP)
+			cfg := enabled(ExporterOTLP)
 			cfg.OTLP.Protocol = protocol
 			cfg.OTLP.Endpoint = "https://" + c.addr
 			cfg.OTLP.CACertPath = c.caPath
@@ -279,7 +277,7 @@ func TestOTLP(t *testing.T) {
 			if !metric || !resource {
 				t.Errorf("export: metric %v, resource %v", metric, resource)
 			}
-			if protocol == config.ProtocolHTTP && paths[0] != otlpHTTPPath {
+			if protocol == ProtocolHTTP && paths[0] != otlpHTTPPath {
 				t.Errorf("path %q, want %q", paths[0], otlpHTTPPath)
 			}
 			h := headers[0]
@@ -295,7 +293,7 @@ func TestOTLP(t *testing.T) {
 
 func TestOTLPRefusesAnUnknownCA(t *testing.T) {
 	c := newHTTPCollector(t)
-	cfg := enabled(config.ExporterOTLP)
+	cfg := enabled(ExporterOTLP)
 	cfg.OTLP.Endpoint = "https://" + c.addr // no ca_cert_path: system roots
 	m, err := New(context.Background(), cfg, testResource, tls.VersionTLS12)
 	if err != nil {
@@ -343,7 +341,7 @@ func TestOTLPUnreachableCollector(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close() // nothing listens there any more
-	cfg := enabled(config.ExporterOTLP)
+	cfg := enabled(ExporterOTLP)
 	cfg.OTLP.Endpoint = "https://" + addr
 	cfg.OTLP.Interval, cfg.OTLP.Timeout = 50*time.Millisecond, 20*time.Millisecond
 	m, err := New(context.Background(), cfg, testResource, tls.VersionTLS12)
@@ -385,7 +383,7 @@ func TestOTLPHeaders(t *testing.T) {
 }
 
 func TestNewRefusesMissingFiles(t *testing.T) {
-	cfg := enabled(config.ExporterOTLP)
+	cfg := enabled(ExporterOTLP)
 	cfg.OTLP.Endpoint = "https://collector.invalid:4318"
 	cfg.OTLP.CACertPath = filepath.Join(t.TempDir(), "missing.pem")
 	if _, err := New(context.Background(), cfg, testResource, tls.VersionTLS12); err == nil {

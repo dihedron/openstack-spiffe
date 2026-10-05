@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/claims"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/ttlcache"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
@@ -25,6 +26,10 @@ var (
 	// ErrLookupUnavailable is returned (wrapped) when Nova or Keystone cannot
 	// be reached, or a record lacks an enabled enrichment attribute (503).
 	ErrLookupUnavailable = errors.New("instance lookup unavailable")
+	// ErrEnrichmentInvalid is returned (wrapped, with ErrLookupUnavailable)
+	// when an enabled enrichment attribute is missing from its record or
+	// fails iid.ValidateEnrichmentValue (503).
+	ErrEnrichmentInvalid = errors.New("enrichment attribute missing or invalid")
 	// ErrNotFound is returned (wrapped) by a Backend for a record that does
 	// not exist.
 	ErrNotFound = errors.New("not found")
@@ -82,6 +87,8 @@ type Verifier struct {
 
 	servers  *ttlcache.Cache[string, Server]
 	projects *ttlcache.Cache[string, Project]
+
+	metrics *metrics.Metrics // nil: none recorded
 }
 
 // Option configures a Verifier.
@@ -131,6 +138,22 @@ func WithLookupTimeout(d time.Duration) Option {
 // WithClock sets the source of the current time (default: time.Now).
 func WithClock(now func() time.Time) Option {
 	return func(v *Verifier) { v.now = now }
+}
+
+// WithMetrics records the lookups in m.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(v *Verifier) { v.metrics = m }
+}
+
+// lookupResult is the metrics result of a lookup.
+func lookupResult(err error) string {
+	switch {
+	case err == nil:
+		return metrics.ResultFound
+	case errors.Is(err, ErrNotFound):
+		return metrics.ResultNotFound
+	}
+	return metrics.ResultError
 }
 
 // NewVerifier creates a Verifier reading records from the backend.
@@ -234,7 +257,7 @@ func (v *Verifier) checkEnrichment(ctx context.Context, log *slog.Logger, e clai
 	for _, name := range v.enrich {
 		if err := iid.ValidateEnrichmentValue(values[name]); err != nil {
 			log.ErrorContext(ctx, "invalid enrichment attribute", "claim", name, "error", err)
-			return fmt.Errorf("%w: %s: %w", ErrLookupUnavailable, name, err)
+			return fmt.Errorf("%w: %w: %s: %w", ErrLookupUnavailable, ErrEnrichmentInvalid, name, err)
 		}
 	}
 	return nil
@@ -247,10 +270,13 @@ func (v *Verifier) verifyServer(ctx context.Context, log *slog.Logger, projectID
 	if !v.verify {
 		return e, nil
 	}
-	server, err := v.servers.Get(ctx, instanceID, func(ctx context.Context) (Server, time.Time, error) {
+	server, source, err := v.servers.GetSource(ctx, instanceID, func(ctx context.Context) (Server, time.Time, error) {
+		start := time.Now()
 		s, err := v.backend.Server(ctx, instanceID)
+		v.metrics.LookupCall(ctx, metrics.LookupServer, lookupResult(err), time.Since(start))
 		return s, v.now().Add(v.serverTTL), err
 	})
+	v.metrics.Lookup(ctx, metrics.LookupServer, lookupResult(err), source.String())
 	switch {
 	case errors.Is(err, ErrNotFound):
 		log.WarnContext(ctx, "instance verification failed", "reason", "instance not found in Nova")
@@ -282,7 +308,7 @@ func (v *Verifier) verifyServer(ctx context.Context, log *slog.Logger, projectID
 		}
 		if value == "" {
 			log.ErrorContext(ctx, "server record lacks an enrichment attribute", "claim", name, "status", server.Status)
-			return claims.Enrichment{}, fmt.Errorf("%w: server record lacks %s", ErrLookupUnavailable, name)
+			return claims.Enrichment{}, fmt.Errorf("%w: %w: server record lacks %s", ErrLookupUnavailable, ErrEnrichmentInvalid, name)
 		}
 	}
 	return e, nil
@@ -291,10 +317,13 @@ func (v *Verifier) verifyServer(ctx context.Context, log *slog.Logger, projectID
 // lookupProject returns the enrichment claims read from the project record.
 func (v *Verifier) lookupProject(ctx context.Context, log *slog.Logger, projectID string) (claims.Enrichment, error) {
 	var e claims.Enrichment
-	project, err := v.projects.Get(ctx, projectID, func(ctx context.Context) (Project, time.Time, error) {
+	project, source, err := v.projects.GetSource(ctx, projectID, func(ctx context.Context) (Project, time.Time, error) {
+		start := time.Now()
 		p, err := v.backend.Project(ctx, projectID)
+		v.metrics.LookupCall(ctx, metrics.LookupProject, lookupResult(err), time.Since(start))
 		return p, v.now().Add(v.projectTTL), err
 	})
+	v.metrics.Lookup(ctx, metrics.LookupProject, lookupResult(err), source.String())
 	switch {
 	case errors.Is(err, ErrNotFound):
 		log.WarnContext(ctx, "instance verification failed", "reason", "project not found in Keystone")
@@ -314,7 +343,7 @@ func (v *Verifier) lookupProject(ctx context.Context, log *slog.Logger, projectI
 	}
 	if (slices.Contains(v.enrich, iid.ClaimProjectName) && e.ProjectName == "") || (slices.Contains(v.enrich, iid.ClaimDomainID) && e.DomainID == "") {
 		log.ErrorContext(ctx, "project record lacks an enrichment attribute")
-		return claims.Enrichment{}, fmt.Errorf("%w: project record lacks name or domain", ErrLookupUnavailable)
+		return claims.Enrichment{}, fmt.Errorf("%w: %w: project record lacks name or domain", ErrLookupUnavailable, ErrEnrichmentInvalid)
 	}
 	return e, nil
 }

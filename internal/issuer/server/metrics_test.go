@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/openstacktest"
 )
 
 const metricsOn = "metrics:\n  enabled: true\n  prometheus:\n    listen_addr: 127.0.0.1:0\n"
@@ -140,7 +141,7 @@ func TestRunWithMetricsListeners(t *testing.T) {
 	served := func(context.Context, net.Listener, net.Listener) error { return nil }
 	ctx := context.Background()
 
-	disabled, err := metrics.New(ctx, config.Metrics{}, metrics.Resource{}, tls.VersionTLS13)
+	disabled, err := metrics.New(ctx, metrics.Config{}, metrics.Resource{}, tls.VersionTLS13)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +149,112 @@ func TestRunWithMetricsListeners(t *testing.T) {
 	if err := runWithMetrics(ctx, "127.0.0.1:0", disabled, busy.Addr().String(), served); err != nil {
 		t.Errorf("disabled metrics: %v", err)
 	}
-	enabled, err := metrics.New(ctx, config.Metrics{Enabled: true, Exporter: config.ExporterPrometheus}, metrics.Resource{}, tls.VersionTLS13)
+	enabled, err := metrics.New(ctx, metrics.Config{Enabled: true, Exporter: metrics.ExporterPrometheus}, metrics.Resource{}, tls.VersionTLS13)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// enabled: a busy metrics address fails the start
 	if err := runWithMetrics(ctx, "127.0.0.1:0", enabled, busy.Addr().String(), served); err == nil || !strings.Contains(err.Error(), "for metrics") {
 		t.Errorf("a busy metrics address: %v", err)
+	}
+}
+
+// attestReasons scrapes the signer's metrics and returns the count of each
+// (reason, status) pair of openstack_spire_attest_requests_total.
+func attestReasons(t *testing.T, h *harness) map[string]int {
+	t.Helper()
+	_, body := get(t, &http.Client{Timeout: 10 * time.Second}, http.MethodGet, h.metricsURL+"/metrics")
+	reasons := map[string]int{}
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "openstack_spire_attest_requests_total{") {
+			continue
+		}
+		label := func(name string) string {
+			_, rest, _ := strings.Cut(line, name+`="`)
+			value, _, _ := strings.Cut(rest, `"`)
+			return value
+		}
+		var n int
+		fields := strings.Fields(line)
+		if _, err := fmt.Sscan(fields[len(fields)-1], &n); err != nil {
+			t.Fatalf("unparsable line %q", line)
+		}
+		reasons[label("reason")+" "+label("http_response_status_code")] += n
+	}
+	return reasons
+}
+
+// TestAttestReasonsEndToEnd drives the signer, against the fake cloud, into
+// every refusal the cloud can produce, and checks that each is counted
+// under its reason and status, and none as unspecified.
+func TestAttestReasonsEndToEnd(t *testing.T) {
+	h := start(t, metricsOn+"enrich: [availability_zone]\n")
+	waitReady(t, h) // the first key is published ahead of use
+	token := h.cloud.IssueToken(novaUser, time.Now().Add(time.Hour))
+	alice := h.cloud.IssueToken(openstacktest.User{ID: "fedcba9876543210fedcba9876543210", Name: "alice", DomainID: "default", DomainName: "Default", Roles: []string{"member"}}, time.Now().Add(time.Hour))
+	const badZone, down = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+	h.cloud.AddInstance(openstacktest.Instance{ID: badZone, ProjectID: projectID, Status: "ACTIVE", AvailabilityZone: "az\u202e-1"})
+
+	steps := []struct {
+		token, body, want string
+	}{
+		{token, novaBody(projectID, instanceID), "none 200"},
+		{token, novaBody(projectID, instanceID), "rate_limited_instance 429"},
+		{"", novaBody(projectID, otherInstance), "unauthenticated 401"},
+		{alice, novaBody(projectID, otherInstance), "caller_not_allowed 403"},
+		{token, "{", "invalid_request 400"},
+		{token, novaBody(projectID, otherInstance), "instance_not_allowed 403"}, // another project's
+		{token, novaBody(projectID, "44444444-4444-4444-8444-444444444444"), "instance_not_allowed 403"},
+		{token, novaBody(projectID, badZone), "enrichment_invalid 503"},
+	}
+	for _, s := range steps {
+		h.request(t, http.MethodPost, "/attest", s.token, s.body)
+	}
+	h.cloud.SetDown(true)
+	h.request(t, http.MethodPost, "/attest", token, novaBody(projectID, down)) // the token is cached: Nova fails
+	fresh := h.cloud.IssueToken(novaUser, time.Now().Add(time.Hour))
+	h.request(t, http.MethodPost, "/attest", fresh, novaBody(projectID, down)) // Keystone fails
+	h.cloud.SetDown(false)
+
+	want := map[string]int{"lookup_unavailable 503": 1, "keystone_unavailable 503": 1}
+	for _, s := range steps {
+		want[s.want]++
+	}
+	got := attestReasons(t, h)
+	for key, n := range want {
+		if got[key] != n {
+			t.Errorf("%s: %d, want %d", key, got[key], n)
+		}
+	}
+	for key := range got {
+		if strings.HasPrefix(key, metrics.ReasonUnspecified) {
+			t.Errorf("a rejection with no reason: %s", key)
+		}
+	}
+}
+
+// TestGuardReasonsEndToEnd covers the refusals that need their own
+// configuration: the source allowlist, the client certificate and the
+// per-source limit.
+func TestGuardReasonsEndToEnd(t *testing.T) {
+	caPath, _, _ := clientPKI(t)
+	for _, tt := range []struct {
+		extra, want string
+		requests    int
+	}{
+		{"attest:\n  allowed_sources: [10.99.0.0/16]\n", "source_not_allowed 403", 1},
+		{"attest:\n  client_ca_path: " + caPath + "\n", "client_certificate 403", 1},
+		{"rate_limit_per_source: 1/1m\n", "rate_limited_source 429", 2},
+	} {
+		t.Run(tt.want, func(t *testing.T) {
+			h := start(t, metricsOn+tt.extra)
+			token := h.cloud.IssueToken(novaUser, time.Now().Add(time.Hour))
+			for range tt.requests {
+				h.request(t, http.MethodPost, "/attest", token, novaBody(projectID, instanceID))
+			}
+			if got := attestReasons(t, h); got[tt.want] != 1 {
+				t.Errorf("%s: %v", tt.want, got)
+			}
+		})
 	}
 }

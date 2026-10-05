@@ -38,6 +38,26 @@ const (
 // maxLoggedKeyBytes bounds the part of a dropped key that is logged.
 const maxLoggedKeyBytes = 64
 
+// Name returns the reason's stable name, as the metrics record it.
+func (r Reason) Name() string {
+	switch r {
+	case ReasonNotString:
+		return "not_string"
+	case ReasonNotAllowed:
+		return "not_allowed"
+	case ReasonTooLarge:
+		return "too_large"
+	case ReasonNotEncodable:
+		return "not_encodable"
+	case ReasonInvalidKey:
+		return "invalid_key"
+	case ReasonInvalidValue:
+		return "invalid_value"
+	default:
+		return "unknown"
+	}
+}
+
 // String returns a human-readable description of the reason.
 func (r Reason) String() string {
 	switch r {
