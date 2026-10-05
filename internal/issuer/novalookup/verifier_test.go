@@ -345,7 +345,7 @@ func TestServerRecordsCached(t *testing.T) {
 		t.Fatalf("cached record not checked against the request: %v", err)
 	}
 	clock.Advance(time.Minute)
-	v.Verify(ctx, projectID, instanceID)
+	_, _ = v.Verify(ctx, projectID, instanceID)
 	if n := b.serverCalls.Load(); n != 2 {
 		t.Fatalf("%d server lookups after the TTL, want 2", n)
 	}
@@ -356,14 +356,14 @@ func TestProjectRecordsCached(t *testing.T) {
 	clock := &testClock{now: testNow}
 	v := newVerifier(t, b, clock, WithEnrichment([]string{iid.ClaimProjectName}), WithProjectCacheTTL(10*time.Minute), WithServerCacheTTL(time.Minute))
 	ctx := context.Background()
-	v.Verify(ctx, projectID, instanceID)
+	_, _ = v.Verify(ctx, projectID, instanceID)
 	clock.Advance(2 * time.Minute)
-	v.Verify(ctx, projectID, instanceID)
+	_, _ = v.Verify(ctx, projectID, instanceID)
 	if b.serverCalls.Load() != 2 || b.projectCalls.Load() != 1 {
 		t.Fatalf("%d server and %d project lookups, want 2 and 1", b.serverCalls.Load(), b.projectCalls.Load())
 	}
 	clock.Advance(8 * time.Minute)
-	v.Verify(ctx, projectID, instanceID)
+	_, _ = v.Verify(ctx, projectID, instanceID)
 	if b.projectCalls.Load() != 2 {
 		t.Fatalf("%d project lookups after the TTL, want 2", b.projectCalls.Load())
 	}

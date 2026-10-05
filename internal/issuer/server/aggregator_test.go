@@ -53,7 +53,7 @@ func newFakeReplica(t *testing.T, kids ...string) *fakeReplica {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(r.body)
+		_, _ = w.Write(r.body)
 	}))
 	t.Cleanup(r.Close)
 	return r
@@ -116,7 +116,7 @@ func (h *aggregatorHarness) get(t *testing.T, method, path string) (*http.Respon
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp, body
 }
@@ -183,7 +183,7 @@ func TestAggregatorTLS13Minimum(t *testing.T) {
 		MaxVersion: tls.VersionTLS12,
 	}}}
 	if resp, err := old.Get(h.url + "/liveness"); err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("TLS 1.2 client accepted")
 	}
 }
@@ -198,7 +198,7 @@ func TestAggregatorTLS12AllowedWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS 1.2 client refused with tls_min_version 1.2: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 func TestAggregatorGracefulShutdown(t *testing.T) {

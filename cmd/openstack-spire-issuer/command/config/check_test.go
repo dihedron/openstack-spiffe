@@ -212,3 +212,32 @@ func TestExitErrorAlreadyReported(t *testing.T) {
 		t.Fatalf("ExitError without cause = %q / %v / %d", err.Error(), err.Unwrap(), err.ExitCode())
 	}
 }
+
+// failingWriter fails the one write that reaches its limit, and accepts
+// every other: an error must not be lost even when later writes succeed.
+type failingWriter struct {
+	left   int
+	failed bool
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if !f.failed && len(p) > f.left {
+		f.failed = true
+		return f.left, errors.New("disk full")
+	}
+	f.left -= len(p)
+	return len(p), nil
+}
+
+func TestCheckReportWriteError(t *testing.T) {
+	signer := writeFile(t, "signer.yaml", validSigner)
+	for _, format := range []string{"text", "json", "yaml"} {
+		for _, left := range []int{0, 10, 100} {
+			cmd := &Check{Signers: []string{signer}, Format: format, SkipFiles: true}
+			var stderr bytes.Buffer
+			if code := cmd.run(&failingWriter{left: left}, &stderr, false); code != exitUsage || !strings.Contains(stderr.String(), "disk full") {
+				t.Errorf("%s report failing after %d bytes: exit code %d, stderr %q; want %d and the error", format, left, code, stderr.String(), exitUsage)
+			}
+		}
+	}
+}

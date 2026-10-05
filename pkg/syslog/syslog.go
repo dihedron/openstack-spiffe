@@ -234,7 +234,7 @@ func (s *Syslog) Send(message *Message) error {
 		if err = s.write(data); err == nil {
 			return nil
 		}
-		s.conn.Close()
+		_ = s.conn.Close() // broken: replaced by a new connection below
 		s.conn = nil
 	}
 	if s.conn, err = s.dial(); err != nil {

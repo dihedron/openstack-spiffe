@@ -20,14 +20,16 @@ func listen(t *testing.T) (*net.UnixConn, string) {
 	if err != nil {
 		t.Fatalf("listening on %s: %v", path, err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn, path
 }
 
 // receive reads one datagram.
 func receive(t *testing.T, conn *net.UnixConn) string {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	buffer := make([]byte, 64*1024)
 	n, err := conn.Read(buffer)
 	if err != nil {
@@ -39,7 +41,9 @@ func receive(t *testing.T, conn *net.UnixConn) string {
 // receiveNothing checks that no datagram arrives shortly.
 func receiveNothing(t *testing.T, conn *net.UnixConn) {
 	t.Helper()
-	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
 	buffer := make([]byte, 64*1024)
 	if n, err := conn.Read(buffer); err == nil {
 		t.Fatalf("unexpected datagram %q", buffer[:n])
@@ -80,7 +84,7 @@ func openRFC3164(t *testing.T, options ...Option) (*Syslog, *net.UnixConn) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s, conn
 }
 
@@ -228,7 +232,7 @@ func TestNewValidatesOptions(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if s, err := New(append([]Option{WithSocket(path)}, test.options...)...); err == nil {
-				s.Close()
+				_ = s.Close()
 				t.Fatal("New succeeded")
 			}
 		})
@@ -236,7 +240,9 @@ func TestNewValidatesOptions(t *testing.T) {
 	if s, err := New(WithSocket(path), WithEnterprise("32473.1.2")); err != nil {
 		t.Errorf("enterprise with sub-identifiers: %v", err)
 	} else {
-		s.Close()
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
 	}
 }
 
@@ -271,7 +277,7 @@ func TestSendRedialsAfterDaemonRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	message := &Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}
 	if err := s.Send(message); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -279,13 +285,17 @@ func TestSendRedialsAfterDaemonRestart(t *testing.T) {
 	receive(t, conn)
 
 	// the daemon restarts: its socket is removed and created again
-	conn.Close()
-	os.Remove(path)
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 	restarted, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restarted.Close()
+	defer func() { _ = restarted.Close() }()
 
 	if err := s.Send(message); err != nil {
 		t.Fatalf("Send after restart: %v", err)
@@ -299,9 +309,13 @@ func TestSendFailsWhileDaemonDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer s.Close()
-	conn.Close()
-	os.Remove(path)
+	defer func() { _ = s.Close() }()
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Send(&Message{Facility: FacilityUser, Severity: SeverityInformational, Content: "x"}); err == nil {
 		t.Fatal("Send succeeded without a socket")
 	}

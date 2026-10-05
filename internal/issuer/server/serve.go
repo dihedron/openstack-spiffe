@@ -33,7 +33,7 @@ func run(ctx context.Context, addr string, serveFn func(context.Context, net.Lis
 func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, minTLSVersion uint16, requestClientCert bool, logAttrs []any, loops ...func(context.Context) error) error {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		ln.Close()
+		_ = ln.Close() // the certificate error is the one worth reporting
 		return fmt.Errorf("loading TLS certificate: %w", err)
 	}
 	// asked of every client, never verified here: the /attest guard
@@ -60,7 +60,11 @@ func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath,
 	defer stop()
 	var wg sync.WaitGroup
 	for _, loop := range loops {
-		wg.Go(func() { loop(background) })
+		wg.Go(func() {
+			if err := loop(background); err != nil {
+				log.ErrorContext(ctx, "background loop failed", "error", err)
+			}
+		})
 	}
 
 	served := make(chan error, 1)

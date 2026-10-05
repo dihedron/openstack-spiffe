@@ -37,7 +37,7 @@ func newMetadataService(t *testing.T) *metadataService {
 		m.mu.Lock()
 		token := m.token
 		m.mu.Unlock()
-		fmt.Fprintf(w, `{"%s":{"jwt":%q}}`, iid.TargetName, token)
+		_, _ = fmt.Fprintf(w, `{"%s":{"jwt":%q}}`, iid.TargetName, token)
 	}))
 	t.Cleanup(m.Close)
 	return m

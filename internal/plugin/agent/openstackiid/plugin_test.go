@@ -62,7 +62,7 @@ func newMetadataServer(t *testing.T, body string) *metadataServer {
 func (m *metadataServer) serve(body string) {
 	m.handle(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	})
 }
 
@@ -183,28 +183,28 @@ func TestAttestationFailures(t *testing.T) {
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		}, "302"},
 		{"malformed JSON", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"openstack_iid":`)
+			_, _ = fmt.Fprint(w, `{"openstack_iid":`)
 		}, "decoding"},
 		{"target missing", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"static":{}}`)
+			_, _ = fmt.Fprint(w, `{"static":{}}`)
 		}, "openstack_iid"},
 		{"no jwt", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"openstack_iid":{}}`)
+			_, _ = fmt.Fprint(w, `{"openstack_iid":{}}`)
 		}, "token"},
 		{"not a compact JWS", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, vendorData("abc.def"))
+			_, _ = fmt.Fprint(w, vendorData("abc.def"))
 		}, "compact"},
 		{"empty segment", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, vendorData("abc..def"))
+			_, _ = fmt.Fprint(w, vendorData("abc..def"))
 		}, "compact"},
 		{"token too large", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, vendorData(fakeToken(strings.Repeat("x", iid.MaxTokenBytes))))
+			_, _ = fmt.Fprint(w, vendorData(fakeToken(strings.Repeat("x", iid.MaxTokenBytes))))
 		}, "bytes"},
 		{"payload without jti", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, vendorData(fakeToken("")))
+			_, _ = fmt.Fprint(w, vendorData(fakeToken("")))
 		}, "jti"},
 		{"document too large", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"pad":"`+strings.Repeat("x", maxDocumentBytes)+`"}`)
+			_, _ = fmt.Fprint(w, `{"pad":"`+strings.Repeat("x", maxDocumentBytes)+`"}`)
 		}, "larger"},
 	}
 	for _, tt := range tests {
@@ -258,10 +258,10 @@ func TestSameTokenIsNeverPresentedTwice(t *testing.T) {
 	var served atomic.Int32
 	m.handle(func(w http.ResponseWriter, r *http.Request) {
 		if served.Add(1) <= 3 {
-			fmt.Fprint(w, vendorData(first))
+			_, _ = fmt.Fprint(w, vendorData(first))
 			return
 		}
-		fmt.Fprint(w, vendorData(second))
+		_, _ = fmt.Fprint(w, vendorData(second))
 	})
 	got, err := h.attest(t)
 	if err != nil || got != second {
@@ -297,7 +297,7 @@ func TestErrorWhileWaitingIsReturnedAtOnce(t *testing.T) {
 	var served atomic.Int32
 	m.handle(func(w http.ResponseWriter, r *http.Request) {
 		if served.Add(1) == 1 {
-			fmt.Fprint(w, vendorData(token))
+			_, _ = fmt.Fprint(w, vendorData(token))
 			return
 		}
 		http.Error(w, "oops", http.StatusInternalServerError)

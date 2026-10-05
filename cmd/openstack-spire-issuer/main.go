@@ -40,7 +40,7 @@ func exitCode(err error) int {
 	var flagsErr *flags.Error
 	if errors.As(err, &flagsErr) {
 		if flagsErr.Type == flags.ErrHelp {
-			fmt.Fprintln(os.Stdout, flagsErr.Message)
+			_, _ = fmt.Fprintln(os.Stdout, flagsErr.Message)
 			return 0
 		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

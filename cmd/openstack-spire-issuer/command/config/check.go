@@ -44,7 +44,7 @@ type Check struct {
 	// Aggregator is the path of the JWKS aggregator configuration file.
 	Aggregator *string `short:"a" long:"aggregator" description:"Path to the JWKS aggregator configuration file." value-name:"PATH"`
 	// Format is the output format.
-	//lint:ignore SA5008 duplicate choice tags are legitimate
+	//nolint:staticcheck // SA5008: go-flags reads repeated choice tags
 	Format string `short:"f" long:"format" description:"The format of the report." default:"text" choice:"text" choice:"json" choice:"yaml"`
 	// Strict turns warnings into failures.
 	Strict bool `long:"strict" description:"Fail on warnings too."`
@@ -115,7 +115,7 @@ type report struct {
 // code; problems preventing the check are written to stderr.
 func (cmd *Check) run(stdout, stderr io.Writer, color bool) int {
 	if len(cmd.Signers) == 0 && cmd.Aggregator == nil {
-		fmt.Fprintln(stderr, "error: specify at least one --signer or --aggregator configuration file")
+		_, _ = fmt.Fprintln(stderr, "error: specify at least one --signer or --aggregator configuration file")
 		return exitUsage
 	}
 	opts := config.CheckOptions{SkipFiles: cmd.SkipFiles}
@@ -124,7 +124,7 @@ func (cmd *Check) run(stdout, stderr io.Writer, color bool) int {
 	for _, path := range cmd.Signers {
 		data, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 			return exitUsage
 		}
 		signers = append(signers, config.CheckSigner(path, data, opts))
@@ -133,7 +133,7 @@ func (cmd *Check) run(stdout, stderr io.Writer, color bool) int {
 	if cmd.Aggregator != nil {
 		data, err := os.ReadFile(filepath.Clean(*cmd.Aggregator))
 		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 			return exitUsage
 		}
 		aggregator = config.CheckAggregator(*cmd.Aggregator, data, opts)
@@ -150,7 +150,7 @@ func (cmd *Check) run(stdout, stderr io.Writer, color bool) int {
 
 	if err := r.write(stdout, cmd.Format, color); err != nil {
 		slog.Error("cannot write the configuration report", "error", err)
-		fmt.Fprintf(stderr, "error: writing report: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "error: writing report: %v\n", err)
 		return exitUsage
 	}
 	if r.Errors > 0 || (cmd.Strict && r.Warnings > 0) {
@@ -229,7 +229,28 @@ const (
 	ansiReset  = "\x1b[0m"
 )
 
-func (r *report) writeText(w io.Writer, color bool) error {
+// stickyWriter writes until the first error, which it keeps: the text
+// report checks it once, at the end.
+type stickyWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (s *stickyWriter) Write(p []byte) (int, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	var n int
+	n, s.err = s.w.Write(p)
+	return n, s.err
+}
+
+func (s *stickyWriter) printf(format string, args ...any) {
+	_, _ = fmt.Fprintf(s, format, args...) // kept in s.err
+}
+
+func (r *report) writeText(out io.Writer, color bool) error {
+	w := &stickyWriter{w: out}
 	paint := func(style, text string) string {
 		if !color {
 			return text
@@ -239,7 +260,7 @@ func (r *report) writeText(w io.Writer, color bool) error {
 
 	for i, fr := range r.Files {
 		if i > 0 {
-			fmt.Fprintln(w)
+			w.printf("\n")
 		}
 		errors, warnings := 0, 0
 		for _, f := range fr.Findings {
@@ -253,7 +274,7 @@ func (r *report) writeText(w io.Writer, color bool) error {
 		if !fr.Valid {
 			status = paint(ansiRed, "invalid")
 		}
-		fmt.Fprintf(w, "%s (%s): %s, %s, %s\n", paint(ansiBold, fr.File), fr.Type, status, plural(errors, "error"), plural(warnings, "warning"))
+		w.printf("%s (%s): %s, %s, %s\n", paint(ansiBold, fr.File), fr.Type, status, plural(errors, "error"), plural(warnings, "warning"))
 
 		if len(fr.Findings) > 0 {
 			tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -274,31 +295,32 @@ func (r *report) writeText(w io.Writer, color bool) error {
 				if path == "" {
 					path = "-"
 				}
-				fmt.Fprintf(tw, "  line %s\t%s\t%s\t%s\t%s\n", line, severity, f.Kind, path, message)
+				// buffered: Flush reports any write error
+				_, _ = fmt.Fprintf(tw, "  line %s\t%s\t%s\t%s\t%s\n", line, severity, f.Kind, path, message)
 			}
 			if err := tw.Flush(); err != nil {
 				return err
 			}
 		}
 		if len(fr.effective) > 0 {
-			fmt.Fprintln(w, "  effective configuration:")
+			w.printf("  effective configuration:\n")
 			for _, line := range strings.Split(strings.TrimRight(string(fr.effective), "\n"), "\n") {
-				fmt.Fprintf(w, "    %s\n", line)
+				w.printf("    %s\n", line)
 			}
 		}
 	}
 
-	fmt.Fprintln(w)
+	w.printf("\n")
 	if r.Errors == 0 {
 		summary := "configuration is valid"
 		if r.Warnings > 0 {
 			summary += " (" + plural(r.Warnings, "warning") + ")"
 		}
-		_, err := fmt.Fprintln(w, paint(ansiGreen, summary))
-		return err
+		w.printf("%s\n", paint(ansiGreen, summary))
+		return w.err
 	}
-	_, err := fmt.Fprintln(w, paint(ansiRed, fmt.Sprintf("configuration is invalid: %s, %s", plural(r.Errors, "error"), plural(r.Warnings, "warning"))))
-	return err
+	w.printf("%s\n", paint(ansiRed, fmt.Sprintf("configuration is invalid: %s, %s", plural(r.Errors, "error"), plural(r.Warnings, "warning"))))
+	return w.err
 }
 
 func plural(n int, noun string) string {

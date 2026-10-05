@@ -3,6 +3,7 @@ package openstackiid
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -63,7 +64,9 @@ func newKeySource(cfg keySourceConfig) (*keySource, error) {
 	} else {
 		go func() {
 			defer close(k.done)
-			agg.Run(ctx)
+			if err := agg.Run(ctx); err != nil {
+				slog.ErrorContext(ctx, "JWK Set polling stopped", "error", err)
+			}
 		}()
 	}
 	return k, nil

@@ -72,7 +72,7 @@ func newReplica(t *testing.T) *replica {
 		r.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(r.Close)
 	return r
@@ -510,20 +510,22 @@ func TestRun(t *testing.T) {
 
 func TestHTTPClientRequiresTLS13(t *testing.T) {
 	legacy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"keys":[]}`))
+		_, _ = w.Write([]byte(`{"keys":[]}`))
 	}))
 	legacy.TLS = &tls.Config{MaxVersion: tls.VersionTLS12}
 	legacy.StartTLS()
 	t.Cleanup(legacy.Close)
 	path := filepath.Join(t.TempDir(), "ca.pem")
-	os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	client, err := NewHTTPClient(path, tls.VersionTLS13)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp, err := client.Get(legacy.URL)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("connected to a TLS 1.2-only replica")
 	}
 }
@@ -534,7 +536,9 @@ func TestHTTPClientWithTLS12Minimum(t *testing.T) {
 	legacy.StartTLS()
 	t.Cleanup(legacy.Close)
 	path := filepath.Join(t.TempDir(), "ca.pem")
-	os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: legacy.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	client, err := NewHTTPClient(path, tls.VersionTLS12)
 	if err != nil {
 		t.Fatal(err)
@@ -543,7 +547,7 @@ func TestHTTPClientWithTLS12Minimum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls_min_version 1.2: could not reach a TLS 1.2-only replica: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if _, err := NewHTTPClient(path, tls.VersionTLS11); err == nil {
 		t.Fatal("accepted TLS 1.1 as minimum")
 	}
@@ -554,7 +558,9 @@ func TestNewHTTPClientRejectsBadBundles(t *testing.T) {
 		t.Fatal("accepted a missing CA bundle")
 	}
 	empty := filepath.Join(t.TempDir(), "empty.pem")
-	os.WriteFile(empty, []byte("nothing"), 0o600)
+	if err := os.WriteFile(empty, []byte("nothing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := NewHTTPClient(empty, tls.VersionTLS13); err == nil {
 		t.Fatal("accepted a CA bundle without certificates")
 	}

@@ -281,11 +281,11 @@ func TestCacheTTLOption(t *testing.T) {
 	clock := &testClock{now: testNow}
 	a := newAuthenticator(t, v, clock, WithCacheTTL(5*time.Second))
 	ctx := context.Background()
-	a.Authenticate(ctx, serviceToken)
+	_, _ = a.Authenticate(ctx, serviceToken)
 	clock.Advance(4 * time.Second)
-	a.Authenticate(ctx, serviceToken)
+	_, _ = a.Authenticate(ctx, serviceToken)
 	clock.Advance(time.Second)
-	a.Authenticate(ctx, serviceToken)
+	_, _ = a.Authenticate(ctx, serviceToken)
 	if n := v.calls.Load(); n != 2 {
 		t.Fatalf("%d validations, want 2", n)
 	}

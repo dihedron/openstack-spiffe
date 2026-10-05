@@ -359,7 +359,9 @@ func TestLoadSignerPreflight(t *testing.T) {
 	cert, _ := valid()
 	_, otherKey := valid()
 	notPEM := filepath.Join(dir, "ca.pem")
-	os.WriteFile(notPEM, []byte("not a certificate"), 0o600)
+	if err := os.WriteFile(notPEM, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	goodCert, goodKey := valid()
 
 	for _, tt := range []struct {

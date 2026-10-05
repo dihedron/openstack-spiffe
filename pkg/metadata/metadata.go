@@ -91,7 +91,7 @@ func init() {
 }
 
 func Print(writer io.Writer) {
-	fmt.Fprintf(writer,
+	_, _ = fmt.Fprintf(writer,
 		"\n  %s v%s.%s.%s (%s - %s/%s) - %s - %s\n\n",
 		path.Base(os.Args[0]),
 		VersionMajor,

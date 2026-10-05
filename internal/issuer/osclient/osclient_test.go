@@ -180,7 +180,9 @@ func TestNewFailures(t *testing.T) {
 		t.Fatal("accepted a missing CA bundle")
 	}
 	empty := filepath.Join(t.TempDir(), "empty.pem")
-	os.WriteFile(empty, []byte("not a certificate"), 0o600)
+	if err := os.WriteFile(empty, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := New(ctx, creds, empty); err == nil {
 		t.Fatal("accepted a CA bundle without certificates")
 	}

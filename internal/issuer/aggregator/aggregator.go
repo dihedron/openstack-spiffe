@@ -250,7 +250,7 @@ func (a *Aggregator) fetch(ctx context.Context, replica string) ([]keystore.Publ
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read in full or abandoned: nothing to report
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %s", resp.Status)
 	}

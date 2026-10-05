@@ -26,7 +26,7 @@ func Liveness() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
-			w.Write([]byte("ok\n"))
+			_, _ = w.Write([]byte("ok\n"))
 		}
 	})
 }
@@ -189,7 +189,7 @@ func (r *Readiness) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if req.Method == http.MethodGet {
-		w.Write(body)
+		_, _ = w.Write(body)
 	}
 }
 

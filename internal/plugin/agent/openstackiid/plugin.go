@@ -252,7 +252,7 @@ func fetchToken(ctx context.Context, s *settings) (token, jti string, err error)
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // read in full or abandoned: nothing to report
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("vendordata: unexpected status %s", resp.Status)
 	}

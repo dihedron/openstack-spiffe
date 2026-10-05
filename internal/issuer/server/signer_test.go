@@ -70,8 +70,12 @@ func writeTLS(t *testing.T) (certPath, keyPath string, pool *x509.CertPool) {
 	}
 	dir := t.TempDir()
 	certPath, keyPath = filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
-	os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
-	os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600)
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cert, _ := x509.ParseCertificate(der)
 	pool = x509.NewCertPool()
 	pool.AddCert(cert)
@@ -177,7 +181,7 @@ func (h *harness) request(t *testing.T, method, path, token, body string) *http.
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -322,7 +326,7 @@ func TestTLS13Minimum(t *testing.T) {
 		MaxVersion: tls.VersionTLS12,
 	}}}
 	if resp, err := old.Get(h.url + "/liveness"); err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("TLS 1.2 client accepted")
 	}
 	resp := h.request(t, http.MethodGet, "/liveness", "", "")
@@ -341,7 +345,7 @@ func TestTLS12AllowedWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS 1.2 client refused with tls_min_version 1.2: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.TLS.Version != tls.VersionTLS12 {
 		t.Fatalf("negotiated %#x, want TLS 1.2", resp.TLS.Version)
 	}

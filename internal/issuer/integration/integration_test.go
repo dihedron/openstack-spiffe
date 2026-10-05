@@ -319,7 +319,7 @@ func (s *system) attest(t *testing.T, replica, token, instance string) (int, str
 	if err != nil {
 		t.Fatalf("attest on %s: %v", replica, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, ""
@@ -351,7 +351,7 @@ func (s *system) keysAt(t *testing.T, url string) map[string]keystore.PublicKey 
 	if err != nil {
 		t.Fatalf("fetching %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var set jwks.Set
 	if err := json.UnmarshalRead(resp.Body, &set); err != nil {
 		t.Fatalf("decoding %s: %v", url, err)
@@ -539,7 +539,7 @@ func testEndToEnd(t *testing.T, topo topology) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					break
 				}

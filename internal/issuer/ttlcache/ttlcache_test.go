@@ -63,7 +63,7 @@ func TestHitWithinExpiry(t *testing.T) {
 		t.Fatalf("%d loads, want 1", calls.Load())
 	}
 	clock.Advance(time.Minute)
-	c.Get(ctx, "k", loader(clock, &calls, "v2", time.Minute))
+	_, _ = c.Get(ctx, "k", loader(clock, &calls, "v2", time.Minute))
 	if calls.Load() != 2 {
 		t.Fatalf("expired entry served: %d loads, want 2", calls.Load())
 	}
@@ -107,7 +107,7 @@ func TestBounded(t *testing.T) {
 	c := newCache(t, clock, Config{MaxEntries: 5})
 	var calls atomic.Int32
 	for i := range 50 {
-		c.Get(context.Background(), fmt.Sprint(i), loader(clock, &calls, "v", time.Hour))
+		_, _ = c.Get(context.Background(), fmt.Sprint(i), loader(clock, &calls, "v", time.Hour))
 		if n := c.Len(); n > 5 {
 			t.Fatalf("%d entries, want at most 5", n)
 		}
@@ -119,14 +119,14 @@ func TestExpiredEntriesPurgedFirst(t *testing.T) {
 	c := newCache(t, clock, Config{MaxEntries: 3})
 	var calls atomic.Int32
 	ctx := context.Background()
-	c.Get(ctx, "short", loader(clock, &calls, "v", time.Second))
-	c.Get(ctx, "long-1", loader(clock, &calls, "v", time.Hour))
-	c.Get(ctx, "long-2", loader(clock, &calls, "v", time.Hour))
+	_, _ = c.Get(ctx, "short", loader(clock, &calls, "v", time.Second))
+	_, _ = c.Get(ctx, "long-1", loader(clock, &calls, "v", time.Hour))
+	_, _ = c.Get(ctx, "long-2", loader(clock, &calls, "v", time.Hour))
 	clock.Advance(2 * time.Second)
-	c.Get(ctx, "new", loader(clock, &calls, "v", time.Hour))
+	_, _ = c.Get(ctx, "new", loader(clock, &calls, "v", time.Hour))
 	before := calls.Load()
-	c.Get(ctx, "long-1", loader(clock, &calls, "v", time.Hour))
-	c.Get(ctx, "long-2", loader(clock, &calls, "v", time.Hour))
+	_, _ = c.Get(ctx, "long-1", loader(clock, &calls, "v", time.Hour))
+	_, _ = c.Get(ctx, "long-2", loader(clock, &calls, "v", time.Hour))
 	if calls.Load() != before {
 		t.Fatal("a live entry was evicted while an expired one could be purged")
 	}
@@ -206,7 +206,7 @@ func TestLoadSurvivesCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		c.Get(ctx, "k", slow)
+		_, _ = c.Get(ctx, "k", slow)
 		close(done)
 	}()
 	for calls.Load() == 0 {

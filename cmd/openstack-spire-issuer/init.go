@@ -158,15 +158,23 @@ func init() {
 
 func cleanup() {
 	if cpuprof != nil {
-		defer cpuprof.Close()
-		defer pprof.StopCPUProfile()
+		pprof.StopCPUProfile()
+		closeProfile(cpuprof)
 	}
 	if memprof != nil {
-		defer memprof.Close()
 		runtime.GC() // get up-to-date statistics
 		if err := pprof.WriteHeapProfile(memprof); err != nil {
 			slog.Error("could not write memory profile", "error", err)
 		}
+		closeProfile(memprof)
+	}
+}
+
+// closeProfile closes a profile file, reporting a failure, which can lose
+// the end of the profile.
+func closeProfile(f *os.File) {
+	if err := f.Close(); err != nil {
+		slog.Error("could not close profile", "file", f.Name(), "error", err)
 	}
 }
 

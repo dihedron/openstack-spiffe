@@ -25,7 +25,7 @@ func newAuditLogger(t *testing.T, syslogOptions []Option, options ...AuditOption
 	if err != nil {
 		t.Fatalf("NewAuditHandler: %v", err)
 	}
-	t.Cleanup(func() { h.Close(context.Background()) })
+	t.Cleanup(func() { _ = h.Close(context.Background()) })
 	return slog.New(h), h, conn
 }
 
@@ -241,7 +241,7 @@ func TestAuditDropsWhenQueueFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close(context.Background())
+	defer func() { _ = h.Close(context.Background()) }()
 	logger := slog.New(h)
 
 	logger.Info("one", "audit", "token_issued")
@@ -284,7 +284,7 @@ func TestAuditReportsSendFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close(context.Background())
+	defer func() { _ = h.Close(context.Background()) }()
 	logger := slog.New(h)
 	for range 4 {
 		logger.Info("event", "audit", "token_issued")
@@ -308,7 +308,9 @@ func TestAuditDropsInvalidKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	slog.New(h).Info("event", "audit", "not a valid msgid")
-	h.Close(context.Background())
+	if err := h.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if sender.count() != 0 {
 		t.Error("record with an invalid audit kind sent")
 	}

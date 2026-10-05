@@ -399,13 +399,13 @@ func (s *Server) catalogEntries() []any {
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.MarshalWrite(w, body)
+	_ = json.MarshalWrite(w, body)
 }
 
 func keystoneError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.MarshalWrite(w, map[string]any{"error": map[string]any{
+	_ = json.MarshalWrite(w, map[string]any{"error": map[string]any{
 		"code": status, "message": message, "title": http.StatusText(status),
 	}})
 }
