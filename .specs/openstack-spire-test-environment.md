@@ -152,6 +152,8 @@ Each test boots the instances it needs and deletes them afterwards, so tests are
 | MEM-1 | Memory protection | The running signer is non-dumpable and its memory is locked (`VmLck`); its unit has `LimitCORE=0` and `LimitMEMLOCK=infinity` | 6 |
 | AUD-3 | Correlation | Every `agent_attested` record on `spire` has a `token_issued` record with the same `jti` on an issuer; a quick re-attestation produces a `reattest_alert` with severity `warning` | 7 |
 | GST-1 | Guest hardening | With the sample nftables rule loaded, an unprivileged user in the guest cannot reach `169.254.169.254`, while root and the SPIRE Agent user can, and E2E-1 passes | 8 |
+| MET-1 | Metrics, Prometheus | With `metrics.exporter: prometheus` on `issuer-a`, booting a guest raises `openstack_spire_tokens_issued_total` by the number of `token_issued` audit records, and rejected calls count under their reason: one from a source outside `attest.allowed_sources` under `source_not_allowed`, one for an instance Nova does not know under `instance_not_allowed` (metrics spec) | metrics |
+| MET-2 | Metrics, OTLP | With `metrics.exporter: otlp` towards an OpenTelemetry Collector on `spire`, the same counters reach the collector within two export intervals | metrics |
 | REL-1 | Signed releases | `deploy` signs its build with the lab packaging key as CI signs a release, and verifies the checksums file and each package before installing; the checksums file's signature, `debsig-verify` (deb) and `rpm --checksig` (rpm) accept the build and refuse a tampered copy | 8 |
 
 Every failing check prints what it observed (HTTP status, journal lines, agent list), so that a failure can be diagnosed without re-running it.

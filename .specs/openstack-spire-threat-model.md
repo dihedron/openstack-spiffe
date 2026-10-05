@@ -1,10 +1,10 @@
 # OpenStack SPIRE node attestation — STRIDE threat model
 
-Oct 4, 2026 · @Andrea Funtò
+Oct 4, 2026 (revised Oct 5, 2026: metrics) · @Andrea Funtò
 
 ## Overview
 
-This document is the STRIDE threat model of the OpenStack node attestation solution: the metadata JWT issuer (`openstack-spire-issuer`, see `openstack-spire-issuer.md`), the `openstack_iid` SPIRE agent and server plugins (see `openstack-spire-plugins.md`), the shared contract in `pkg/iid`, and the way all of them are built, packaged and released.
+This document is the STRIDE threat model of the OpenStack node attestation solution: the metadata JWT issuer (`openstack-spire-issuer`, see `openstack-spire-issuer.md`, and its metrics, `openstack-spire-issuer-metrics.md`), the `openstack_iid` SPIRE agent and server plugins (see `openstack-spire-plugins.md`), the shared contract in `pkg/iid`, and the way all of them are built, packaged and released.
 
 It lists the assets, the actors, the trust boundaries and the assumptions the design rests on. It then lists every threat identified, each with its status and with the control that addresses it. Threat IDs (`S-1`, `T-3`, ...) are stable: the companion specs cite them next to the requirements that mitigate them, so that every control can be traced back to its threat and back again.
 
@@ -40,6 +40,7 @@ A threat marked **P** or **U** lists the revised spec section that addresses it.
 | TLS private keys of the signers and aggregators | Spoofing the JWKS endpoints. |
 | Tenant `user-data` and `metadata` | Tenant secrets, often (cloud-init scripts, passwords, API keys). |
 | Logs (issuer, SPIRE Server) | The audit trail for detection and forensics. |
+| Metrics (issuer) | Per-project issuance volumes (when enabled), the deployment's topology and its failure modes. |
 
 ## Actors
 
@@ -95,6 +96,7 @@ A threat marked **P** or **U** lists the revised spec section that addresses it.
 | TB5 | SPIRE Server plugin → JWK Set URL | Public keys | Verified TLS (pinned CA or system roots). |
 | TB6 | SPIRE Agent → SPIRE Server | Attestation payload (the token) | SPIRE's TLS, server-authenticated during node attestation. |
 | TB7 | Release pipeline → hosts and images | Binaries, packages, units | Checksums. GPG signatures on the checksums file and on each package, added in this revision. |
+| TB8 | Issuer → metrics consumer (a collector agent scraping `/metrics`, or an OpenTelemetry Collector receiving OTLP) | Metrics: counts, latencies, key and peer state; project IDs when enabled | Loopback by default; beyond it, TLS with client certificates (scrape) or verified TLS to the collector (push). Added Oct 5, not implemented yet. |
 
 ## Security assumptions
 
@@ -153,6 +155,7 @@ The design relies on the following properties of components outside its scope. I
 | I-5 | CPU and heap profiles of a signer, enabled through environment variables, contain private key material and are created with default permissions (`0666` minus the umask) | Issuer | Not supported under the systemd units (the working directory is read-only) | **U** | Issuer: profiles are created `0600`, and the signer logs a warning at startup that they contain key material | — |
 | I-6 | Error details revealed to callers | TB2, TB6 | The issuer returns bare status text. Health endpoints return no details | **M** (issuer) / **A** (server plugin) | — | The server plugin returns the rejection reason to the presenting agent only, which needs it to diagnose its own failures |
 | I-7 | Any process in the guest can read the token | TB1 | — | see S-4 | — | — |
+| I-8 | Metrics disclose per-project activity and the deployment's topology to whoever can scrape or receive them | TB8 | — (new, Oct 5) | **U** | Metrics spec: disabled by default; a loopback listener by default, TLS and client certificates beyond it; verified TLS to the collector; `project_id` opt-in and capped; no instance, user, token or address data in metrics | Low: what an authorized consumer sees is by design |
 
 ### Denial of service
 
@@ -167,6 +170,7 @@ The design relies on the following properties of components outside its scope. I
 | D-7 | JWK Set endpoint unreachable beyond `jwks_stale_key_retention` | TB5 | Last known good keys for 5 minutes, then fail closed | **A** | — | By design: unavailability is never a reason to loosen verification |
 | D-8 | Agents rejected once after a SPIRE Server restart (startup watermark) | Server plugin | The agent's next attempt carries a fresh token | **A** | — | Documented cost |
 | D-9 | Oversized vendordata or attestation payload | TB1, TB6 | 1 MiB vendordata cap, `MaxTokenBytes`, payload cap | **M** | — | — |
+| D-10 | Scrapes, or series of unbounded cardinality, exhaust a signer's CPU or memory | TB8 | — (new, Oct 5) | **U** | Metrics spec: a separate, rate-limited listener answering `GET /metrics` only; closed attribute sets; `max_projects` cap; exporter failures never block issuance | — |
 
 ### Elevation of privilege
 
