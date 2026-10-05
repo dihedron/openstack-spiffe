@@ -23,7 +23,9 @@ func TestDedicatedVendordataUser(t *testing.T) {
 token=$(OS_AUTH_URL=https://` + ip + `/identity/v3 OS_USERNAME=nova OS_PASSWORD=` + quote(strings.TrimSpace(string(password))) + ` \
 	OS_USER_DOMAIN_NAME=Default OS_PROJECT_NAME=service OS_PROJECT_DOMAIN_NAME=Default OS_IDENTITY_API_VERSION=3 \
 	OS_CACERT=/opt/stack/data/CA/int-ca/ca-chain.pem /opt/stack/data/venv/bin/openstack token issue -f value -c id)
-curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nova/lab-ca.pem -H "X-Auth-Token: $token" \
+# from nova-api-metadata's host with Nova's certificate: only the user differs
+sudo curl -s -o /dev/null -w '%{http_code}' --cacert /etc/nova/lab-ca.pem -H "X-Auth-Token: $token" \
+	--cert /etc/nova/lab-nova-vendordata.pem --key /etc/nova/lab-nova-vendordata.key \
 	-H 'Content-Type: application/json' -d '{"project-id":"` + l.env.OpenStack.ProjectID + `","instance-id":"8f7c1b6e-6a0e-4d4b-9a51-3f0e8b1d2c3a","hostname":"x","metadata":{}}' \
 	https://issuer-a.lab:8443/attest`
 	since := strings.TrimSpace(l.must(t, "issuer-a", "date -u '+%Y-%m-%d %H:%M:%S'")) + " UTC"

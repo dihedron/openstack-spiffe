@@ -71,6 +71,9 @@ peers:
   urls:
     - "https://$peer.lab:8443/jwks/local.json"
   ca_cert_path: "$ISSUER_ETC/lab-ca.pem"
+attest:
+  allowed_sources: ["$(vm_ip devstack)"]                  # nova-api-metadata
+  client_ca_path: "$ISSUER_ETC/nova-client-ca.pem"        # Nova's client certificate
 audit:
   syslog:
     enabled: true
@@ -103,6 +106,8 @@ deploy_issuer() {
 	put "$vm" "$pki/$vm.lab.pem" "$ISSUER_ETC/tls.crt" "$owner" 0644
 	put "$vm" "$pki/$vm.lab.key" "$ISSUER_ETC/tls.key" "$ISSUER_SERVICE:$ISSUER_SERVICE" 0600
 	put "$vm" "$pki/ca.pem" "$ISSUER_ETC/lab-ca.pem" "$owner" 0644
+	# the lab CA also issues Nova's client certificate
+	put "$vm" "$pki/ca.pem" "$ISSUER_ETC/nova-client-ca.pem" "$owner" 0644
 	put "$vm" "$pki/openstack-ca.pem" "$ISSUER_ETC/openstack-ca.pem" "$owner" 0644
 	# the same checks the service applies at startup, as the service user
 	local report
@@ -357,6 +362,7 @@ deploy_guests() {
 lab_deploy() {
 	# idempotent: also brings a lab restored from an older snapshot up to date
 	devstack_guest_access
+	devstack_vendordata_config
 	section "Build"
 	deploy_build
 	section "Issuers"

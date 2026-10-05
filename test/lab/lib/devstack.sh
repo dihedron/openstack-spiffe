@@ -248,6 +248,9 @@ devstack_ca() {
 devstack_vendordata_config() {
 	info "configuring Nova's DynamicJSON vendordata (openstack_iid at issuer-a.lab)"
 	vm_ssh devstack "sudo tee /etc/nova/lab-ca.pem >/dev/null" <"$(pki_dir)/ca.pem"
+	# the client certificate Nova presents to /attest (attest.client_ca_path)
+	vm_ssh devstack "sudo install -o stack -g stack -m 0644 /dev/stdin /etc/nova/lab-nova-vendordata.pem" <"$(pki_dir)/nova-vendordata.pem"
+	vm_ssh devstack "sudo install -o stack -g stack -m 0600 /dev/stdin /etc/nova/lab-nova-vendordata.key" <"$(pki_dir)/nova-vendordata.key"
 	vm_ssh devstack "sudo bash -s -- $(printf '%q ' "$DEVSTACK_DIR" "$VENDORDATA_USER" "$(vendordata_password)" "$(vm_ip devstack)")" <<'SCRIPT'
 set -euo pipefail
 dir="$1" user="$2" password="$3" keystone="$4"
@@ -269,6 +272,9 @@ iniset -sudo $conf vendordata_dynamic_auth password "$password"
 iniset -sudo $conf vendordata_dynamic_auth user_domain_name Default
 iniset -sudo $conf vendordata_dynamic_auth project_name service
 iniset -sudo $conf vendordata_dynamic_auth project_domain_name Default
+# keystoneauth's session presents it on every request, /attest included
+iniset -sudo $conf vendordata_dynamic_auth certfile /etc/nova/lab-nova-vendordata.pem
+iniset -sudo $conf vendordata_dynamic_auth keyfile /etc/nova/lab-nova-vendordata.key
 systemctl restart devstack@n-api-meta.service
 SCRIPT
 }
