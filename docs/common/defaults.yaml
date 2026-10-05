@@ -33,3 +33,8 @@ variables:
   footer-left: "openstack-spiffe"
   code-block-font-size: \small
   table-use-row-colors: true
+  # a description list's text starts below its term: the configuration
+  # reference's keys are easier to scan
+  header-includes: |
+    \usepackage{enumitem}
+    \setlist[description]{style=nextline, leftmargin=1.5em}

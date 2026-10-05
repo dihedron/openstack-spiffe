@@ -61,7 +61,7 @@ for source in docs/common/diagrams/*.md; do
 	awk '/^```mermaid$/ { inside = 1; next } /^```$/ && inside { exit } inside' "$source" >"$work/diagrams/$name.mmd"
 	[[ -s "$work/diagrams/$name.mmd" ]] || die "$source has no mermaid block"
 	echo "docs: diagram $name"
-	run "$MERMAID_IMAGE" --quiet \
+	run "$MERMAID_IMAGE" --quiet --configFile /data/docs/common/mermaid.json \
 		--input "/data/$work/diagrams/$name.mmd" --output "/data/$work/diagrams/$name.pdf" >/dev/null
 done
 

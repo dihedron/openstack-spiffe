@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,10 @@ var configKeys = []string{
 	"allowed_tag_keys", "reattest", "reattest_alert_window",
 	"audit_syslog.enabled", "audit_syslog.socket", "audit_syslog.facility", "audit_syslog.app_name",
 }
+
+// ConfigKeys returns the keys plugin_data accepts, a block's keys as
+// "block.key" (the documentation's completeness test reads them).
+func ConfigKeys() []string { return slices.Clone(configKeys) }
 
 // auditSettings is the validated audit_syslog block; comparable, so that a
 // new Configure replaces the sink only when it changed.

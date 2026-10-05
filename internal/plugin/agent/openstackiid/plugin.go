@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,10 @@ type Config struct {
 }
 
 var configKeys = []string{"vendordata_url", "http_timeout", "fresh_token_timeout"}
+
+// ConfigKeys returns the keys plugin_data accepts (the documentation's
+// completeness test reads them).
+func ConfigKeys() []string { return slices.Clone(configKeys) }
 
 // settings is the validated configuration.
 type settings struct {

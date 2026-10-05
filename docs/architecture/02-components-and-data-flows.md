@@ -2,4 +2,4 @@
 
 This chapter is written in chunk D3 of the documentation plan (`.specs/openstack-spire-docs.md`).
 
-![The components and the calls between them](components.pdf){width=100%}
+![How an instance's SPIRE Agent gets its identity](attestation-overview.pdf){width=100%}

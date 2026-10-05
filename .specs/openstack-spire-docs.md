@@ -102,6 +102,7 @@ Every chapter below is required; the outlines fix the scope, not the wording. Th
 
 - The continuous build produces the three PDFs without warnings (pandoc and LaTeX warnings fail the build: missing references, unknown includes, overfull boxes beyond a tolerance).
 - The error reference test above.
+- Every table sets its columns' proportions (the dashes' relative lengths under its header): with pandoc's equal default widths, code in a cell, which LaTeX cannot wrap, overflows into the next column. A test fails on a table that leaves them all equal (found in review, Oct 5).
 - A release dry run (`goreleaser release --snapshot` with the documents present) shows the PDFs among the release's extra files and in the checksums file.
 - The documents are read: each chunk below ends with the user's review of the PDFs.
 

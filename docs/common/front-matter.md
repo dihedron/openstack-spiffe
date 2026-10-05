@@ -15,6 +15,7 @@
 \noindent The Go gopher was designed by Renée French and is licensed under the Creative Commons Attribution 4.0 license.
 \end{small}
 \newpage
+\setcounter{tocdepth}{1}
 \tableofcontents
 \newpage
 ```

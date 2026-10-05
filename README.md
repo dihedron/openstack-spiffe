@@ -66,7 +66,7 @@ Releases are signed with the project's packaging key, [packaging/signing-key.asc
 
   ```bash
   sudo rpm --import signing-key.asc
-  rpm --checksig openstack-agent-plugin-<version>.x86_64.rpm   # must report "digests signatures OK"
+  rpm --checksig openstack-agent-plugin_<version>_linux_amd64.rpm   # must report "digests signatures OK"
   ```
 
   Keep `localpkg_gpgcheck=1` in `dnf.conf` so that `dnf install ./package.rpm` refuses an unsigned or tampered package.
