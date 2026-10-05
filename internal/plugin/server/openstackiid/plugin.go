@@ -20,8 +20,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/aggregator"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/aggregator"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
 	"github.com/dihedron/openstack-spiffe/internal/plugin/config"
 	"github.com/dihedron/openstack-spiffe/internal/plugin/logging"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"

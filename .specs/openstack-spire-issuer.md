@@ -569,17 +569,17 @@ Done (Oct 5, 2026). Tests came first, as for every change.
 | Area | Change | Threats |
 | --- | --- | --- |
 | `pkg/iid` | `ValidateTagValue`, `ValidateEnrichmentValue`, and control, format and UTF-8 checks in `ValidateTagKey`. `ValidateKeyID` (used by the server plugin) | T-4, T-5 |
-| `internal/metadata/config` | `attest` block, `rate_limit_per_source_public`, `keystone.max_concurrent_validations`, aggregator `rate_limit_per_source` and `client_address`; the new errors and warnings; file check of `attest.client_ca_path` | S-3, S-5, D-2, D-5, E-6 |
-| `internal/metadata/server/signer.go`, `serve.go`, `aggregator.go` | Source-allowlist middleware and `/attest`-only client certificate enforcement ahead of the per-source limit; `RequestClientCert` in the TLS config, with verification in the middleware (see the client certificate); a public per-source limiter on every other route | S-3, D-2, D-5 |
-| `internal/metadata/auth` | Non-blocking semaphore around Keystone validations, outside the merge of identical tokens; `503` when full | D-2 |
-| `internal/metadata/claims` | Drop tags failing the new checks; validate enrichment values | T-4 |
-| `internal/metadata/attest` | `token issued` audit record, which needs the minter to return the `jti`, `kid`, `iat` and `exp`, and the authenticator to put the caller's user ID in the request context; `metadata` redaction, and the size-and-hash fallback in `redact.go` | R-1, I-2 |
-| `internal/metadata/keystore` | Key lifecycle records with RFC 7638 thumbprints | R-3 |
+| `internal/issuer/config` | `attest` block, `rate_limit_per_source_public`, `keystone.max_concurrent_validations`, aggregator `rate_limit_per_source` and `client_address`; the new errors and warnings; file check of `attest.client_ca_path` | S-3, S-5, D-2, D-5, E-6 |
+| `internal/issuer/server/signer.go`, `serve.go`, `aggregator.go` | Source-allowlist middleware and `/attest`-only client certificate enforcement ahead of the per-source limit; `RequestClientCert` in the TLS config, with verification in the middleware (see the client certificate); a public per-source limiter on every other route | S-3, D-2, D-5 |
+| `internal/issuer/auth` | Non-blocking semaphore around Keystone validations, outside the merge of identical tokens; `503` when full | D-2 |
+| `internal/issuer/claims` | Drop tags failing the new checks; validate enrichment values | T-4 |
+| `internal/issuer/attest` | `token issued` audit record, which needs the minter to return the `jti`, `kid`, `iat` and `exp`, and the authenticator to put the caller's user ID in the request context; `metadata` redaction, and the size-and-hash fallback in `redact.go` | R-1, I-2 |
+| `internal/issuer/keystore` | Key lifecycle records with RFC 7638 thumbprints | R-3 |
 | `cmd/openstack-spire-issuer` | `PR_SET_DUMPABLE` and `mlockall` at `service start` (via `golang.org/x/sys/unix`, Linux only; `key_store.lock_memory`); profiles created `0600` in both `cmd/*/init.go` that profile, plus a key-material warning | I-4, I-5 |
 | `packaging/systemd` | `LimitCORE=0` in both units, `LimitMEMLOCK=infinity` in the signer's | I-4 |
 | `.goreleaser.yaml`, `custom.mk`, `go.mk`, release workflow, README | Signed checksums, SBOMs and packages; verification instructions | T-7 |
 | `pkg/syslog` | Fixes listed under the syslog audit sink; `AuditHandler` with its bounded queue; tests on a temporary socket | R-1, R-3 |
-| `internal/metadata/config`, `cmd/openstack-spire-issuer` | `audit.syslog` block and its checks; at `service start`, a handler that writes to the regular stream and forwards audit records to syslog | R-1, R-3 |
+| `internal/issuer/config`, `cmd/openstack-spire-issuer` | `audit.syslog` block and its checks; at `service start`, a handler that writes to the regular stream and forwards audit records to syslog | R-1, R-3 |
 | `examples/` | Samples updated with the new keys, a dedicated vendordata user, and Nova `[vendordata_dynamic_auth]` `certfile`/`keyfile` once confirmed on DevStack | S-3 |
 
 ## Resolved questions and out of scope

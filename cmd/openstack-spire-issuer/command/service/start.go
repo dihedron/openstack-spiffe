@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/auditsink"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/hardening"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/osclient"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/server"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/auditsink"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/hardening"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/osclient"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/server"
 )
 
 // Service groups the commands running the signer.

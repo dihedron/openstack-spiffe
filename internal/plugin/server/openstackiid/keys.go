@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/aggregator"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/aggregator"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
 )
 
 // keySourceConfig configures a keySource.

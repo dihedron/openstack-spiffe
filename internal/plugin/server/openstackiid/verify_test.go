@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 

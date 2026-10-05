@@ -17,7 +17,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	"go.yaml.in/yaml/v3"
 )
 

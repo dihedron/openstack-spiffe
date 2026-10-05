@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/requestid"
-	"github.com/dihedron/openstack-spiffe/internal/metadata/server"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/requestid"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/server"
 )
 
 // JWKS groups the commands acting on JSON Web Key Sets.

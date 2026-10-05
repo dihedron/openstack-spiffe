@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/dihedron/openstack-spiffe/internal/metadata/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
 	"github.com/dihedron/openstack-spiffe/pkg/iid"
 )
 
