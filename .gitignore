@@ -8,6 +8,8 @@
 *.so
 *.dylib
 dist/
+# the release documents and their intermediate files (docs/build.sh)
+build/
 
 # Test binary, built with `go test -c`
 *.test

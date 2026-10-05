@@ -13,9 +13,14 @@ compile: go-dev ## build for the default linux/amd64 platform
 snapshot: signing-check go-snapshot ## build a snapshot version for the supported platforms (signed if GPG_FINGERPRINT and GPG_KEY_FILE are set)
 
 .PHONY: release
-release: signing-check ## build a release version (requires a valid tag and the packaging key)
+release: signing-check ## build a release version (requires a valid tag and the packaging key), documents included
 	@test -n "$(GPG_FINGERPRINT)" || { echo "a release must be signed: set GPG_FINGERPRINT and GPG_KEY_FILE" >&2; exit 1; }
+	@DOCS_VERSION="$$(git describe --tags --exact-match)" docs/build.sh
 	@$(MAKE) --no-print-directory go-release
+
+.PHONY: docs
+docs: ## build the release documents (PDF) into build/docs/ (needs docker or podman)
+	@docs/build.sh
 
 # signing-check: the packaging key (T-7) signs the checksums file through gpg
 # (GPG_FINGERPRINT) and the packages through nfpm (GPG_KEY_FILE, its armored

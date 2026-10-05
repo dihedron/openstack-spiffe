@@ -25,6 +25,7 @@ The [lab](#the-lab) is a different matter. It runs DevStack and three more VMs, 
 | golangci-lint | v2 (CI runs v2) | lint |
 | gpg | 2.2 or later | signed builds, the packaging key, the lab |
 | shellcheck | any recent, or docker to run `koalaman/shellcheck:stable` | the lab's and packaging scripts |
+| Docker or Podman | any recent | `make docs`: the release documents build in pinned pandoc and mermaid-cli images |
 | nftables, with unprivileged user namespaces | optional | the nftables sample's test, skipped without them |
 
 On Debian and Ubuntu:
@@ -80,12 +81,15 @@ docker run --rm -v "$PWD:/mnt" -w /mnt/test/lab koalaman/shellcheck:stable -x -P
 make                                # a development build for this machine (dist/)
 make snapshot                       # every platform, archive and package, unsigned
 make checksum                       # the plugins' SHA-256, for plugin_checksum
+make docs                           # the release documents (PDF) into build/docs/: needs docker or podman
 make help                           # every target
 ```
 
 Many-core machines hide timing assumptions that CI runners, with one or two CPUs, expose: a test reading what a goroutine records must wait for that goroutine, never assume it has already run. `-cpu 1,2` catches such races before CI does.
 
 The examples in [examples/](examples) are read by tests: keep them valid when a configuration key changes.
+
+The release documents (Setup Guide, Architecture and Design, Operator's Guide) live in [docs/](docs), as Markdown chapters with Mermaid diagrams, and are built to PDF with pandoc (see [.specs/openstack-spire-docs.md](.specs/openstack-spire-docs.md)). Update them in the change that alters what they describe: behaviour, configuration, errors or log messages. Configuration samples are included from `examples/` (a code block marked `{include="examples/signer.yaml"}`), never copied. The `Documents` workflow builds them on every change and attaches the PDFs to the run.
 
 ## The lab
 

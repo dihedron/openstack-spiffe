@@ -1,0 +1,5 @@
+# Architecture and Design: title page and PDF metadata (see docs/build.sh)
+title: "Architecture and Design"
+subtitle: "How OpenStack instances prove their identity to SPIRE, and why it is safe"
+author: "openstack-spiffe"
+lang: en-GB

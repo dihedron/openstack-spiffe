@@ -1,0 +1,35 @@
+# pandoc defaults shared by the three documents (see docs/build.sh and
+# .specs/openstack-spire-docs.md). Paths are relative to the repository
+# root, where the build runs.
+from: markdown
+to: pdf
+template: eisvogel
+pdf-engine: xelatex
+standalone: true
+number-sections: true
+top-level-division: chapter
+fail-if-warnings: true
+# diagrams rendered by the build, artwork
+resource-path: [".", "build/docs/work/diagrams", "docs/common/artwork"]
+filters:
+  - docs/common/filters/include.lua
+variables:
+  # a book (scrbook) for chapters, printed one-sided
+  book: true
+  classoption: [oneside, open=any]
+  papersize: a4
+  fontsize: 10pt
+  mainfont: DejaVu Serif
+  sansfont: DejaVu Sans
+  monofont: DejaVu Sans Mono
+  colorlinks: true
+  linkcolor: blue
+  urlcolor: blue
+  titlepage: true
+  titlepage-logo: docs/common/artwork/logo.png
+  logo-width: 60mm
+  titlepage-rule-color: "1E4E79"
+  toc-own-page: true
+  footer-left: "openstack-spiffe"
+  code-block-font-size: \small
+  table-use-row-colors: true

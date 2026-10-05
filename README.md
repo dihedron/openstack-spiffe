@@ -295,6 +295,10 @@ test/lab/lab.sh down         # remove everything but the download cache
 
 `status`, `ssh <vm>` and `logs <vm> [unit]` inspect it. Nothing is compiled in the VMs: `deploy` installs the baseline amd64 packages that `make snapshot` builds on the lab host.
 
+## Documents
+
+Each release publishes three PDFs beside its packages, covered by the signed checksums file: the **Setup Guide** (installing and configuring the issuer and both plugins), **Architecture and Design** (how it works, the threat model and every mitigation) and the **Operator's Guide** (monitoring, procedures, and every error with its remedy). Their sources are in [docs/](docs); `make docs` builds them.
+
 ## Development
 
 [DEVELOPMENT.md](DEVELOPMENT.md) covers setting up a development machine (hardware, software, and `make dev-check`, which checks the environment), the everyday workflow, and, for maintainers, releases and the packaging key.

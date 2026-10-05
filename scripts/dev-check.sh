@@ -104,6 +104,13 @@ else
 	warn "neither shellcheck nor docker: the lab's scripts cannot be checked"
 fi
 
+section "Documents (make docs)"
+if have docker || have podman; then
+	ok "a container engine ($(have docker && echo docker || echo podman)): the documents build in pinned pandoc and mermaid-cli images"
+else
+	warn "neither docker nor podman: the release documents cannot be built locally (CI builds them)"
+fi
+
 section "Optional test dependencies"
 if have nft && have unshare && unshare -rn true 2>/dev/null; then
 	ok "nft and unprivileged user namespaces (the nftables sample is checked)"

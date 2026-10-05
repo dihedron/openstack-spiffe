@@ -1,0 +1,5 @@
+# Setup Guide: title page and PDF metadata (see docs/build.sh)
+title: "Setup Guide"
+subtitle: "Installing and configuring the issuer and the SPIRE plugins"
+author: "openstack-spiffe"
+lang: en-GB

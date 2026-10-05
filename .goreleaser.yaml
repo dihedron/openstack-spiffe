@@ -414,6 +414,12 @@ sboms:
     disable: false
     
     
+checksum:
+  # the release documents too, when built (make docs): the signature of the
+  # checksums file then covers them like the packages (T-7)
+  extra_files:
+    - glob: ./build/docs/*.pdf
+
 # the checksums file covers every archive, package and SBOM: its detached
 # signature, made with the packaging key whose fingerprint is in
 # GPG_FINGERPRINT, vouches for all of them (T-7). make snapshot skips it when
@@ -434,6 +440,10 @@ signs:
       - "${artifact}"
 
 release:
+  # the release documents (make docs, before make release): see
+  # .specs/openstack-spire-docs.md
+  extra_files:
+    - glob: ./build/docs/*.pdf
   footer: |
     ---
     Released by [GoReleaser](https://github.com/goreleaser/goreleaser).
