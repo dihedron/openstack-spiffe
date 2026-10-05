@@ -1,6 +1,6 @@
 # OpenStack SPIRE node attestation — documentation spec
 
-Oct 5, 2026 · @Andrea Funtò · **Approved Oct 5, 2026; being implemented** (D1, D2 and D3 done; see open items)
+Oct 5, 2026 · @Andrea Funtò · **Approved Oct 5, 2026; implemented** (D1 to D4; see open items)
 
 ## Overview
 
@@ -117,7 +117,7 @@ Every chapter below is required; the outlines fix the scope, not the wording. Th
 
 ## Open items
 
-- **Table formatting** (raised in review, Oct 5): the tables of the documents are misformatted and must be revised, Architecture and Design's first (the threat register, the components and boundaries tables) and the Operator's Guide's once written. Deferred by the project owner, to be taken up after D4.
+- **Table formatting** (raised in review, Oct 5): the tables of the documents are misformatted and must be revised, Architecture and Design's first (the threat register, the components and boundaries tables) and the Operator's Guide's once written. Deferred by the project owner, to be taken up after D4. The likely general fix: let LaTeX break inline code at `_`, `.` and `/` within table cells (a Lua filter), since identifiers wider than their column are what overflows; then revisit each table's proportions, and consider landscape pages for the widest (the Operator's Guide's `/attest` responses).
 
 ## Decisions (Oct 5)
 
