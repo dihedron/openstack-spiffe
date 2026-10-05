@@ -149,7 +149,7 @@ Each test boots the instances it needs and deletes them afterwards, so tests are
 | NET-1 | Source allowlist | With `attest.allowed_sources` set to `devstack`'s address, `/attest` from the lab host with a valid vendordata token is refused with `403`; E2E-1 still passes | 4 |
 | NET-2 | Nova client certificate | With `attest.client_ca_path` set, Nova's `[vendordata_dynamic_auth]` `certfile`/`keyfile` make E2E-1 pass; without them `/attest` refuses with `403`, and the JWK Set stays reachable without a certificate | 4 |
 | DOS-1 | Public endpoint limit | A burst on `/.well-known/jwks.json` from the lab host gets `429` while E2E-1 still passes | 5 |
-| MEM-1 | Memory protection | The running signer is non-dumpable and its unit has `LimitCORE=0` | 6 |
+| MEM-1 | Memory protection | The running signer is non-dumpable and its memory is locked (`VmLck`); its unit has `LimitCORE=0` and `LimitMEMLOCK=infinity` | 6 |
 | AUD-3 | Correlation | Every `agent_attested` record on `spire` has a `token_issued` record with the same `jti` on an issuer; a quick re-attestation produces a `reattest_alert` with severity `warning` | 7 |
 | GST-1 | Guest hardening | With the sample nftables rule loaded, an unprivileged user in the guest cannot reach `169.254.169.254`, while root and the SPIRE Agent user can, and E2E-1 passes | 8 |
 | REL-1 | Signed releases | `deploy` from a signed release verifies the checksums file and the packages before installing | 8 |
