@@ -165,7 +165,7 @@ Every failing check prints what it observed (HTTP status, journal lines, agent l
 5. The acceptance test harness and the 3.5 scenarios above. Chunk 3's open item is closed by AUD-1 and AUD-2, which also found that journald does not parse RFC 5424: the syslog sink now sends RFC 3164 (issuer spec).
 6. README: a short "Lab" section (requirements, `preflight`, `up`, `test`). Issuer spec: the references to `test/install_devstack_lxd.sh` point to `test/lab/lab.sh` instead.
 
-Chunks 4 to 8 each add their own scenarios from the table and run them before their commit. Chunk 4 added NET-1 and NET-2 (Oct 5): the lab runs with both `/attest` restrictions on, and confirmed that Nova presents its client certificate through `[vendordata_dynamic_auth]`.
+Chunks 4 to 8 each add their own scenarios from the table and run them before their commit. Chunk 4 added NET-1 and NET-2 (Oct 5): the lab runs with both `/attest` restrictions on, and confirmed that Nova presents its client certificate through `[vendordata_dynamic_auth]`. Chunk 5 added DOS-1.
 
 ## Resolved questions
 
