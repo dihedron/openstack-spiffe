@@ -37,4 +37,5 @@ variables:
   # reference's keys are easier to scan
   header-includes: |
     \usepackage{enumitem}
+    \usepackage{needspace}
     \setlist[description]{style=nextline, leftmargin=1.5em}

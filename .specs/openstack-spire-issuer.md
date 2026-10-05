@@ -2,7 +2,7 @@
 
 Sep 20, 2026 (revised Oct 1, Oct 2, Oct 4 and Oct 5, 2026) · @Andrea Funtò
 
-*Revision notes (Oct 5)*: metrics, specified in the companion `openstack-spire-issuer-metrics.md`: OpenTelemetry instrumentation of the signer and the aggregator, exported to Prometheus (a dedicated listener) or to an OpenTelemetry Collector (OTLP), disabled by default (I-8, D-10). Not implemented yet.
+*Revision notes (Oct 5)*: metrics, specified in the companion `openstack-spire-issuer-metrics.md`: OpenTelemetry instrumentation of the signer and the aggregator, exported to Prometheus (a dedicated listener) or to an OpenTelemetry Collector (OTLP), disabled by default (I-8, D-10). Implemented Oct 5.
 
 *Revision notes (Oct 4)*: security revision following the STRIDE threat model (`openstack-spire-threat-model.md`). Changes:
 - Network and mTLS restrictions on `/attest`, and a cap on concurrent Keystone validations (S-3, D-2).

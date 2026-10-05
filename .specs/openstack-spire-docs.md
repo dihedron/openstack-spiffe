@@ -1,6 +1,6 @@
 # OpenStack SPIRE node attestation — documentation spec
 
-Oct 5, 2026 · @Andrea Funtò · **Approved Oct 5, 2026; not implemented yet**
+Oct 5, 2026 · @Andrea Funtò · **Approved Oct 5, 2026; being implemented** (D1, D2 and D3 done; see open items)
 
 ## Overview
 
@@ -114,6 +114,10 @@ Every chapter below is required; the outlines fix the scope, not the wording. Th
 | D2 | The Setup Guide, its configuration reference, and the configuration reference test |
 | D3 | Architecture and Design, its diagrams included |
 | D4 | The Operator's Guide, and the error reference test |
+
+## Open items
+
+- **Table formatting** (raised in review, Oct 5): the tables of the documents are misformatted and must be revised, Architecture and Design's first (the threat register, the components and boundaries tables) and the Operator's Guide's once written. Deferred by the project owner, to be taken up after D4.
 
 ## Decisions (Oct 5)
 

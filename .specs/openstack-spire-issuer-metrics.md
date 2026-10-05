@@ -1,6 +1,6 @@
 # OpenStack metadata JWT issuer — metrics spec
 
-Oct 5, 2026 · @Andrea Funtò · **Approved Oct 5, 2026; not implemented yet**
+Oct 5, 2026 · @Andrea Funtò · **Approved and implemented Oct 5, 2026** (lab scenarios MET-1 and MET-2)
 
 ## Overview
 

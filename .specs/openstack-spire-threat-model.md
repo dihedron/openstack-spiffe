@@ -96,7 +96,7 @@ A threat marked **P** or **U** lists the revised spec section that addresses it.
 | TB5 | SPIRE Server plugin → JWK Set URL | Public keys | Verified TLS (pinned CA or system roots). |
 | TB6 | SPIRE Agent → SPIRE Server | Attestation payload (the token) | SPIRE's TLS, server-authenticated during node attestation. |
 | TB7 | Release pipeline → hosts and images | Binaries, packages, units | Checksums. GPG signatures on the checksums file and on each package, added in this revision. |
-| TB8 | Issuer → metrics consumer (a collector agent scraping `/metrics`, or an OpenTelemetry Collector receiving OTLP) | Metrics: counts, latencies, key and peer state; project IDs when enabled | Loopback by default; beyond it, TLS with client certificates (scrape) or verified TLS to the collector (push). Added Oct 5, not implemented yet. |
+| TB8 | Issuer → metrics consumer (a collector agent scraping `/metrics`, or an OpenTelemetry Collector receiving OTLP) | Metrics: counts, latencies, key and peer state; project IDs when enabled | Loopback by default; beyond it, TLS with client certificates (scrape) or verified TLS to the collector (push). Added and implemented Oct 5 (lab: MET-1, MET-2). |
 
 ## Security assumptions
 
