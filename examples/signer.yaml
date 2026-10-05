@@ -84,3 +84,27 @@ peers:                                                   # example; default: non
   fetch_timeout: "5s"                                    # < poll_interval
   stale_key_retention: "5m"                              # at least 5m
   cache_max_age: "30s"                                   # whole seconds: Cache-Control of the merged set
+
+# Metrics (see .specs/openstack-spire-issuer-metrics.md): OpenTelemetry
+# metrics, scraped in the Prometheus format from their own listener, or pushed
+# to an OpenTelemetry Collector over OTLP. Never served on listen_addr.
+metrics:
+  enabled: false                                         # default
+  exporter: "prometheus"                                 # or "otlp"
+  runtime: true                                          # Go runtime metrics (memory, goroutines, GC)
+  project_attribute: false                               # true: project_id on the issued tokens counter (config check warns: it discloses per-tenant activity)
+  max_projects: 500                                      # distinct project_id values, then "other"
+  prometheus:
+    listen_addr: "127.0.0.1:9464"                        # beyond loopback, TLS and client certificates are required:
+    # tls_cert_path: "/etc/openstack-spire-issuer/metrics.crt"
+    # tls_key_path: "/etc/openstack-spire-issuer/metrics.key"
+    # client_ca_path: "/etc/openstack-spire-issuer/scrapers-ca.pem"
+    rate_limit_per_source: "10/1s"
+  otlp:                                                  # with exporter: otlp
+    # endpoint: "https://otel-collector.internal:4318"   # https only; OTLP/HTTP adds /v1/metrics without a path
+    protocol: "http/protobuf"                            # or "grpc"
+    interval: "30s"                                      # at least 5s
+    timeout: "10s"                                       # < interval
+    # ca_cert_path: "/etc/ssl/otel-collector-ca.pem"     # default: system roots (config check warns)
+    # client_cert_path / client_key_path: a client certificate for the collector
+    # headers_env: "OTEL_COLLECTOR_HEADERS"              # environment variable with "key=value,..." headers (credentials)

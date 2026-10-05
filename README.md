@@ -175,6 +175,43 @@ Package upgrades restart only the units that are running, and removing the packa
 - **`keystone.max_concurrent_validations`** (default 32) caps the Keystone validations in flight: beyond it, a token that is neither cached nor already being validated gets `503` at once, so a flood of bogus tokens cannot be relayed to Keystone faster than that.
 - **Deployment.** Run several signer replicas, each with a unique `replica_id`, behind a load balancer close to the Nova control plane. Either list every other replica under `peers.urls` in each replica's configuration (always their `/jwks/local.json`: `config check` rejects a peer's `/.well-known/jwks.json`, which would make keys circulate between replicas) and point the SPIRE Server at the replicas' `/.well-known/jwks.json`, or run one or more aggregators behind their own load balancer. A replica missing from a peer list is silently missing from that replica's merged set.
 
+### Metrics
+
+The signer and the aggregator can export OpenTelemetry metrics, disabled by default (`metrics` in [signer.yaml](examples/signer.yaml) and [aggregator.yaml](examples/aggregator.yaml); design in [.specs/openstack-spire-issuer-metrics.md](.specs/openstack-spire-issuer-metrics.md)):
+
+- **`exporter: prometheus`** serves `GET /metrics` on its own listener, `127.0.0.1:9464` by default, for a collector agent on the same host. Any other address requires `tls_cert_path`, `tls_key_path` and `client_ca_path`: scrapers must present a client certificate. Metrics are never served on the Nova-facing listener.
+- **`exporter: otlp`** pushes them every `interval` (30s) to an OpenTelemetry Collector over verified TLS, by OTLP/HTTP or gRPC. Credentials for the collector come from the environment variable named by `headers_env`, never from the file. The `OTEL_*` environment variables cannot redirect the metrics.
+
+What they cover, with the `openstack_spire_` prefix in Prometheus:
+
+- **Issuance**: `tokens_issued_total`, and `attest_requests_total` by `outcome` and `reason`. There is one reason per refusal, such as `source_not_allowed`, `caller_not_allowed`, `rate_limited_instance`, `instance_not_allowed`, `lookup_unavailable` or `key_store_unavailable`. `attest_duration_seconds` measures the end-to-end latency, which delays every instance's first boot.
+- **Dependencies**: Keystone validations (served from the cache, merged, or sent to Keystone, with the number in flight against `max_concurrent_validations`), Nova and Keystone verification lookups, and signing durations.
+- **Keys and key sets**: keys by state, the active key's age, rotations, peer and replica fetches with their age, conflicting kids, and the keys served.
+- **Protection and health**: rate-limit refusals per limiter, syslog audit records dropped, and the readiness checks. Go runtime metrics are on by default (`runtime`).
+
+**Per-project counts** (`project_attribute: true`) add `project_id` to `tokens_issued_total`, for at most `max_projects` (500) projects; tokens of further projects count under `other`. They disclose each tenant's activity to whoever reads the metrics, so `config check` warns about them. Instance IDs, user IDs, token IDs and client addresses never appear in metrics: the audit records keep that detail.
+
+Examples (Prometheus):
+
+```promql
+# tokens issued per hour, per scraped replica (target_info maps each
+# instance to its replica_id, as service_instance_id)
+sum by (instance) (increase(openstack_spire_tokens_issued_total[1h]))
+# refusals by reason over the last 15 minutes
+sum by (reason) (increase(openstack_spire_attest_requests_total{outcome="rejected"}[15m]))
+# 99th percentile of the /attest latency
+histogram_quantile(0.99, sum by (le) (rate(openstack_spire_attest_duration_seconds_bucket[5m])))
+```
+
+Alerts worth having:
+
+- `openstack_spire_keys{state="active"} == 0`: a replica without an active key issues nothing.
+- `openstack_spire_key_active_age_seconds` above `rotation_interval` plus a margin: rotation has stalled.
+- `increase(openstack_spire_audit_syslog_dropped_total[10m]) > 0`: the syslog audit trail is incomplete.
+- `openstack_spire_jwks_fetch_age_seconds` approaching `stale_key_retention`: that peer's keys are about to be dropped from the merged set.
+- `openstack_spire_jwks_conflicts > 0`: two sources publish different keys under the same kid.
+- A sustained rise of `attest_requests_total{reason="caller_not_allowed"}` or `{reason="source_not_allowed"}`: someone is trying the vendordata credentials from elsewhere.
+
 ## openstack_iid: the SPIRE node attestor plugins
 
 The `openstack_iid` plugin pair attests an OpenStack instance to SPIRE Server using the token issued by `openstack-spire-issuer`. The full design is in [.specs/openstack-spire-plugins.md](.specs/openstack-spire-plugins.md).

@@ -23,3 +23,10 @@ rate_limit_per_source: "50/1s"                           # every endpoint (D-5)
 # client_address:                                        # only behind a proxy/LB that hides client addresses
 #   trusted_proxies: ["10.0.10.0/24"]
 #   header: "X-Forwarded-For"
+
+# Metrics: as for the signer (see signer.yaml), without project_attribute.
+metrics:
+  enabled: false                                        # default
+  exporter: "prometheus"                                # or "otlp"
+  prometheus:
+    listen_addr: "127.0.0.1:9465"                       # beside a signer on the same host, another port
