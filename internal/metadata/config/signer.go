@@ -91,6 +91,19 @@ type Signer struct {
 	Peers Peers `yaml:"peers"`
 	// Audit configures where audit records go besides the regular log.
 	Audit Audit `yaml:"audit"`
+	// Attest restricts where /attest may be called from (S-3).
+	Attest Attest `yaml:"attest"`
+}
+
+// Attest restricts /attest to the hosts Nova calls it from (S-3, D-2):
+// either restriction confines stolen vendordata credentials to them.
+type Attest struct {
+	// AllowedSources lists the IP addresses or CIDR ranges /attest accepts
+	// requests from (the client address); empty means any.
+	AllowedSources []string `yaml:"allowed_sources"`
+	// ClientCAPath is a PEM CA bundle: when set, /attest requires a client
+	// certificate that chains to it.
+	ClientCAPath string `yaml:"client_ca_path"`
 }
 
 // Audit configures where audit records go besides the regular log.
@@ -241,6 +254,7 @@ func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
 		checkCABundle(result, "peers.ca_cert_path", cfg.Peers.CACertPath)
+		checkCABundle(result, "attest.client_ca_path", cfg.Attest.ClientCAPath)
 	}
 	return result
 }
@@ -348,6 +362,13 @@ func (s *Signer) validate(r *Result[Signer]) {
 		}
 	}
 
+	checkList(r, "attest.allowed_sources", s.Attest.AllowedSources)
+	for i, entry := range s.Attest.AllowedSources {
+		if _, err := clientaddr.ParseTrustedProxy(entry); entry != "" && err != nil {
+			r.errorf(KindRuleViolation, fmt.Sprintf("attest.allowed_sources[%d]", i), "%v", err)
+		}
+	}
+
 	if _, err := syslog.ParseFacility(s.Audit.Syslog.Facility); err != nil {
 		r.errorf(KindRuleViolation, "audit.syslog.facility", "%v", err)
 	}
@@ -381,6 +402,28 @@ func (s *Signer) validate(r *Result[Signer]) {
 
 // warn flags valid but risky settings.
 func (s *Signer) warn(r *Result[Signer]) {
+	if len(s.Attest.AllowedSources) == 0 && s.Attest.ClientCAPath == "" {
+		r.warnf("attest", "neither allowed_sources nor client_ca_path is set: anyone holding Nova's vendordata credentials can request tokens from anywhere; restrict /attest to the hosts running nova-api-metadata")
+	}
+	for i, entry := range s.Attest.AllowedSources {
+		if p, err := clientaddr.ParseTrustedProxy(entry); err == nil && p.Bits() == 0 {
+			r.warnf(fmt.Sprintf("attest.allowed_sources[%d]", i), "%q covers every address: it restricts nothing", entry)
+		}
+	}
+	for i, entry := range s.Keystone.AllowedUsers {
+		user, err := auth.ParseAllowedUser(entry)
+		if err != nil || user.ID != "" {
+			continue
+		}
+		path := fmt.Sprintf("keystone.allowed_users[%d]", i)
+		r.warnf(path, "%q is a name: a user renamed or recreated under it would be accepted; list the user ID instead", entry)
+		if user.Name == "nova" {
+			r.warnf(path, "%q is Nova's service user, whose credentials are on every compute node: use a dedicated vendordata user, configured on the nova-api-metadata hosts only", entry)
+		}
+	}
+	if s.Peers.Enabled() && s.Peers.CACertPath == "" {
+		r.warnf("peers.urls", "peers.ca_cert_path is not set: every public CA is trusted for the peers' keys")
+	}
 	if !s.NovaLookup.Enabled {
 		r.warnf("nova_lookup.enabled", "instance verification is disabled: Nova's claims about project and instance are not checked against the Nova API")
 	}

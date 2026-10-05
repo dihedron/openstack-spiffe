@@ -67,7 +67,7 @@ func (a *Aggregator) Run(ctx context.Context) error {
 // Serve serves HTTPS on the listener (see serve) and runs the replica polling
 // and readiness loops, until the context ends.
 func (a *Aggregator) Serve(ctx context.Context, ln net.Listener) error {
-	return serve(ctx, ln, a.handler, a.cfg.TLSCertPath, a.cfg.TLSKeyPath, a.cfg.MinTLSVersion(),
+	return serve(ctx, ln, a.handler, a.cfg.TLSCertPath, a.cfg.TLSKeyPath, a.cfg.MinTLSVersion(), false,
 		[]any{"component", "jwks-aggregator"},
 		a.merged.Run, a.readiness.Run)
 }

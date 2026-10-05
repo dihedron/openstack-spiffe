@@ -92,6 +92,9 @@ func (a *Aggregator) validate(r *Result[Aggregator]) {
 
 // warn flags valid but risky settings.
 func (a *Aggregator) warn(r *Result[Aggregator]) {
+	if a.ReplicaCACertPath == "" {
+		r.warnf("replica_ca_cert_path", "not set: every public CA is trusted for the replicas' keys")
+	}
 	for i, replica := range a.Replicas {
 		if u, err := url.Parse(replica); err == nil && strings.HasSuffix(u.Path, mergedJWKSPath) {
 			r.warnf(fmt.Sprintf("replicas[%d]", i),

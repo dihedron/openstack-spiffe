@@ -122,7 +122,7 @@ func dump(findings []Finding) string {
 }
 
 func TestCheckSignerValid(t *testing.T) {
-	doc := minimalSigner + "tags:\n  allowlist: [role]\n" + auditSyslogEnabled
+	doc := minimalSigner + "tags:\n  allowlist: [role]\n" + secureSettings
 	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
@@ -176,7 +176,7 @@ key_store:
   vault_proxy_endpoint: https://vault.internal:8200
 rate_limit_per_instance: "1/s"
 keystone:
-  allowed_users: [nova@Default]
+  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]
 nova_lookup:
   enabled: false
 `
@@ -191,6 +191,7 @@ nova_lookup:
 		{5, "rate_limit_per_instance", SeverityWarning, KindRisky},
 		{9, "nova_lookup.enabled", SeverityWarning, KindRisky},
 		{0, "audit.syslog.enabled", SeverityWarning, KindRisky},
+		{0, "attest", SeverityWarning, KindRisky},
 	}
 	got := keysOf(result.Warnings())
 	for _, w := range want {
@@ -216,10 +217,10 @@ replica_id: signer-a
 tags:
   allowlist: [role]
 keystone:
-  allowed_users: [nova@Default]
+  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]
 client_address:
   header: X-Real-IP
-` + auditSyslogEnabled
+` + secureSettings
 	result := CheckSigner("signer.yaml", []byte(ignored), checkOptions())
 	if len(result.Errors()) != 0 {
 		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
@@ -274,14 +275,14 @@ fetch_timeout: 1x
 func TestCrossCheck(t *testing.T) {
 	signer := func(file, replica, publishAhead string) *Result[Signer] {
 		doc := strings.Replace(minimalSigner, "replica_id: signer-a", "replica_id: "+replica, 1) +
-			"tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: " + publishAhead + "\n" + auditSyslogEnabled
+			"tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: " + publishAhead + "\n" + secureSettings
 		r := CheckSigner(file, []byte(doc), checkOptions())
 		if len(r.Findings) != 0 {
 			t.Fatalf("setup: unexpected findings:\n%s", dump(r.Findings))
 		}
 		return r
 	}
-	aggregator := CheckAggregator("aggregator.yaml", []byte(minimalAggregator+"poll_interval: 60s\nfetch_timeout: 10s\n"), checkOptions())
+	aggregator := CheckAggregator("aggregator.yaml", []byte(minimalAggregator+"poll_interval: 60s\nfetch_timeout: 10s\nreplica_ca_cert_path: /ca.pem\n"), checkOptions())
 	if len(aggregator.Findings) != 0 {
 		t.Fatalf("setup: unexpected findings:\n%s", dump(aggregator.Findings))
 	}
@@ -403,10 +404,10 @@ func TestRateMarshal(t *testing.T) {
 
 func TestTLSMinVersion(t *testing.T) {
 	signer := func(extra string) string {
-		return "tls_cert_path: /c\ntls_key_path: /k\nreplica_id: a\ntags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n" + auditSyslogEnabled + extra
+		return "tls_cert_path: /c\ntls_key_path: /k\nreplica_id: a\ntags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]\n" + secureSettings + extra
 	}
 	aggregator := func(extra string) string {
-		return "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks]\n" + extra
+		return "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks]\nreplica_ca_cert_path: /ca.pem\n" + extra
 	}
 	opts := checkOptions()
 	opts.SkipFiles = true
@@ -450,20 +451,86 @@ func TestTLSMinVersion(t *testing.T) {
 	}
 }
 
-func TestCheckSignerAuditSyslogEnabledHasNoWarning(t *testing.T) {
+func TestCheckSignerSecureSettingsHaveNoWarning(t *testing.T) {
 	doc := `tls_cert_path: /tls.crt
 tls_key_path: /tls.key
 replica_id: signer-a
 tags:
   allowlist: [role]
 keystone:
-  allowed_users: [nova@Default]
+  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]
+audit:
+  syslog:
+    enabled: true
+attest:
+  client_ca_path: /etc/openstack-spire-issuer/nova-client-ca.pem
+`
+	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
+	if len(result.Findings) != 0 {
+		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
+	}
+}
+
+func TestCheckSignerSecurityWarnings(t *testing.T) {
+	doc := `tls_cert_path: /tls.crt
+tls_key_path: /tls.key
+replica_id: signer-a
+tags:
+  allowlist: [role]
+keystone:
+  allowed_users: [nova@Default, nova-vendordata@Default, ` + vendordataUserID + `]
+peers:
+  urls: [https://signer-b.internal:8443/jwks/local.json]
 audit:
   syslog:
     enabled: true
 `
 	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
-	if len(result.Findings) != 0 {
-		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
+	if len(result.Errors()) != 0 {
+		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
+	}
+	got := keysOf(result.Warnings())
+	want := []findingKey{
+		{0, "attest", SeverityWarning, KindRisky},                    // neither restriction (S-3)
+		{7, "keystone.allowed_users[0]", SeverityWarning, KindRisky}, // name@domain (E-6)
+		{7, "keystone.allowed_users[0]", SeverityWarning, KindRisky}, // nova (S-3)
+		{7, "keystone.allowed_users[1]", SeverityWarning, KindRisky}, // name@domain (E-6)
+		{9, "peers.urls", SeverityWarning, KindRisky},                // public CAs (S-5)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("warnings:\n%s\nwant %+v", dump(result.Warnings()), want)
+	}
+	for _, f := range result.Warnings() {
+		if strings.Contains(f.Path, "allowed_users[1]") && !strings.Contains(f.Message, "user ID") {
+			t.Errorf("the name@domain warning does not recommend the user ID: %s", f.Message)
+		}
+	}
+
+	// every source allowed: as good as no restriction
+	open := strings.Replace(doc, "audit:", "attest:\n  allowed_sources: [\"10.0.20.0/24\", \"0.0.0.0/0\"]\naudit:", 1)
+	result = CheckSigner("signer.yaml", []byte(open), checkOptions())
+	if f := findByPath(t, result.Findings, "attest.allowed_sources[1]"); f.Severity != SeverityWarning {
+		t.Errorf("0.0.0.0/0 in attest.allowed_sources: %+v, want a warning", f)
+	}
+	for _, f := range result.Findings {
+		if f.Path == "attest" {
+			t.Errorf("unexpected warning with allowed_sources set: %+v", f)
+		}
+	}
+
+	// a client CA alone is a restriction too
+	certOnly := strings.Replace(doc, "audit:", "attest:\n  client_ca_path: /nova-ca.pem\naudit:", 1)
+	for _, f := range CheckSigner("signer.yaml", []byte(certOnly), checkOptions()).Findings {
+		if f.Path == "attest" {
+			t.Errorf("unexpected warning with client_ca_path set: %+v", f)
+		}
+	}
+}
+
+func TestCheckAggregatorWithoutReplicaCA(t *testing.T) {
+	doc := "tls_cert_path: /c\ntls_key_path: /k\nreplicas: [https://a/jwks/local.json]\n"
+	result := CheckAggregator("aggregator.yaml", []byte(doc), checkOptions())
+	if f := findByPath(t, result.Findings, "replica_ca_cert_path"); f.Severity != SeverityWarning {
+		t.Errorf("no replica_ca_cert_path: %+v, want a warning (S-5)", f)
 	}
 }

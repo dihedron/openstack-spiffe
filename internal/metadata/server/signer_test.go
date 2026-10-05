@@ -81,6 +81,8 @@ func writeTLS(t *testing.T) (certPath, keyPath string, pool *x509.CertPool) {
 type harness struct {
 	cloud  *openstacktest.Server
 	client *http.Client
+	// pool trusts the signer's certificate
+	pool   *x509.CertPool
 	url    string
 	cancel context.CancelFunc
 	done   chan error
@@ -145,6 +147,7 @@ keystone:
 	h := &harness{
 		cloud:  cloud,
 		client: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: 10 * time.Second},
+		pool:   pool,
 		url:    "https://" + ln.Addr().String(),
 		cancel: cancel,
 		done:   make(chan error, 1),

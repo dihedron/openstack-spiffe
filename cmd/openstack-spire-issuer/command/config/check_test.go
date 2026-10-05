@@ -18,10 +18,12 @@ replica_id: signer-a
 tags:
   allowlist: [role]
 keystone:
-  allowed_users: [nova@Default]
+  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]
 audit:
   syslog:
     enabled: true
+attest:
+  allowed_sources: [10.0.20.0/24]
 `
 
 const aggregator = `tls_cert_path: /tls.crt

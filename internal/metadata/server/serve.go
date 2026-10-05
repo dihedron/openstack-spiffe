@@ -26,18 +26,26 @@ func run(ctx context.Context, addr string, serveFn func(context.Context, net.Lis
 }
 
 // serve serves HTTPS on the listener with the given certificate, TLS
-// minTLSVersion or later and bounded timeouts, while running the background loops. When the
+// minTLSVersion or later and bounded timeouts, asking clients for a
+// certificate if requestClientCert is set, while running the background loops. When the
 // context ends, it stops accepting connections, lets in-flight requests
 // complete (up to shutdownTimeout), stops the loops and returns nil.
-func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, minTLSVersion uint16, logAttrs []any, loops ...func(context.Context) error) error {
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, certPath, keyPath string, minTLSVersion uint16, requestClientCert bool, logAttrs []any, loops ...func(context.Context) error) error {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		ln.Close()
 		return fmt.Errorf("loading TLS certificate: %w", err)
 	}
+	// asked of every client, never verified here: the /attest guard
+	// verifies it, so that an invalid certificate gets a 403 from /attest
+	// rather than a failed handshake on every endpoint
+	clientAuth := tls.NoClientCert
+	if requestClientCert {
+		clientAuth = tls.RequestClientCert
+	}
 	srv := &http.Server{
 		Handler:           handler,
-		TLSConfig:         &tls.Config{MinVersion: minTLSVersion, Certificates: []tls.Certificate{cert}},
+		TLSConfig:         &tls.Config{MinVersion: minTLSVersion, Certificates: []tls.Certificate{cert}, ClientAuth: clientAuth},
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

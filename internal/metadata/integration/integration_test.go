@@ -169,14 +169,16 @@ key_store:
 tags:
   allowlist: [role]
 keystone:
-  allowed_users: [nova@Default]
+  allowed_users: [%s]   # Nova's vendordata user, by ID
   ca_cert_path: %s
 enrich: [availability_zone, project_name]
 audit:
   syslog:
     enabled: true
     socket: %s
-`, listeners[id].Addr(), certPath, keyPath, id, publishAhead, cloud.CAFile(t), daemon.path)
+attest:
+  allowed_sources: [127.0.0.1]   # the tests' client, standing in for nova-api-metadata
+`, listeners[id].Addr(), certPath, keyPath, id, publishAhead, novaUser.ID, cloud.CAFile(t), daemon.path)
 		if topo.peers {
 			doc += fmt.Sprintf("peers:\n  ca_cert_path: %s\n  poll_interval: 300ms\n  fetch_timeout: 200ms\n  cache_max_age: 0s\n  urls:\n", certPath)
 			for _, peer := range topo.replicas {

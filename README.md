@@ -70,7 +70,13 @@ The command reports every problem in one run, each with its line, and applies th
 
 Like the other OpenStack service users, it typically gets the `admin` role in the `service` project. For least privilege, grant a dedicated role instead and add policy overrides for these three rules. Nova must offer compute API microversion 2.47 or later (Pike).
 
-**Nova's vendordata user.** Nova authenticates to the signer with the user of its `[vendordata_dynamic_auth]` section. List that user in the signer's `keystone.allowed_users` as `name@domain` (e.g. `nova@Default`) or by ID, and make sure it carries `keystone.required_role` (default `service`). Bare names are rejected, because user names are only unique within a domain.
+**Nova's vendordata user.** Nova authenticates to the signer with the user of its `[vendordata_dynamic_auth]` section. Create a dedicated user for it (e.g. `nova-vendordata`), configured only on the hosts running `nova-api-metadata`, with `keystone.required_role` (default `service`). Never use Nova's own service user: its credentials are on every compute node, so any compromised hypervisor could mint tokens for any instance. List the dedicated user in the signer's `keystone.allowed_users` by ID (`openstack user show nova-vendordata -f value -c id`); `name@domain` also works, but a user renamed or recreated under that name would be accepted, so `config check` warns about it.
+
+**Restricting `/attest`.** Keystone authentication proves possession of the vendordata credentials, not that the caller is a metadata host. Confine `/attest` to the `nova-api-metadata` hosts with either or both of:
+- `attest.allowed_sources`: their addresses or CIDR ranges; other sources get a `403` before the body is read or Keystone is called;
+- `attest.client_ca_path`: a CA bundle; `/attest` then requires a client certificate it issued, which Nova presents with `certfile` and `keyfile` in `[vendordata_dynamic_auth]` ([nova.conf](examples/nova.conf)). The JWKS and health endpoints never require one.
+
+`config check` warns when neither is set.
 
 **Nova configuration** ([nova.conf](examples/nova.conf)) on the `nova-api-metadata` nodes:
 - register the target as `openstack_iid@https://<signer-lb>/attest`;

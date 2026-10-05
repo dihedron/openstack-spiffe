@@ -45,7 +45,7 @@ func TestSignerPeersDefaults(t *testing.T) {
 }
 
 func TestSignerPeersValid(t *testing.T) {
-	result := CheckSigner("signer.yaml", []byte(peeredSigner+auditSyslogEnabled), checkOptions())
+	result := CheckSigner("signer.yaml", []byte(peeredSigner+"  ca_cert_path: /etc/ssl/signer-ca.pem\n"+secureSettings), checkOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
@@ -91,7 +91,7 @@ func TestSignerPeersInvalid(t *testing.T) {
 }
 
 func TestSignerPeersSettingsWithoutURLsWarn(t *testing.T) {
-	doc := minimalSigner + "tags:\n  allowlist: [role]\npeers:\n  poll_interval: 10s\n  fetch_timeout: 1s\n" + auditSyslogEnabled
+	doc := minimalSigner + "tags:\n  allowlist: [role]\npeers:\n  poll_interval: 10s\n  fetch_timeout: 1s\n" + secureSettings
 	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
 	if len(result.Errors()) != 0 {
 		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
@@ -105,7 +105,7 @@ func TestSignerPeersSettingsWithoutURLsWarn(t *testing.T) {
 	}
 
 	// without peers, publish_ahead is not checked against the peer timing
-	doc = minimalSigner + "tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: 10s\n" + auditSyslogEnabled
+	doc = minimalSigner + "tags:\n  allowlist: [role]\nkey_store:\n  publish_ahead: 10s\n" + secureSettings
 	if result := CheckSigner("signer.yaml", []byte(doc), checkOptions()); len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
@@ -132,7 +132,7 @@ func TestAggregatorWarnsAboutMergedReplicaURLs(t *testing.T) {
 	if len(result.Errors()) != 0 {
 		t.Fatalf("unexpected errors:\n%s", dump(result.Errors()))
 	}
-	want := []findingKey{{6, "replicas[1]", SeverityWarning, KindRisky}}
+	want := []findingKey{{0, "replica_ca_cert_path", SeverityWarning, KindRisky}, {6, "replicas[1]", SeverityWarning, KindRisky}}
 	if got := keysOf(result.Warnings()); !slices.Equal(got, want) {
 		t.Fatalf("warnings %+v, want %+v", got, want)
 	}

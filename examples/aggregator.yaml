@@ -12,7 +12,7 @@ tls_min_version: "1.3"                                   # or "1.2": server and 
 replicas:                                                # required, https only: each signer replica's own keys
   - "https://signer-a.internal:8443/jwks/local.json"
   - "https://signer-b.internal:8443/jwks/local.json"
-# replica_ca_cert_path: "/etc/ssl/signer-ca.pem"         # CA bundle for the replicas; default: system roots
+replica_ca_cert_path: "/etc/ssl/signer-ca.pem"           # CA bundle for the replicas; without it, every public CA is trusted
 
 poll_interval: "30s"
 fetch_timeout: "5s"                                      # < poll_interval

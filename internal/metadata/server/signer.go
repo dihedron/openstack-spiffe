@@ -23,6 +23,7 @@ import (
 	"github.com/dihedron/openstack-spiffe/internal/metadata/osclient"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/ratelimit"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/requestid"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/restrict"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/token"
 	"github.com/gophercloud/gophercloud/v2"
 )
@@ -34,13 +35,17 @@ type Signer struct {
 	peers     *aggregator.Aggregator // nil without peers
 	readiness *health.Readiness
 	handler   http.Handler
+	// requestClientCert asks TLS clients for a certificate, which the
+	// /attest guard verifies (attest.client_ca_path)
+	requestClientCert bool
 }
 
 // NewSigner builds a signer replica from a checked configuration and the
 // service's authenticated OpenStack client, and generates its first key.
 //
-// Routes: POST /attest behind the per-source limit and body cap and the
-// Keystone authentication; GET /jwks/local.json (the replica's own keys),
+// Routes: POST /attest behind the source allowlist and client certificate
+// check (attest), the per-source limit and body cap and the Keystone
+// authentication; GET /jwks/local.json (the replica's own keys),
 // /.well-known/jwks.json (the own keys merged with the peers', or the own keys
 // alone without peers), /liveness and /readiness unauthenticated. The client
 // address is resolved, and a request ID assigned, before anything else.
@@ -117,10 +122,18 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
-	protected, err := ratelimit.SourceMiddleware(sourceLimiter, cfg.MaxBodyBytes, authenticator.Middleware(attestHandler))
+	rateLimited, err := ratelimit.SourceMiddleware(sourceLimiter, cfg.MaxBodyBytes, authenticator.Middleware(attestHandler))
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
+	// the source allowlist and the client certificate come first: a refused
+	// request costs neither a rate-limit slot, nor a body read, nor a
+	// Keystone call (S-3, D-2)
+	guard, err := restrict.New(cfg.Attest.AllowedSources, cfg.Attest.ClientCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+	protected := guard.Middleware(rateLimited)
 	localHandler, err := jwks.NewHandler(keys)
 	if err != nil {
 		return nil, fmt.Errorf("creating signer: %w", err)
@@ -146,11 +159,12 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	mux.Handle("/readiness", readiness)
 
 	return &Signer{
-		cfg:       cfg,
-		keys:      keys,
-		peers:     peers,
-		readiness: readiness,
-		handler:   requestid.Middleware(resolver.Middleware(mux)),
+		cfg:               cfg,
+		keys:              keys,
+		peers:             peers,
+		readiness:         readiness,
+		requestClientCert: guard.RequestsClientCertificates(),
+		handler:           requestid.Middleware(resolver.Middleware(mux)),
 	}, nil
 }
 
@@ -166,7 +180,7 @@ func (s *Signer) Serve(ctx context.Context, ln net.Listener) error {
 	if s.peers != nil {
 		loops = append(loops, s.peers.Run)
 	}
-	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath, s.cfg.MinTLSVersion(),
+	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath, s.cfg.MinTLSVersion(), s.requestClientCert,
 		[]any{"component", "signer", "replica_id", s.cfg.ReplicaID},
 		loops...)
 }

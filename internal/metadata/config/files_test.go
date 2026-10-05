@@ -63,7 +63,7 @@ func fileCheckOptions() CheckOptions {
 
 func signerDoc(certPath, keyPath, caPath string) string {
 	doc := "tls_cert_path: " + certPath + "\ntls_key_path: " + keyPath + "\nreplica_id: a\n" +
-		"tags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [nova@Default]\n"
+		"tags:\n  allowlist: [role]\nkeystone:\n  allowed_users: [3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60]\n"
 	if caPath != "" {
 		doc += "  ca_cert_path: " + caPath + "\n"
 	}
@@ -83,7 +83,7 @@ func fileFindings(findings []Finding) []findingKey {
 func TestFileChecksValid(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := writeKeyPair(t, dir, "server", fileCheckNow.Add(365*24*time.Hour), 0o600)
-	result := CheckSigner("signer.yaml", []byte(signerDoc(cert, key, cert)+auditSyslogEnabled), fileCheckOptions())
+	result := CheckSigner("signer.yaml", []byte(signerDoc(cert, key, cert)+secureSettings), fileCheckOptions())
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings:\n%s", dump(result.Findings))
 	}
@@ -92,7 +92,7 @@ func TestFileChecksValid(t *testing.T) {
 func TestFileChecksSkipped(t *testing.T) {
 	opts := fileCheckOptions()
 	opts.SkipFiles = true
-	result := CheckSigner("signer.yaml", []byte(signerDoc("/missing.crt", "/missing.key", "/missing.pem")+auditSyslogEnabled), opts)
+	result := CheckSigner("signer.yaml", []byte(signerDoc("/missing.crt", "/missing.key", "/missing.pem")+secureSettings), opts)
 	if len(result.Findings) != 0 {
 		t.Fatalf("unexpected findings with SkipFiles:\n%s", dump(result.Findings))
 	}
@@ -165,5 +165,19 @@ func TestFileChecksAggregator(t *testing.T) {
 	want := []findingKey{{4, "replica_ca_cert_path", SeverityError, KindFile}}
 	if got := fileFindings(result.Findings); !slices.Equal(got, want) {
 		t.Fatalf("file findings = %+v, want %+v", got, want)
+	}
+}
+
+func TestFileChecksAttestClientCA(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := writeKeyPair(t, dir, "server", fileCheckNow.Add(365*24*time.Hour), 0o600)
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc := signerDoc(cert, key, "") + "attest:\n  client_ca_path: " + garbage + "\n"
+	got := fileFindings(CheckSigner("signer.yaml", []byte(doc), fileCheckOptions()).Findings)
+	if len(got) != 1 || got[0].Path != "attest.client_ca_path" || got[0].Severity != SeverityError {
+		t.Fatalf("file findings = %+v, want an error on attest.client_ca_path", got)
 	}
 }

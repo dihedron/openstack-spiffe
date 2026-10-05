@@ -18,12 +18,15 @@ tls_cert_path: /etc/openstack-metadata-signer/tls.crt
 tls_key_path: /etc/openstack-metadata-signer/tls.key
 replica_id: signer-a
 keystone:
-  allowed_users: ["nova@Default"]
+  allowed_users: ["3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60"]
 `
 
-// auditSyslogEnabled enables the syslog audit sink, so that fixtures meant
-// to be free of warnings do not get the warning about it being disabled.
-const auditSyslogEnabled = "audit:\n  syslog:\n    enabled: true\n"
+// secureSettings enables the syslog audit sink and restricts /attest, so
+// that fixtures meant to be free of warnings get none about them.
+const secureSettings = "audit:\n  syslog:\n    enabled: true\nattest:\n  allowed_sources: [10.0.20.0/24]\n"
+
+// vendordataUserID is the ID of Nova's vendordata user in the fixtures.
+const vendordataUserID = "3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60"
 
 // parseSigner checks doc without file checks and fails on any error finding.
 func parseSigner(r io.Reader, hostname func() (string, error)) (*Signer, error) {
@@ -181,16 +184,16 @@ func TestSignerInvalid(t *testing.T) {
 		{"custom claims too large", [2]string{}, "custom_claims:\n  c: " + strings.Repeat("x", iid.MaxCustomClaimsBytes) + "\n", "custom_claims"},
 		{"empty allowlist entry", [2]string{}, "tags:\n  allowlist: [\"\"]\n", "tags.allowlist"},
 		{"duplicate allowlist entry", [2]string{}, "tags:\n  allowlist: [a, a]\n", "tags.allowlist"},
-		{"no allowed users", [2]string{"  allowed_users: [\"nova@Default\"]\n", ""}, "", "keystone.allowed_users"},
-		{"empty allowed user", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"\"]"}, "", "keystone.allowed_users"},
-		{"bare allowed user name", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova\"]"}, "", "keystone.allowed_users[0]"},
-		{"allowed user without domain", [2]string{"allowed_users: [\"nova@Default\"]", "allowed_users: [\"nova@\"]"}, "", "keystone.allowed_users[0]"},
+		{"no allowed users", [2]string{"  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n", ""}, "", "keystone.allowed_users"},
+		{"empty allowed user", [2]string{"allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]", "allowed_users: [\"\"]"}, "", "keystone.allowed_users"},
+		{"bare allowed user name", [2]string{"allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]", "allowed_users: [\"nova\"]"}, "", "keystone.allowed_users[0]"},
+		{"allowed user without domain", [2]string{"allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]", "allowed_users: [\"nova@\"]"}, "", "keystone.allowed_users[0]"},
 		{"trusted proxy host name", [2]string{}, "client_address:\n  trusted_proxies: [proxy.internal]\n", "client_address.trusted_proxies[0]"},
 		{"trusted proxy bad range", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.0/33]\n", "client_address.trusted_proxies[0]"},
 		{"duplicate trusted proxy", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.1, 10.0.0.1]\n", "client_address.trusted_proxies"},
 		{"invalid client address header", [2]string{}, "client_address:\n  trusted_proxies: [10.0.0.1]\n  header: \"X Forwarded\"\n", "client_address.header"},
-		{"empty required role", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  required_role: \"\"\n"}, "", "keystone.required_role"},
-		{"validation cache too long", [2]string{"  allowed_users: [\"nova@Default\"]\n", "  allowed_users: [\"nova@Default\"]\n  validation_cache_ttl: 11m\n"}, "", "keystone.validation_cache_ttl"},
+		{"empty required role", [2]string{"  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n", "  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n  required_role: \"\"\n"}, "", "keystone.required_role"},
+		{"validation cache too long", [2]string{"  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n", "  allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]\n  validation_cache_ttl: 11m\n"}, "", "keystone.validation_cache_ttl"},
 		{"nova cache longer than ttl", [2]string{}, "nova_lookup:\n  cache_ttl: 6m\n", "nova_lookup.cache_ttl"},
 		{"nova cache longer than custom ttl", [2]string{}, "token_ttl_seconds: 60\nnova_lookup:\n  cache_ttl: 61s\n", "nova_lookup.cache_ttl"},
 		{"empty statuses", [2]string{}, "nova_lookup:\n  allowed_statuses: []\n", "nova_lookup.allowed_statuses"},
@@ -206,6 +209,11 @@ func TestSignerInvalid(t *testing.T) {
 		{"syslog app name not ASCII", [2]string{}, "audit:\n  syslog:\n    app_name: \"issuér\"\n", "audit.syslog.app_name"},
 		{"empty syslog app name", [2]string{}, "audit:\n  syslog:\n    app_name: \"\"\n", "audit.syslog.app_name"},
 		{"empty syslog socket", [2]string{}, "audit:\n  syslog:\n    enabled: true\n    socket: \"\"\n", "audit.syslog.socket"},
+		{"attest source host name", [2]string{}, "attest:\n  allowed_sources: [metadata.internal]\n", "attest.allowed_sources[0]"},
+		{"attest source bad range", [2]string{}, "attest:\n  allowed_sources: [10.0.0.0/33]\n", "attest.allowed_sources[0]"},
+		{"duplicate attest source", [2]string{}, "attest:\n  allowed_sources: [10.0.0.1, 10.0.0.1]\n", "attest.allowed_sources"},
+		{"empty attest source", [2]string{}, "attest:\n  allowed_sources: [\"\"]\n", "attest.allowed_sources"},
+		{"unknown attest key", [2]string{}, "attest:\n  allowed_source: [10.0.0.1]\n", "allowed_source"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,7 +237,7 @@ func TestSignerInvalid(t *testing.T) {
 }
 
 func TestSignerAllowedUsersByIDOrQualifiedName(t *testing.T) {
-	doc := strings.Replace(minimalSigner, "allowed_users: [\"nova@Default\"]",
+	doc := strings.Replace(minimalSigner, "allowed_users: [\"3f2a9c1e5b7d4a8e9f0c1b2a3d4e5f60\"]",
 		"allowed_users: [\"0123456789abcdef0123456789abcdef\", \"svc@example.com@ldap\"]", 1)
 	if _, err := parseSignerString(t, doc); err != nil {
 		t.Fatalf("user ID and qualified name rejected: %v", err)
@@ -315,7 +323,7 @@ func TestLoadSigner(t *testing.T) {
 		}
 		paths = append(paths, w.Path)
 	}
-	if want := []string{"tags.allowlist", "audit.syslog.enabled"}; !slices.Equal(paths, want) {
+	if want := []string{"attest", "tags.allowlist", "audit.syslog.enabled"}; !slices.Equal(paths, want) {
 		t.Fatalf("warnings = %+v, want %v", warnings, want)
 	}
 	if _, _, err := LoadSigner(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
@@ -406,5 +414,28 @@ func TestSignerAuditSyslog(t *testing.T) {
 		if _, err := parseSignerString(t, minimalSigner+"audit:\n  syslog:\n    facility: "+facility+"\n"); err != nil {
 			t.Errorf("facility %s: %v", facility, err)
 		}
+	}
+}
+
+func TestSignerAttest(t *testing.T) {
+	cfg, err := parseSignerString(t, minimalSigner+`attest:
+  allowed_sources: ["10.0.20.0/24", "192.0.2.10", "2001:db8::/64"]
+  client_ca_path: /etc/openstack-spire-issuer/nova-client-ca.pem
+`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if want := []string{"10.0.20.0/24", "192.0.2.10", "2001:db8::/64"}; !slices.Equal(cfg.Attest.AllowedSources, want) {
+		t.Errorf("attest.allowed_sources = %v, want %v", cfg.Attest.AllowedSources, want)
+	}
+	if cfg.Attest.ClientCAPath != "/etc/openstack-spire-issuer/nova-client-ca.pem" {
+		t.Errorf("attest.client_ca_path = %q", cfg.Attest.ClientCAPath)
+	}
+	defaults, err := parseSignerString(t, minimalSigner)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(defaults.Attest.AllowedSources) != 0 || defaults.Attest.ClientCAPath != "" {
+		t.Errorf("attest defaults = %+v, want no restriction", defaults.Attest)
 	}
 }
