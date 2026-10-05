@@ -33,3 +33,11 @@ clean: ## clean the binary directory
 .PHONY: checksum
 checksum: ## print the SHA-256 of the SPIRE plugin binaries in dist/ (for plugin_checksum)
 	@find dist -type f \( -name openstack-agent-plugin -o -name openstack-server-plugin \) -exec sha256sum {} + | sort -k2
+
+.PHONY: dev-check
+dev-check: ## check the development environment (tools, resources, build); see DEVELOPMENT.md
+	@scripts/dev-check.sh
+
+.PHONY: dev-check-full
+dev-check-full: ## check the development environment, then run the unit and integration tests
+	@scripts/dev-check.sh --test

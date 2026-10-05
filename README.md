@@ -257,3 +257,7 @@ test/lab/lab.sh down         # remove everything but the download cache
 ```
 
 `status`, `ssh <vm>` and `logs <vm> [unit]` inspect it. Nothing is compiled in the VMs: `deploy` installs the baseline amd64 packages that `make snapshot` builds on the lab host.
+
+## Development
+
+[DEVELOPMENT.md](DEVELOPMENT.md) covers setting up a development machine (hardware, software, and `make dev-check`, which checks the environment), the everyday workflow, and, for maintainers, releases and the packaging key.
