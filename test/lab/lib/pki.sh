@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# The lab's PKI: a CA, the issuers' server certificates and the client
-# certificate Nova presents to the issuers. Lab-only material, kept in the
-# state directory.
+# The lab's PKI: a CA, the issuers' server certificates, the client
+# certificate Nova presents to the issuers, and the packaging key that signs
+# the lab's builds. Lab-only material, kept in the state directory.
 
 pki_dir() { echo "$LAB_STATE_DIR/pki"; }
 
@@ -40,7 +40,33 @@ pki_issue() {
 	rm -f "$dir/$name.csr" "$ext"
 }
 
-# ensure_pki: the CA and every certificate the lab uses.
+# pki_gpg ARGS...: gpg on the lab's own keyring.
+pki_gpg() { gpg --homedir "$(pki_dir)/gnupg" --batch --quiet "$@"; }
+
+# packaging_fingerprint: the lab packaging key's fingerprint.
+packaging_fingerprint() { cat "$(pki_dir)/packaging-key.fpr"; }
+
+# pki_packaging_key: the GPG key signing the lab's builds as a release is
+# signed (T-7), unless it exists: packaging-key.asc (the armored private key,
+# without passphrase, for nfpm), packaging-key.pub.asc and packaging-key.fpr.
+pki_packaging_key() {
+	local dir
+	dir="$(pki_dir)"
+	[[ -f "$dir/packaging-key.fpr" ]] && return 0
+	info "creating the lab packaging key"
+	mkdir -p "$dir/gnupg"
+	chmod 700 "$dir/gnupg"
+	pki_gpg --pinentry-mode loopback --passphrase '' \
+		--quick-gen-key "openstack-spiffe lab packaging <packaging@openstack.lab>" rsa3072 sign 10y
+	local fpr
+	fpr="$(pki_gpg --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')"
+	[[ -n "$fpr" ]] || die "cannot create the lab packaging key"
+	(umask 077 && pki_gpg --pinentry-mode loopback --passphrase '' --armor --export-secret-keys "$fpr" >"$dir/packaging-key.asc")
+	pki_gpg --armor --export "$fpr" >"$dir/packaging-key.pub.asc"
+	echo "$fpr" >"$dir/packaging-key.fpr"
+}
+
+# ensure_pki: the CA, every certificate the lab uses and the packaging key.
 ensure_pki() {
 	pki_ca
 	local vm
@@ -49,4 +75,6 @@ ensure_pki() {
 	done
 	# presented by nova-api-metadata to /attest (chunk 4)
 	pki_issue nova-vendordata clientAuth
+	# signs the lab's builds (chunk 8)
+	pki_packaging_key
 }

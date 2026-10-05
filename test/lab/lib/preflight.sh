@@ -296,6 +296,7 @@ pf_software() {
 	pf_tool ssh openssh-client openssh-clients
 	pf_tool ssh-keygen openssh-client openssh-clients
 	pf_tool openssl openssl openssl
+	pf_tool gpg gnupg gnupg2
 	pf_tool curl curl curl
 	pf_tool jq jq jq
 	pf_tool git git git

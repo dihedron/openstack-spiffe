@@ -6,11 +6,75 @@
 readonly ISSUER_ETC=/etc/openstack-spire-issuer
 readonly ISSUER_SERVICE=openstack-spire-issuer
 
-# deploy_build: builds every package with goreleaser (make snapshot).
+# deploy_build: builds every package with goreleaser (make snapshot), signed
+# with the lab packaging key as a release is (T-7), and verifies the signed
+# checksums file as an operator would.
 deploy_build() {
-	info "building the packages (make snapshot)"
-	make -C "$REPO_DIR" snapshot >"$LAB_STATE_DIR/build.log" 2>&1 ||
+	pki_packaging_key
+	info "building the packages (make snapshot, signed with the lab packaging key)"
+	GNUPGHOME="$(pki_dir)/gnupg" GPG_FINGERPRINT="$(packaging_fingerprint)" GPG_KEY_FILE="$(pki_dir)/packaging-key.asc" \
+		make -C "$REPO_DIR" snapshot >"$LAB_STATE_DIR/build.log" 2>&1 ||
 		die "the build failed: see $LAB_STATE_DIR/build.log"
+	verify_checksums
+}
+
+# verify_checksums: the checksums file's signature, against the lab packaging
+# key only, then every artifact against the checksums file.
+verify_checksums() {
+	local checksums=("$REPO_DIR"/dist/*_checksums.txt) keyring
+	[[ ${#checksums[@]} -eq 1 && -f "${checksums[0]}.asc" ]] || die "no signed checksums file in dist/"
+	keyring="$(pki_dir)/packaging-key.gpg"
+	gpg --dearmor <"$(pki_dir)/packaging-key.pub.asc" >"$keyring"
+	gpgv --keyring "$keyring" "${checksums[0]}.asc" "${checksums[0]}" 2>/dev/null ||
+		die "the signature of ${checksums[0]##*/} does not verify"
+	(cd "$REPO_DIR/dist" && sha256sum --check --quiet --strict "${checksums[0]##*/}") ||
+		die "dist/ does not match ${checksums[0]##*/}"
+	info "verified the signed ${checksums[0]##*/}"
+}
+
+# trust_packaging_key VM FORMAT: makes VM's package tools verify packages
+# signed with the lab packaging key: debsig-verify's policy and keyring for
+# deb, rpm's keyring for rpm. Idempotent.
+trust_packaging_key() {
+	local vm="$1" format="$2" fpr
+	fpr="$(packaging_fingerprint)"
+	put "$vm" "$(pki_dir)/packaging-key.pub.asc" /tmp/packaging-key.asc root:root 0644
+	vm_ssh "$vm" "sudo bash -s -- $format ${fpr: -16}" <<'SCRIPT'
+set -euo pipefail
+format="$1" keyid="$2"
+if [[ "$format" == rpm ]]; then
+	rpm --import /tmp/packaging-key.asc
+else
+	command -v debsig-verify >/dev/null ||
+		{ apt-get update -qq && DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq debsig-verify >/dev/null 2>&1; }
+	mkdir -p "/usr/share/debsig/keyrings/$keyid" "/etc/debsig/policies/$keyid"
+	gpg --dearmor </tmp/packaging-key.asc >"/usr/share/debsig/keyrings/$keyid/debsig.gpg"
+	cat >"/etc/debsig/policies/$keyid/openstack-spiffe.pol" <<POLICY
+<?xml version="1.0"?>
+<!DOCTYPE Policy SYSTEM "https://www.debian.org/debsig/1.0/policy.dtd">
+<Policy xmlns="https://www.debian.org/debsig/1.0/">
+  <Origin Name="openstack-spiffe" id="$keyid" Description="openstack-spiffe lab packages"/>
+  <Selection>
+    <Required Type="origin" File="debsig.gpg" id="$keyid"/>
+  </Selection>
+  <Verification MinOptional="0">
+    <Required Type="origin" File="debsig.gpg" id="$keyid"/>
+  </Verification>
+</Policy>
+POLICY
+fi
+rm -f /tmp/packaging-key.asc
+SCRIPT
+}
+
+# verify_package VM FILE: checks the signature of a package already copied
+# to VM, with the tool an operator uses (T-7).
+verify_package() {
+	local vm="$1" remote="$2"
+	case "$remote" in
+	*.deb) vm_ssh "$vm" "debsig-verify --quiet $remote" ;;
+	*.rpm) vm_ssh "$vm" "rpm --checksig $remote | grep -q 'signatures OK'" ;;
+	esac || die "the signature of ${remote##*/} does not verify on $vm"
 }
 
 # package PACKAGE FORMAT: the baseline amd64 build of PACKAGE (deb or rpm) in
@@ -21,13 +85,15 @@ package() {
 	echo "${found[0]}"
 }
 
-# install_package VM FILE BINARY: installs, upgrades, reinstalls or
-# downgrades a local package, then checks that /usr/bin/BINARY on VM is the
+# install_package VM FILE BINARY: verifies the signature of a local package
+# on VM, installs, upgrades, reinstalls or downgrades it, then checks that /usr/bin/BINARY on VM is the
 # one goreleaser built. Snapshot versions carry the commit hash, which is not
 # ordered: a newer build can look older to the package manager.
 install_package() {
 	local vm="$1" file="$2" binary="$3" remote="/tmp/${2##*/}"
+	trust_packaging_key "$vm" "${file##*.}"
 	scp -q "${SSH_OPTS[@]}" "$file" "$LAB_USER@$(vm_ip "$vm"):$remote"
+	verify_package "$vm" "$remote"
 	case "$remote" in
 	*.deb) vm_ssh "$vm" "sudo dpkg -i $remote >/dev/null 2>&1 && rm -f $remote" ;;
 	*.rpm) vm_ssh "$vm" "sudo rpm -U --replacepkgs --oldpackage --quiet $remote && rm -f $remote" ;;
@@ -282,7 +348,7 @@ SCRIPT
 # or rhel) into a SPIRE Agent attesting with openstack_iid. Its trust bundle
 # is part of it rather than downloaded.
 guest_user_data() {
-	local os="$1" plugin tarball spire_version spire_sha plugin_sha install
+	local os="$1" plugin tarball spire_version spire_sha plugin_sha install nftables_conf
 	spire_version="$(env_get .versions.spire)"
 	spire_sha="$(env_get .versions.spire_sha256)"
 	tarball="$(spire_url "$spire_version")"
@@ -290,15 +356,30 @@ guest_user_data() {
 	if [[ "$os" == ubuntu ]]; then
 		plugin="$(package openstack-agent-plugin deb)"
 		install="dpkg -i /tmp/agent-plugin"
+		nftables_conf=/etc/nftables.conf
 	else
 		plugin="$(package openstack-agent-plugin rpm)"
 		install="rpm -U --replacepkgs /tmp/agent-plugin"
+		nftables_conf=/etc/sysconfig/nftables.conf
 	fi
 	# the binary the package installs
 	plugin_sha="$(sha256sum "$REPO_DIR"/dist/openstack-agent-plugin_linux_amd64_v1/openstack-agent-plugin | awk '{ print $1 }')"
 	cat <<YAML
 #cloud-config
+# SPIRE Agent runs as its own user, the only one besides root allowed to
+# reach the metadata service (guest hardening, S-4)
+users:
+  - default
+  - name: spire
+    system: true
+    homedir: /var/lib/spire
+    shell: /usr/sbin/nologin
+$([[ "$os" == ubuntu ]] || printf 'packages:\n  - nftables\n')
 write_files:
+  - path: /etc/openstack-metadata.nft
+    permissions: "0644"
+    content: |
+$(sed 's/^/      /' "$REPO_DIR/examples/agent-metadata-nftables.conf")
   - path: /etc/spire/bundle.pem
     permissions: "0644"
     content: |
@@ -338,12 +419,18 @@ $(sed 's/^/      /' "$LAB_STATE_DIR/spire-bundle.pem")
       After=network-online.target
       Wants=network-online.target
       [Service]
+      User=spire
+      StateDirectory=spire/agent
+      RuntimeDirectory=spire/agent/public
       ExecStart=$SPIRE_HOME/bin/spire-agent run -config /etc/spire/agent.conf
       Restart=on-failure
       RestartSec=5s
       [Install]
       WantedBy=multi-user.target
 runcmd:
+  # the sample rule, loaded at boot by the image's nftables service, before
+  # the agent starts
+  - [sh, -c, "echo 'include \\"/etc/openstack-metadata.nft\\"' >> $nftables_conf && systemctl enable nftables && systemctl restart nftables"]
   - [sh, -c, "curl -fsS -o /tmp/agent-plugin http://spire.lab:$ARTIFACTS_PORT/${plugin##*/} && $install"]
   - [sh, -c, "curl -fsS -o /tmp/spire.tar.gz http://spire.lab:$ARTIFACTS_PORT/$tarball && echo '$spire_sha  /tmp/spire.tar.gz' | sha256sum -c --quiet && mkdir -p $SPIRE_HOME /var/lib/spire/agent && tar -xzf /tmp/spire.tar.gz -C $SPIRE_HOME --strip-components=1"]
   - [systemctl, daemon-reload]
