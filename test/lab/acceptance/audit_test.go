@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // syslogEntry is a journald entry received through the syslog socket.
@@ -22,7 +23,14 @@ type syslogEntry struct {
 // journalctl time specification, as journald recorded them.
 func (l *lab) syslogAudit(t *testing.T, vm, since string) []syslogEntry {
 	t.Helper()
-	out := l.must(t, vm, "sudo journalctl _TRANSPORT=syslog SYSLOG_IDENTIFIER=openstack-spire-issuer --no-pager -o json --since "+quote(since))
+	return l.syslogRecords(t, vm, "openstack-spire-issuer", since)
+}
+
+// syslogRecords returns the records sent to syslog with an identifier since
+// a journalctl time specification, as journald recorded them.
+func (l *lab) syslogRecords(t *testing.T, vm, identifier, since string) []syslogEntry {
+	t.Helper()
+	out := l.must(t, vm, "sudo journalctl _TRANSPORT=syslog SYSLOG_IDENTIFIER="+identifier+" --no-pager -o json --since "+quote(since))
 	var entries []syslogEntry
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
@@ -131,4 +139,61 @@ func TestLogLevelOff(t *testing.T) {
 			break
 		}
 	}
+}
+
+// TestAttestationAudit is AUD-3: every agent_attested record the server
+// plugin sends to syslog has a token_issued record with the same jti and kid
+// on an issuer, and a quick re-attestation yields a reattest_alert with the
+// warning severity.
+func TestAttestationAudit(t *testing.T) {
+	l := theLab
+	since := strings.TrimSpace(l.must(t, "spire", "date -u '+%Y-%m-%d %H:%M:%S'")) + " UTC"
+	g := l.bootGuest(t, "ubuntu", "demo")
+	id := l.agentID(g, l.env.OpenStack.ProjectID)
+	first := l.waitAttested(t, id, "", attestTimeout)
+	l.reattest(t, g)
+	l.waitAttested(t, id, first.serial, 3*time.Minute)
+
+	issued := map[string]syslogEntry{}
+	for _, vm := range []string{"issuer-a", "issuer-b"} {
+		for _, e := range l.syslogAudit(t, vm, since) {
+			if e.record["audit"] == "token_issued" && e.record["instance_id"] == g.id {
+				issued[e.record["jti"].(string)] = e
+			}
+		}
+	}
+	var attested []string
+	var alerts []syslogEntry
+	for _, e := range l.syslogRecords(t, "spire", "openstack-server-plugin", since) {
+		if e.record["instance_id"] != g.id {
+			continue
+		}
+		switch e.record["audit"] {
+		case "agent_attested":
+			jti, _ := e.record["jti"].(string)
+			attested = append(attested, jti)
+			if e.Facility != "10" || e.Priority != "6" || e.record["spiffe_id"] != id || e.record["time"] == nil {
+				t.Errorf("agent_attested: facility %s, priority %s, record %v; want authpriv (10), info (6), %s and the time", e.Facility, e.Priority, e.record, id)
+			}
+			token, ok := issued[jti]
+			if !ok {
+				t.Errorf("agent_attested jti %s has no token_issued record on the issuers", jti)
+			} else if token.record["kid"] != e.record["kid"] {
+				t.Errorf("jti %s: kid %v attested, %v issued", jti, e.record["kid"], token.record["kid"])
+			}
+		case "reattest_alert":
+			alerts = append(alerts, e)
+		}
+	}
+	if len(attested) < 2 {
+		t.Fatalf("%d agent_attested syslog records for %s, want at least 2", len(attested), g.id)
+	}
+	if len(alerts) == 0 {
+		t.Fatalf("no reattest_alert syslog record for %s", g.id)
+	}
+	a := alerts[len(alerts)-1]
+	if a.Priority != "4" || a.record["jti"] != attested[len(attested)-1] || a.record["previous_jti"] != attested[len(attested)-2] {
+		t.Errorf("reattest_alert: priority %s, record %v; want warning (4) and the last two attested jtis %v", a.Priority, a.record, attested[len(attested)-2:])
+	}
+	t.Logf("%d attestations of %s matched to their tokens, %d re-attestation alerts", len(attested), g.id, len(alerts))
 }

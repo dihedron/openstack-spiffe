@@ -194,6 +194,9 @@ plugins {
       jwks_url            = "https://issuer-a.lab:8443/.well-known/jwks.json"
       jwks_ca_cert_path   = "/etc/spire/lab-ca.pem"
       allowed_project_ids = ["$(env_get .openstack.project_id)"]
+      audit_syslog {
+        enabled = true
+      }
     }
   }
 }
