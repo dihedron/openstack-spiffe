@@ -73,6 +73,7 @@ The commands:
 ```bash
 go test ./...                       # unit and integration tests (in-process servers, temporary sockets)
 go test -race ./...                 # the same, with the race detector
+go test -cpu 1,2 ./...              # the same on one and two CPUs, like CI runners: before pushing
 golangci-lint run ./...             # lint; --new-from-rev=HEAD for your changes only
 golangci-lint run --build-tags lab ./test/lab/acceptance   # the lab's tests are behind a build tag
 docker run --rm -v "$PWD:/mnt" -w /mnt/test/lab koalaman/shellcheck:stable -x -P lib lab.sh lib/*.sh
@@ -81,6 +82,8 @@ make snapshot                       # every platform, archive and package, unsig
 make checksum                       # the plugins' SHA-256, for plugin_checksum
 make help                           # every target
 ```
+
+Many-core machines hide timing assumptions that CI runners, with one or two CPUs, expose: a test reading what a goroutine records must wait for that goroutine, never assume it has already run. `-cpu 1,2` catches such races before CI does.
 
 The examples in [examples/](examples) are read by tests: keep them valid when a configuration key changes.
 
