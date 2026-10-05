@@ -12,7 +12,7 @@ Sep 20, 2026 (revised Oct 2 and Oct 4, 2026) · @Andrea Funtò
 - Configuration warnings (S-5, S-8).
 - Deployment guidance on `agent_ttl` and signed releases (E-4, T-7).
 
-Requirements introduced by this revision are tagged with the threat ID they address. They are planned and not implemented yet.
+Requirements introduced by this revision are tagged with the threat ID they address. They were implemented on Oct 4 and 5, 2026, in eight chunks, each with its tests and, where it involves OpenStack, its lab scenarios (see the test environment spec).
 
 ## Overview
 
@@ -327,11 +327,11 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 - The server plugin is deployed wherever SPIRE Server runs (a small number of hosts, standard config management), with network access to the JWK Set URL (the signer replicas' or the aggregator's load balancer).
 - The agent plugin must ship inside every OpenStack instance image the agent runs on — bake it into the base image or install it via the provisioning pipeline, so it's present before SPIRE Agent starts. The same images carry the metadata access restriction of guest hardening (S-4).
 - Record the SHA-256 of each installed binary and set it as `plugin_checksum` in the corresponding `.conf` file — this is a supply-chain control (SPIRE refuses to load a plugin binary whose hash doesn't match), not optional hardening. A `make checksum` target prints the SHA-256 of each plugin binary produced by the build; goreleaser's checksums file covers the release archives and packages.
-- **Verify before pinning** (T-7): `plugin_checksum` only proves that the binary is the one that was installed. Before computing it, verify the release's signed checksums file, or install the signed deb or rpm package, which the package manager verifies (see the issuer spec's signed releases). Image pipelines baking the agent plugin do the same.
+- **Verify before pinning** (T-7): `plugin_checksum` only proves that the binary is the one that was installed. Before computing it, verify the release's signed checksums file, or the package's own signature: `rpm --checksig` (or `dnf` with `localpkg_gpgcheck`) for rpm, `debsig-verify` for deb, since apt does not verify standalone packages (see the issuer spec's signed releases). Image pipelines baking the agent plugin do the same.
 
 ## Implementation plan for the Oct 4 security revision
 
-Planned and not implemented yet. Tests come first, as for every change.
+Done (Oct 5, 2026). Tests came first, as for every change.
 
 | Area | Change | Threats |
 | --- | --- | --- |

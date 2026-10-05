@@ -51,7 +51,7 @@ There is no load balancer. Nova calls a single target URL, so `issuer-a` serves 
 
 **OpenStack over TLS**: the issuer refuses an `OS_AUTH_URL` that is not https, since its own credentials must not travel in clear. DevStack therefore runs with its TLS proxy (`tls-proxy`), which puts every API behind https with DevStack's own CA; the issuers pin that CA as `keystone.ca_cert_path`, and Nova's `[vendordata_dynamic_auth]` uses it as `cafile` (Nova's Python stack does not use the system's trust store). The issuers call Keystone and Nova as their own service user, `spire-issuer`, with the `admin` role on the `service` project, as the README prescribes.
 
-**Lab PKI**: the bring-up creates a lab CA (ECDSA P-256). It issues the issuers' server certificates (`issuer-a.lab` and `issuer-b.lab`, with their names and addresses) and the client certificate Nova presents to `/attest` (chunk 4). SPIRE Server needs none: it runs its own CA, and the server plugin only needs to trust the issuers. The CA bundle is what `jwks_ca_cert_path`, `peers.ca_cert_path` and Nova's `vendordata_dynamic_ssl_certfile` pin. Keys never leave the lab's state directory.
+**Lab PKI**: the bring-up creates a lab CA (ECDSA P-256). It issues the issuers' server certificates (`issuer-a.lab` and `issuer-b.lab`, with their names and addresses) and the client certificate Nova presents to `/attest` (chunk 4). A GPG packaging key (RSA, no passphrase) signs the lab's builds as CI signs a release (chunk 8). SPIRE Server needs none: it runs its own CA, and the server plugin only needs to trust the issuers. The CA bundle is what `jwks_ca_cert_path`, `peers.ca_cert_path` and Nova's `vendordata_dynamic_ssl_certfile` pin. Keys never leave the lab's state directory.
 
 ## Settings
 
@@ -93,7 +93,7 @@ Every resolved value, the DevStack commit, SPIRE version and checksum, and image
 **Software**: each tool is checked with its minimum version, and installed when missing or too old, after a single confirmation listing everything to install (or none with `LAB_ASSUME_YES`). Installation uses `sudo` and the host's package manager; Go and goreleaser come from their official releases, with checksums verified, when the distro's packages are too old.
 - libvirt (daemon running and enabled), `virsh`, `virt-install`, `qemu-img`, QEMU with KVM support.
 - `cloud-localds` or, failing it, `xorriso`/`genisoimage` (cloud-init seed images).
-- `ssh`, `ssh-keygen`, `openssl`, `curl`, `jq`, `git`, `make`, `python3` (for the artifact server).
+- `ssh`, `ssh-keygen`, `openssl`, `gpg` (the lab packaging key), `curl`, `jq`, `git`, `make`, `python3` (for the artifact server).
 - Go, at the version `go.mod` requires, and goreleaser v2: `deploy` builds the packages on the lab host.
 
 **Permissions**:
@@ -113,18 +113,18 @@ Everything lives in `test/lab/`. `lab.sh` is the entry point. Each command is id
 - `preflight [--no-install]`: see above.
 - `up`: runs `preflight`, generates the lab PKI, creates the storage pool, network and VMs from cloud images with cloud-init, runs DevStack's `stack.sh`, then configures DevStack for the lab: the dedicated vendordata user (`nova-vendordata`, with the `service` role on the `service` project), Nova's DynamicJSON target (`openstack_iid` at `https://issuer-a.lab:8443/attest`, verified against the lab CA, not fatal on failure, with the `nova-vendordata` client certificate as `certfile`/`keyfile`), the guest images in Glance, a `lab.guest` flavor, and the lab's SSH key with SSH and ICMP access in the `demo` project. A smoke test then boots a CirrOS instance that reaches `spire.lab` by address and by name and reads its vendordata; Nova's log tells whether it called the target as the vendordata user (a connection failure while no issuer runs) or could not authenticate. On its first success, `up` takes the snapshot, then runs `deploy`. Most of the time goes into DevStack's `stack.sh`, which runs as a systemd unit on `devstack` so that a dropped SSH connection cannot interrupt it; `up` reports its progress. A second `up` on a complete lab only verifies it, so `up` can always be rerun after a failure.
 - `snapshot` / `reset`: saves the running VMs as the lab's baseline (refusing while DevStack has instances, and asking before replacing a snapshot), or returns every VM to it, in under a minute. This is the normal way to start a test session. Snapshots are internal to the VMs' disks and include their memory: DevStack does not survive a cold reboot (the public bridge's address and its NAT rule are not persistent), so reverting resumes the running VMs rather than booting them. The VMs then resume at the snapshot's time, so `reset` sets each VM's clock from the lab host's, waits for Nova's compute service to report in again, and runs the smoke test.
-- `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser) and installs the baseline amd64 ones, as an operator would; nothing is compiled in the VMs. It then:
+- `deploy`: builds the deb and rpm packages on the lab host with `make snapshot` (goreleaser), signed with the lab packaging key, verifies the checksums file's signature and every artifact against it, and installs the baseline amd64 packages as an operator would, each after checking its own signature on the VM (`debsig-verify`, with the key's policy, or `rpm --checksig`); nothing is compiled in the VMs. It then:
   - installs `openstack-spire-issuer` on `issuer-a` (deb) and `issuer-b` (rpm) and writes their configuration: peered with each other, the syslog sink enabled, `nova-vendordata` listed by ID in `keystone.allowed_users`, `/attest` restricted to `devstack`'s address and to Nova's client certificate (`attest.allowed_sources`, `attest.client_ca_path` with the lab CA), DevStack's CA for Keystone and Nova, the lab CA for the peer, the server certificate with its key readable by the service user only, and `signer.env` with the `spire-issuer` credentials. `config check` runs as the service user, the service starts, and `deploy` waits for both replicas' `/readiness` (about 2 minutes: each first key is published ahead of use);
-  - installs the pinned SPIRE release (verified) and `openstack-server-plugin` (deb) on `spire`, with a systemd unit, the trust domain `openstack.lab`, the plugin's checksum, the merged JWK Set URL and `allowed_project_ids` set to the `demo` project, and waits for SPIRE Server's health check;
+  - installs the pinned SPIRE release (verified) and `openstack-server-plugin` (deb) on `spire`, with a systemd unit, the trust domain `openstack.lab`, the plugin's checksum, the merged JWK Set URL, `allowed_project_ids` set to the `demo` project and `audit_syslog` enabled, and waits for SPIRE Server's health check;
   - publishes what the guests install (the SPIRE tarball and the agent plugin's deb and rpm) on `http://spire.lab:8080/`, served from `spire` (instances cannot be reached with `scp`, and the lab host runs no services);
-  - writes the guests' cloud-init configurations (`guest/ubuntu.yaml`, `guest/rhel.yaml` in the state directory): they install the agent plugin package and SPIRE (verifying the tarball's checksum again), with SPIRE's trust bundle embedded rather than downloaded, the plugin's checksum, and a SPIRE Agent unit.
+  - writes the guests' cloud-init configurations (`guest/ubuntu.yaml`, `guest/rhel.yaml` in the state directory): they install the agent plugin package and SPIRE (verifying the tarball's checksum again), with SPIRE's trust bundle embedded rather than downloaded, the plugin's checksum, and a SPIRE Agent unit running as its own `spire` user. They harden the guest as the plugins spec requires: the sample nftables rule (`examples/agent-metadata-nftables.conf`) is included in the image's nftables configuration and loaded by its `nftables` service before the agent starts.
 
   `deploy` after `reset` is the inner loop after a code change.
 - `test [-run REGEX]`: runs the acceptance tests.
 - `status`, `ssh <vm>`, `logs <vm> [unit]`: inspection.
 - `down`: destroys the VMs with their snapshots, the network, the storage pool and the state directory, after confirmation. The download cache stays.
 
-Downloads are verified like an operator would: cloud images against their distributor's checksum files, SPIRE's tarball against its release checksum (or the pinned `LAB_SPIRE_SHA256`). Once chunk 8 signs our releases, `deploy` can also install a signed release instead of a snapshot.
+Downloads are verified like an operator would: cloud images against their distributor's checksum files, SPIRE's tarball against its release checksum (or the pinned `LAB_SPIRE_SHA256`), and our own builds against the lab packaging key (REL-1).
 
 ## Acceptance tests
 
@@ -152,7 +152,7 @@ Each test boots the instances it needs and deletes them afterwards, so tests are
 | MEM-1 | Memory protection | The running signer is non-dumpable and its memory is locked (`VmLck`); its unit has `LimitCORE=0` and `LimitMEMLOCK=infinity` | 6 |
 | AUD-3 | Correlation | Every `agent_attested` record on `spire` has a `token_issued` record with the same `jti` on an issuer; a quick re-attestation produces a `reattest_alert` with severity `warning` | 7 |
 | GST-1 | Guest hardening | With the sample nftables rule loaded, an unprivileged user in the guest cannot reach `169.254.169.254`, while root and the SPIRE Agent user can, and E2E-1 passes | 8 |
-| REL-1 | Signed releases | `deploy` from a signed release verifies the checksums file and the packages before installing | 8 |
+| REL-1 | Signed releases | `deploy` signs its build with the lab packaging key as CI signs a release, and verifies the checksums file and each package before installing; the checksums file's signature, `debsig-verify` (deb) and `rpm --checksig` (rpm) accept the build and refuse a tampered copy | 8 |
 
 Every failing check prints what it observed (HTTP status, journal lines, agent list), so that a failure can be diagnosed without re-running it.
 

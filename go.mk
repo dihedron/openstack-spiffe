@@ -101,8 +101,11 @@ go-show-vars: ## show build metadata variables used by goreleaser
 	@echo "_GO_MK_VARS_METADATA_PACKAGE=${_GO_MK_VARS_METADATA_PACKAGE}"
 	@echo "_GO_MK_VARS_DOTENV_VAR_NAME=${_GO_MK_VARS_DOTENV_VAR_NAME}"
 
+_GO_MK_COMMA := ,
+
 #
-# create a goreleaser snapshot build
+# create a goreleaser snapshot build (the checksums file is signed only when
+# GPG_FINGERPRINT is set, see signing-check in custom.mk)
 #
 .PHONY: go-snapshot
 go-snapshot: ## perform a snapshot build using goreleaser
@@ -120,7 +123,7 @@ go-snapshot: ## perform a snapshot build using goreleaser
 	_GO_MK_VARS_METADATA_PACKAGE="${_GO_MK_VARS_METADATA_PACKAGE}" \
 	_GO_MK_VARS_DOTENV_VAR_NAME="${_GO_MK_VARS_DOTENV_VAR_NAME}" \
 	_GORELEASER_VERSION=${_GORELEASER_VERSION} \
-	goreleaser release --snapshot --skip=publish --clean
+	goreleaser release --snapshot --skip=publish$(if $(GPG_FINGERPRINT),,$(_GO_MK_COMMA)sign) --clean
 
 #
 # create a goreleaser development build (single platform)

@@ -36,10 +36,41 @@ jobs:
         with:
           syft-version: "latest"
 
+      # the packaging key (T-7): the armored private key and its passphrase
+      # are repository secrets; its public half is packaging/signing-key.asc
+      - name: Import the packaging key
+        id: gpg
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Check that the published public key is the signing key
+        run: |
+          published="$(gpg --show-keys --with-colons packaging/signing-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"
+          if [ "$published" != "${{ steps.gpg.outputs.fingerprint }}" ]; then
+            echo "packaging/signing-key.asc ($published) is not the signing key (${{ steps.gpg.outputs.fingerprint }})" >&2
+            exit 1
+          fi
+
+      - name: Write the packaging key for nfpm
+        run: |
+          umask 077
+          printf '%s\n' "$GPG_PRIVATE_KEY" > "$RUNNER_TEMP/packaging-key.asc"
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+
       - name: Run Makefile target
         run: make release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
+          GPG_KEY_FILE: ${{ runner.temp }}/packaging-key.asc
+          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Remove the packaging key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/packaging-key.asc"
 
       # - name: Test
       #   run: |

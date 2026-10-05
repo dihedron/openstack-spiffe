@@ -48,6 +48,49 @@ make                       # or: go build ./cmd/openstack-spire-issuer
 
 The optimized builds behave identically and are only faster where the compiler can use the newer instructions; on an older CPU they fail at startup. The agent plugin runs inside every instance, so prefer the baseline build for it unless all your hypervisors expose an x86-64-v3 CPU model to their guests. `make` builds for the CPU level set in `GOAMD64` (default: baseline).
 
+`make snapshot` signs the build when `GPG_FINGERPRINT` (the key's fingerprint, in gpg's keyring) and `GPG_KEY_FILE` (the same key, armored, for the packages; passphrase in `NFPM_PASSPHRASE`) are set, and leaves it unsigned otherwise. `make release` refuses to run unsigned.
+
+### Verify a release
+
+Releases are signed with the project's packaging key, [packaging/signing-key.asc](packaging/signing-key.asc). Get the key from this repository, not from the release you are verifying.
+
+- **The checksums file** covers every archive, package and SBOM of the release, and its signature (`.asc`) covers it:
+
+  ```bash
+  gpg --import signing-key.asc
+  gpg --verify openstack-spiffe_<version>_checksums.txt.asc openstack-spiffe_<version>_checksums.txt
+  sha256sum --check --ignore-missing openstack-spiffe_<version>_checksums.txt
+  ```
+
+- **rpm packages** carry their own signature, which `rpm` and `dnf` check once the key is imported:
+
+  ```bash
+  sudo rpm --import signing-key.asc
+  rpm --checksig openstack-agent-plugin-<version>.x86_64.rpm   # must report "digests signatures OK"
+  ```
+
+  Keep `localpkg_gpgcheck=1` in `dnf.conf` so that `dnf install ./package.rpm` refuses an unsigned or tampered package.
+
+- **deb packages** carry a `debsig` origin signature. `apt` and `dpkg` do not check it on a standalone package (apt only verifies signed repositories), so verify it with `debsig-verify`, after installing its policy for the key (`<keyid>` is the last 16 hex digits of the fingerprint):
+
+  ```bash
+  sudo apt-get install debsig-verify
+  sudo mkdir -p /usr/share/debsig/keyrings/<keyid> /etc/debsig/policies/<keyid>
+  gpg --dearmor < signing-key.asc | sudo tee /usr/share/debsig/keyrings/<keyid>/debsig.gpg > /dev/null
+  sudo tee /etc/debsig/policies/<keyid>/openstack-spiffe.pol > /dev/null <<'EOF'
+  <?xml version="1.0"?>
+  <!DOCTYPE Policy SYSTEM "https://www.debian.org/debsig/1.0/policy.dtd">
+  <Policy xmlns="https://www.debian.org/debsig/1.0/">
+    <Origin Name="openstack-spiffe" id="<keyid>" Description="openstack-spiffe packages"/>
+    <Selection><Required Type="origin" File="debsig.gpg" id="<keyid>"/></Selection>
+    <Verification MinOptional="0"><Required Type="origin" File="debsig.gpg" id="<keyid>"/></Verification>
+  </Policy>
+  EOF
+  debsig-verify openstack-agent-plugin_<version>_linux_amd64.deb
+  ```
+
+For the SPIRE plugins, verify the release **before** computing `plugin_checksum`: the checksum only proves that SPIRE loads the binary that was installed. Image pipelines baking the agent plugin verify it the same way.
+
 ### Configure
 
 Annotated samples are in [examples/](examples): [signer.yaml](examples/signer.yaml), [aggregator.yaml](examples/aggregator.yaml), [signer.env](examples/signer.env) (credentials) and [nova.conf](examples/nova.conf). Unknown keys are errors, so typos never go unnoticed. Validate the files before every rollout:
@@ -149,7 +192,7 @@ The `openstack-agent-plugin` and `openstack-server-plugin` packages install thei
 - **Agent plugin:** bake it into every instance image that runs SPIRE Agent, or install it during provisioning, so that it is present before SPIRE Agent starts.
 - **Server plugin:** install it wherever SPIRE Server runs.
 
-Set `plugin_checksum` to the SHA-256 of the installed binary; `make checksum` prints it for the binaries in `dist/`. SPIRE refuses to load a plugin whose hash does not match.
+Set `plugin_checksum` to the SHA-256 of the installed binary, once you have [verified the release](#verify-a-release); `make checksum` prints it for the binaries in `dist/`. SPIRE refuses to load a plugin whose hash does not match.
 
 **Upgrade order:** upgrade the issuer replicas before the server plugin. A newer server plugin rejects tokens whose tags or enrichment claims carry control or format characters (e.g. bidirectional overrides) and tokens whose `kid` does not have the issuer's format. A newer issuer drops such tags itself; an older one may still issue them.
 
@@ -177,6 +220,17 @@ Merge [examples/agent.conf](examples/agent.conf) and [examples/server.conf](exam
 spire-server entry create -node -spiffeID spiffe://example.org/db-nodes \
   -selector openstack_iid:project_id:<project_id> -selector openstack_iid:tag:role:db
 ```
+
+### Guest hardening
+
+Every process in an instance can read the token from the metadata service and present it to SPIRE Server before the agent does, taking over the node's identity. Images running SPIRE Agent must therefore let only root (cloud-init reads metadata as root) and the agent's user reach `169.254.169.254` (and `fe80::a9fe:a9fe` where the IPv6 metadata service is used).
+
+- **Run SPIRE Agent as its own user**, e.g. `spire`, with `User=`, `StateDirectory=` and `RuntimeDirectory=` in its systemd unit.
+- **Load the nftables rule at boot**, before any untrusted workload starts. [examples/agent-metadata-nftables.conf](examples/agent-metadata-nftables.conf), installed by the agent plugin's packages under `/usr/share/doc/openstack-agent-plugin/`, is a sample: the package never activates it. Set `spire_agent_user` in it, then include it from the image's nftables configuration (`/etc/nftables.conf` on Debian and Ubuntu, `/etc/sysconfig/nftables.conf` on RHEL-like systems) and enable the `nftables` service. The user must exist when the rule is loaded.
+- **Containers** must not share the instance's network namespace (no `--network host`): the rule matches the user inside the namespace where it is loaded. Container networks must not reach the metadata addresses.
+- **Keep `vendordata_url` on the instance-local metadata address.** Any other address widens who can serve or observe the token.
+
+Root, or the agent's user, in the instance can still read the token: root owns the node's identity by definition. With `reattest = false` on the server, a token read after the agent's first attestation is useless.
 
 ### Replay protection
 

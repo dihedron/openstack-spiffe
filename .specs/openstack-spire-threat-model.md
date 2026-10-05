@@ -25,7 +25,7 @@ It lists the assets, the actors, the trust boundaries and the assumptions the de
 | **U** | Unmitigated before this revision: the companion specs now carry a planned control, marked with the threat ID. |
 | **A** | Accepted residual risk: inherent to the design, or out of this solution's reach; documented with its rationale. |
 
-A threat marked **P** or **U** lists the revised spec section that addresses it. After the planned controls are implemented, its residual status is given in the last column.
+A threat marked **P** or **U** lists the revised spec section that addresses it. The planned controls were implemented on Oct 4 and 5, 2026; the residual status after them is given in the last column.
 
 ## Assets
 
@@ -94,7 +94,7 @@ A threat marked **P** or **U** lists the revised spec section that addresses it.
 | TB4 | Replica or aggregator → replica `/jwks/local.json` | Public keys | Verified TLS (pinned CA or system roots). |
 | TB5 | SPIRE Server plugin → JWK Set URL | Public keys | Verified TLS (pinned CA or system roots). |
 | TB6 | SPIRE Agent → SPIRE Server | Attestation payload (the token) | SPIRE's TLS, server-authenticated during node attestation. |
-| TB7 | Release pipeline → hosts and images | Binaries, packages, units | Checksums. Signatures added in this revision. |
+| TB7 | Release pipeline → hosts and images | Binaries, packages, units | Checksums. GPG signatures on the checksums file and on each package, added in this revision. |
 
 ## Security assumptions
 

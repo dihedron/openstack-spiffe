@@ -262,6 +262,16 @@ nfpms:
     priority: "optional"
     # the units are installed disabled: the scripts never enable or start
     # them (see .specs/openstack-spire-issuer.md, "System packages and systemd")
+    # signed with the packaging key when GPG_KEY_FILE names its armored
+    # private key (passphrase in NFPM_PASSPHRASE); unsigned otherwise (T-7)
+    rpm:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+    deb:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+        # verified by debsig-verify (see the README)
+        type: origin
     scripts:
       preinstall: ./packaging/scripts/preinstall.sh
       postinstall: ./packaging/scripts/postinstall.sh
@@ -321,6 +331,16 @@ nfpms:
     release: "1"
     section: default
     priority: "optional"
+    # signed with the packaging key when GPG_KEY_FILE names its armored
+    # private key (passphrase in NFPM_PASSPHRASE); unsigned otherwise (T-7)
+    rpm:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+    deb:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+        # verified by debsig-verify (see the README)
+        type: origin
     contents:
       - src: ./examples/server.conf
         dst: /usr/share/doc/openstack-server-plugin/server.conf
@@ -342,9 +362,22 @@ nfpms:
     release: "1"
     section: default
     priority: "optional"
+    # signed with the packaging key when GPG_KEY_FILE names its armored
+    # private key (passphrase in NFPM_PASSPHRASE); unsigned otherwise (T-7)
+    rpm:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+    deb:
+      signature:
+        key_file: '{{ if index .Env "GPG_KEY_FILE" }}{{ .Env.GPG_KEY_FILE }}{{ end }}'
+        # verified by debsig-verify (see the README)
+        type: origin
     contents:
       - src: ./examples/agent.conf
         dst: /usr/share/doc/openstack-agent-plugin/agent.conf
+      # guest hardening sample (S-4): documentation, never activated
+      - src: ./examples/agent-metadata-nftables.conf
+        dst: /usr/share/doc/openstack-agent-plugin/agent-metadata-nftables.conf
 
 # MSI packaging is a GoReleaser Pro feature.
 # If you have GoReleaser Pro, you can uncomment the following section.
@@ -375,12 +408,31 @@ changelog:
 sboms:
   - cmd: syft
     documents:
-      - "${artifact}.spdx.json"
+      - "${artifact}.cdx.json"
     args: ["$artifact", "--output", "cyclonedx-json=$document", "-vvv"]
     artifacts: package
     disable: false
     
     
+# the checksums file covers every archive, package and SBOM: its detached
+# signature, made with the packaging key whose fingerprint is in
+# GPG_FINGERPRINT, vouches for all of them (T-7). make snapshot skips it when
+# GPG_FINGERPRINT is unset; make release requires it.
+signs:
+  - id: checksums
+    artifacts: checksum
+    signature: "${artifact}.asc"
+    args:
+      - --batch
+      - --yes
+      - --local-user
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - --armor
+      - --output
+      - "${signature}"
+      - --detach-sign
+      - "${artifact}"
+
 release:
   footer: |
     ---
