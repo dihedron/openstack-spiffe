@@ -191,9 +191,20 @@ The `ephemeral_memory` backend is implemented first; `vault_transit` comes later
 **Memory protection** (I-4, I-5): with `ephemeral_memory`, process memory is the only place keys exist, so it must not leak through the usual side doors:
 
 - At startup, before generating any key, `service start` marks the process non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`). This disables core dumps and blocks `ptrace` and `/proc/<pid>/mem` access by other processes of the same user. A failure is a startup error.
-- The systemd units set `LimitCORE=0` as a second layer.
-- CPU and heap profiling (enabled through the `*_CPU_PROFILE` and `*_MEM_PROFILE` environment variables) create their files with mode `0600`. When either is enabled, `service start` logs a warning that heap profiles contain private key material.
-- The README requires swap on signer hosts to be disabled or encrypted, since Go cannot lock key pages in memory.
+- It then locks the process memory into RAM (`mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)`), so that no page holding a key, or a temporary of a signature, is ever written to swap. Pages are locked as they are first touched, so the process uses only the memory it needs (a few MB). The kernel counts the locked *virtual* size, which the Go runtime makes large (about 1.3 GB), so the locked-memory limit must be unlimited: the signer's unit sets `LimitMEMLOCK=infinity`, which needs no capability. A failure is a startup error, naming the limit. `key_store.lock_memory: false` (default `true`) turns locking off for hosts that cannot raise the limit; `config check` warns about it, and such hosts must disable or encrypt swap.
+- The systemd units set `LimitCORE=0` as a second layer against core dumps.
+- CPU and heap profiling (enabled through the `*_CPU_PROFILE` and `*_MEM_PROFILE` environment variables) write their files with mode `0600`, even over an existing file. When either is enabled, `service start` logs a warning that profiles contain private key material.
+- Disabled or encrypted swap on signer hosts remains good practice, as defense in depth.
+
+*Why the whole process is locked, rather than only the keys* (assessment, Oct 5): keeping only the private keys in a pinned, unswappable area would not keep them out of swap. Go's crypto copies key material into heap and stack temporaries to sign (big-number buffers for the RSA exponentiation, the ECDSA nonce, intermediate values), Go decides where those live, and goroutine stacks move as they grow. A pinned area therefore protects the key at rest while the copies made by every signature stay swappable, unless the signing code is rewritten to work in that area, which is out of the question for constant-time RSA and ECDSA. The options considered:
+
+| Option | Protects | Cost |
+| --- | --- | --- |
+| `mlockall` (chosen) | Every page the signer touches: keys, temporaries, stacks | `LimitMEMLOCK=infinity`; the process is never swapped (a few MB). Pure Go (`golang.org/x/sys/unix`), as HashiCorp Vault does |
+| An arena from `memfd_secret` (Linux 5.14+, available on the lab's Ubuntu 24.04 and AlmaLinux 10 kernels), pure Go | The key at rest, even from the kernel's direct map and from root reading `/proc/<pid>/mem` | Go's crypto still copies it into ordinary memory to sign |
+| CGO and OpenSSL's secure heap (a locked, guarded, non-dumpable arena) | The keys and most of OpenSSL's temporaries | `CGO_ENABLED=1`: no more static binaries, a `libcrypto` dependency in the packages, harder arm64 cross-builds, signing outside Go's memory safety; C stack temporaries still unprotected |
+| The kernel keyring (`KEYCTL_PKEY_SIGN`) | The key never in user space once loaded | RS256 only (the kernel cannot sign with ECDSA); the key is generated in Go first; needs the `pkcs8_key_parser` module |
+| Out of process (the planned `vault_transit` backend, an HSM, a TPM) | The key never in this process at all | A separate backend behind the key store interface, not memory hardening |
 
 **Algorithms**: RS256 with RSA 2048-bit keys (default) or ES256 with ECDSA P-256 keys (`key_store.algorithm`).
 
@@ -363,6 +374,7 @@ key_store:
   algorithm: "RS256"                                    # or "ES256"
   rotation_interval: "24h"                              # at least 5m
   publish_ahead: "2m"                                   # > poll_interval + fetch_timeout + cache_max_age of peers and aggregator
+  lock_memory: true                                     # lock the process memory into RAM (I-4); false: warning
   vault_proxy_endpoint: "https://vault-proxy.internal:8200"  # vault_transit only
 token_ttl_seconds: 300                                  # at most 300
 rate_limit_per_instance: "1/5s"
@@ -544,7 +556,7 @@ A failure must never fall back to issuing an unsigned, weakly signed or partial 
   - after installation, reload systemd and restart only the units that were running, so an upgrade picks up the new binary while a fresh install starts nothing;
   - before removal (not on upgrade), stop and disable both units, and reload systemd afterwards. The user is kept, so that files it owns stay attributed.
 
-  The units run as `openstack-spire-issuer` with no capabilities (the default ports are unprivileged) and a read-only view of the system (`ProtectSystem=strict` and related hardening), and with core dumps disabled (`LimitCORE=0`, I-4). They restart on failure after 5 seconds, and allow 30 seconds to stop, above the 15-second graceful drain. Logs go to standard error and thus to the journal; file logging and profiling, which write to the working directory, are not supported under the units.
+  The units run as `openstack-spire-issuer` with no capabilities (the default ports are unprivileged) and a read-only view of the system (`ProtectSystem=strict` and related hardening), and with core dumps disabled (`LimitCORE=0`, I-4); the signer's unit also lifts the locked-memory limit (`LimitMEMLOCK=infinity`), which memory locking needs. They restart on failure after 5 seconds, and allow 30 seconds to stop, above the 15-second graceful drain. Logs go to standard error and thus to the journal; file logging and profiling, which write to the working directory, are not supported under the units.
 - **Signed releases** (T-7): goreleaser signs the release checksums file, which covers every archive and package, together with the SBOMs. The deb and rpm packages are also signed with the project's packaging key, so that `apt` and `dnf` verify them natively. The signing method (cosign keyless through the CI's OIDC identity, or a GPG key held by CI) is chosen at implementation time. The README documents how to verify the signature before installing. For the SPIRE plugins, verification comes before computing `plugin_checksum` (companion spec).
 - Separate `/liveness` and `/readiness` probes: readiness verifies connectivity to the service's dependencies (key store included), not just process liveness, so that orchestrators take a replica out of load-balancer rotation during backend disruptions without crash-looping the pods.
 
@@ -561,8 +573,8 @@ Planned and not implemented yet. Tests come first, as for every change.
 | `internal/metadata/claims` | Drop tags failing the new checks; validate enrichment values | T-4 |
 | `internal/metadata/attest` | `token issued` audit record, which needs the minter to return the `jti`, `kid`, `iat` and `exp`, and the authenticator to put the caller's user ID in the request context; `metadata` redaction, and the size-and-hash fallback in `redact.go` | R-1, I-2 |
 | `internal/metadata/keystore` | Key lifecycle records with RFC 7638 thumbprints | R-3 |
-| `cmd/openstack-spire-issuer` | `PR_SET_DUMPABLE` at `service start` (via `golang.org/x/sys/unix`, Linux only); profiles created `0600` in all three `cmd/*/init.go`, plus a key-material warning | I-4, I-5 |
-| `packaging/systemd` | `LimitCORE=0` in both units | I-4 |
+| `cmd/openstack-spire-issuer` | `PR_SET_DUMPABLE` and `mlockall` at `service start` (via `golang.org/x/sys/unix`, Linux only; `key_store.lock_memory`); profiles created `0600` in both `cmd/*/init.go` that profile, plus a key-material warning | I-4, I-5 |
+| `packaging/systemd` | `LimitCORE=0` in both units, `LimitMEMLOCK=infinity` in the signer's | I-4 |
 | `.goreleaser.yaml`, README | Signed checksums, SBOMs and packages; verification instructions | T-7 |
 | `pkg/syslog` | Fixes listed under the syslog audit sink; `AuditHandler` with its bounded queue; tests on a temporary socket | R-1, R-3 |
 | `internal/metadata/config`, `cmd/openstack-spire-issuer` | `audit.syslog` block and its checks; at `service start`, a handler that writes to the regular stream and forwards audit records to syslog | R-1, R-3 |

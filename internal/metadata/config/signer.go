@@ -142,6 +142,10 @@ type KeyStore struct {
 	// must exceed the poll interval, fetch timeout and cache max-age of the
 	// peers and of the JWKS aggregator combined.
 	PublishAhead time.Duration `yaml:"publish_ahead"`
+	// LockMemory locks the process memory into RAM at service start, so
+	// that no page holding key material is ever written to swap; service
+	// start refuses to start if it cannot (I-4).
+	LockMemory bool `yaml:"lock_memory"`
 	// VaultProxyEndpoint is the Vault proxy URL (vault_transit only).
 	VaultProxyEndpoint string `yaml:"vault_proxy_endpoint"`
 }
@@ -240,6 +244,7 @@ func defaultSigner() *Signer {
 			Algorithm:        iid.Algorithm,
 			RotationInterval: 24 * time.Hour,
 			PublishAhead:     2 * time.Minute,
+			LockMemory:       true,
 		},
 		TokenTTLSeconds:      int(iid.TTL / time.Second),
 		RateLimitPerInstance: recommendedInstanceRate,
@@ -472,6 +477,9 @@ func (s *Signer) warn(r *Result[Signer]) {
 		r.warnf("key_store.vault_proxy_endpoint", "ignored by the %q backend", s.KeyStore.Backend)
 	}
 	warnClientAddress(r, s.ClientAddress)
+	if !s.KeyStore.LockMemory && s.KeyStore.Backend == BackendEphemeralMemory {
+		r.warnf("key_store.lock_memory", "disabled: the private keys, which only exist in this process's memory, may be written to swap; disable or encrypt swap on this host")
+	}
 	if limit := s.RateLimitPerInstance; limit.Events > 0 && time.Duration(limit.Events)*recommendedInstanceRate.Per > limit.Per*time.Duration(recommendedInstanceRate.Events) {
 		r.warnf("rate_limit_per_instance", "%s is looser than the recommended %s", limit, recommendedInstanceRate)
 	}

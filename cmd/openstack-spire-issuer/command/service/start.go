@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/metadata/auditsink"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/config"
+	"github.com/dihedron/openstack-spiffe/internal/metadata/hardening"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/osclient"
 	"github.com/dihedron/openstack-spiffe/internal/metadata/server"
 )
@@ -63,6 +66,22 @@ func (cmd *Start) Execute(args []string) error {
 		slog.Warn("configuration warning", "file", w.File, "line", w.Line, "path", w.Path, "message", w.Message)
 	}
 
+	// before any key exists: the keys live in this process's memory only
+	// (I-4, I-5)
+	if err := hardening.SetNonDumpable(); err != nil {
+		return fmt.Errorf("refusing to start: %w", err)
+	}
+	if cfg.KeyStore.LockMemory {
+		if err := hardening.LockMemory(); err != nil {
+			return fmt.Errorf("refusing to start: %w", err)
+		}
+	}
+	for _, kind := range []string{"CPU", "MEM"} {
+		if variable := profileVariable(kind); os.Getenv(variable) != "" {
+			slog.Warn("profiling is enabled: profiles may contain private key material; keep them private and delete them after use", "variable", variable)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -79,4 +98,11 @@ func (cmd *Start) Execute(args []string) error {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
 	return signer.Run(ctx)
+}
+
+// profileVariable is the environment variable enabling a kind of profiling
+// (CPU or MEM) for this binary, as its init reads it.
+func profileVariable(kind string) string {
+	name := strings.ReplaceAll(strings.ToUpper(filepath.Base(os.Args[0])), "-", "_")
+	return name + "_" + kind + "_PROFILE"
 }

@@ -15,6 +15,7 @@ key_store:
   algorithm: "RS256"                                     # or "ES256"
   rotation_interval: "24h"                               # at least 5m
   publish_ahead: "2m"                                    # > poll_interval + fetch_timeout + cache_max_age of peers and aggregator
+  lock_memory: true                                      # lock the process memory into RAM (needs LimitMEMLOCK=infinity, as the unit sets)
 
 token_ttl_seconds: 300                                   # at most 300
 rate_limit_per_instance: "1/5s"

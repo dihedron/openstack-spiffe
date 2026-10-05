@@ -534,3 +534,12 @@ func TestCheckAggregatorWithoutReplicaCA(t *testing.T) {
 		t.Errorf("no replica_ca_cert_path: %+v, want a warning (S-5)", f)
 	}
 }
+
+func TestCheckSignerUnlockedMemoryWarning(t *testing.T) {
+	doc := minimalSigner + "tags:\n  allowlist: [role]\n" + secureSettings + "key_store:\n  lock_memory: false\n"
+	result := CheckSigner("signer.yaml", []byte(doc), checkOptions())
+	got := keysOf(result.Findings)
+	if len(got) != 1 || got[0].Path != "key_store.lock_memory" || got[0].Severity != SeverityWarning {
+		t.Fatalf("findings:\n%s\nwant one warning on key_store.lock_memory", dump(result.Findings))
+	}
+}

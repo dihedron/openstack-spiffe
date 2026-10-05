@@ -60,6 +60,7 @@ func TestSignerDefaults(t *testing.T) {
 		{"key_store.algorithm", cfg.KeyStore.Algorithm, "RS256"},
 		{"key_store.rotation_interval", cfg.KeyStore.RotationInterval, 24 * time.Hour},
 		{"key_store.publish_ahead", cfg.KeyStore.PublishAhead, 2 * time.Minute},
+		{"key_store.lock_memory", cfg.KeyStore.LockMemory, true},
 		{"token_ttl_seconds", cfg.TokenTTLSeconds, 300},
 		{"rate_limit_per_instance", cfg.RateLimitPerInstance, Rate{Events: 1, Per: 5 * time.Second}},
 		{"rate_limit_per_source", cfg.RateLimitPerSource, Rate{Events: 200, Per: time.Second}},

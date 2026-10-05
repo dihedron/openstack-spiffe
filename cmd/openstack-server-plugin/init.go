@@ -90,7 +90,7 @@ func init() {
 		case "file":
 			filename := fmt.Sprintf("%s-%d.log", path.Base(os.Args[0]), os.Getpid())
 			var err error
-			writer, err = os.Create(path.Clean(filename))
+			writer, err = os.OpenFile(path.Clean(filename), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 			if err != nil {
 				writer = os.Stderr
 			}
@@ -115,7 +115,7 @@ func init() {
 		),
 	)
 	if ok && filename != "" {
-		f, err := os.Create(path.Clean(filename))
+		f, err := createPrivate(filename)
 		if err != nil {
 			slog.Error("could not create CPU profile", "error", err)
 		}
@@ -139,7 +139,7 @@ func init() {
 		),
 	)
 	if ok && filename != "" {
-		f, err := os.Create(path.Clean(filename))
+		f, err := createPrivate(filename)
 		if err != nil {
 			slog.Error("could not create memory profile", "error", err)
 		}
@@ -159,4 +159,19 @@ func cleanup() {
 			slog.Error("could not write memory profile", "error", err)
 		}
 	}
+}
+
+// createPrivate creates (or truncates) a file only its owner can read, even
+// if it already existed with a looser mode: profiles contain process memory,
+// and the signer's holds private keys.
+func createPrivate(name string) (*os.File, error) {
+	f, err := os.OpenFile(path.Clean(name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }

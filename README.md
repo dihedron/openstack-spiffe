@@ -106,6 +106,8 @@ journalctl -u openstack-spire-issuer.service -f
 
 Package upgrades restart only the units that are running, and removing the package stops and disables them. The units are sandboxed (`ProtectSystem=strict`, no capabilities), so set `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL` in `signer.env` (or with `systemctl edit` for the aggregator), and leave logs on standard error.
 
+**Private keys stay in RAM.** The signing keys only exist in the signer's memory. At start, the signer makes itself non-dumpable (no core dump, no `ptrace` by other processes of its user) and locks its memory into RAM, so that neither the keys nor the copies made while signing ever reach swap. The packaged unit allows this (`LimitMEMLOCK=infinity`); run elsewhere with a low locked-memory limit, the signer refuses to start, unless `key_store.lock_memory: false`, in which case disable or encrypt swap on that host. Profiling, if enabled, writes files only their owner can read, and the signer warns that they contain key material.
+
 **Probes.**
 - `/liveness` returns 200 while the process is serving.
 - `/readiness` returns 200 only when every dependency check passed recently. The checks run every 5 seconds and are:

@@ -43,6 +43,11 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 UMask=0077
+# the keys only exist in this process's memory (I-4): no core dumps, and
+# its pages locked into RAM (key_store.lock_memory), which needs no
+# capability once the limit is raised here
+LimitCORE=0
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target
