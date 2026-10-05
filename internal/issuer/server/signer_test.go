@@ -86,10 +86,12 @@ type harness struct {
 	cloud  *openstacktest.Server
 	client *http.Client
 	// pool trusts the signer's certificate
-	pool   *x509.CertPool
-	url    string
-	cancel context.CancelFunc
-	done   chan error
+	pool *x509.CertPool
+	url  string
+	// metricsURL is the Prometheus endpoint's base URL, when served
+	metricsURL string
+	cancel     context.CancelFunc
+	done       chan error
 }
 
 // start runs a signer with the given extra configuration against a fake
@@ -156,7 +158,18 @@ keystone:
 		cancel: cancel,
 		done:   make(chan error, 1),
 	}
-	go func() { h.done <- signer.Serve(ctx, ln) }()
+	var metricsLn net.Listener
+	if signer.metrics.Handler() != nil {
+		if metricsLn, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		scheme := "http"
+		if cfg.Metrics.Prometheus.TLSCertPath != "" {
+			scheme = "https"
+		}
+		h.metricsURL = scheme + "://" + metricsLn.Addr().String()
+	}
+	go func() { h.done <- signer.ServeWithMetrics(ctx, ln, metricsLn) }()
 	t.Cleanup(func() {
 		cancel()
 		select {

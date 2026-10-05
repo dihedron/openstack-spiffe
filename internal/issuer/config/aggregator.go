@@ -42,6 +42,8 @@ type Aggregator struct {
 	// ClientAddress configures how the client address is determined, as
 	// for the signer.
 	ClientAddress ClientAddress `yaml:"client_address"`
+	// Metrics configures the metrics (I-8, D-10).
+	Metrics Metrics `yaml:"metrics"`
 }
 
 func defaultAggregator() *Aggregator {
@@ -54,6 +56,7 @@ func defaultAggregator() *Aggregator {
 		CacheMaxAge:       30 * time.Second,
 		// its consumers (SPIRE Servers, probes) poll a few times a minute
 		RateLimitPerSource: Rate{Events: 50, Per: time.Second},
+		Metrics:            defaultMetrics(),
 	}
 }
 
@@ -73,6 +76,7 @@ func CheckAggregator(file string, data []byte, opts CheckOptions) *Result[Aggreg
 	if !opts.SkipFiles {
 		checkKeyPair(result, "tls_cert_path", cfg.TLSCertPath, "tls_key_path", cfg.TLSKeyPath, opts.Now())
 		checkCABundle(result, "replica_ca_cert_path", cfg.ReplicaCACertPath)
+		checkMetricsFiles(result, cfg.Metrics, opts.Now())
 	}
 	return result
 }
@@ -97,10 +101,12 @@ func (a *Aggregator) validate(r *Result[Aggregator]) {
 	checkJWKSURLs(r, "replicas", a.Replicas)
 	checkPolling(r, "", a.PollInterval, a.FetchTimeout, a.StaleKeyRetention, a.CacheMaxAge)
 	checkClientAddress(r, a.ClientAddress)
+	checkMetrics(r, a.Metrics, a.ListenAddr)
 }
 
 // warn flags valid but risky settings.
 func (a *Aggregator) warn(r *Result[Aggregator]) {
+	warnMetrics(r, a.Metrics, false)
 	if a.ReplicaCACertPath == "" {
 		r.warnf("replica_ca_cert_path", "not set: every public CA is trusted for the replicas' keys")
 	}

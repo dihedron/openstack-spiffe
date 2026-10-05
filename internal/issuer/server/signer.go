@@ -19,14 +19,19 @@ import (
 	"github.com/dihedron/openstack-spiffe/internal/issuer/health"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/jwks"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/keystore"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/novalookup"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/osclient"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/ratelimit"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/requestid"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/restrict"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/token"
+	"github.com/dihedron/openstack-spiffe/pkg/metadata"
 	"github.com/gophercloud/gophercloud/v2"
 )
+
+// signerRoutes are the paths a signer serves, as recorded in the metrics.
+var signerRoutes = []string{"/attest", "/jwks/local.json", "/.well-known/jwks.json", "/liveness", "/readiness"}
 
 // Signer is an assembled signer replica.
 type Signer struct {
@@ -35,6 +40,7 @@ type Signer struct {
 	peers     *aggregator.Aggregator // nil without peers
 	readiness *health.Readiness
 	handler   http.Handler
+	metrics   *metrics.Metrics
 	// requestClientCert asks TLS clients for a certificate, which the
 	// /attest guard verifies (attest.client_ca_path)
 	requestClientCert bool
@@ -173,27 +179,53 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 	mux.Handle("/attest", protected)
 	mux.Handle("/", limitedPublic)
 
+	// last: nothing can fail after it, so it never needs shutting down here
+	m, err := metrics.New(ctx, cfg.Metrics,
+		metrics.Resource{Component: "signer", InstanceID: cfg.ReplicaID, Version: metadata.Version},
+		cfg.MinTLSVersion())
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
 	return &Signer{
 		cfg:               cfg,
 		keys:              keys,
 		peers:             peers,
 		readiness:         readiness,
+		metrics:           m,
 		requestClientCert: guard.RequestsClientCertificates(),
-		handler:           requestid.Middleware(resolver.Middleware(mux)),
+		handler:           m.Middleware(signerRoutes, requestid.Middleware(resolver.Middleware(mux))),
 	}, nil
 }
 
-// Run listens on the configured address and serves until the context ends.
+// Run listens on the configured address, and on the metrics address when
+// the metrics are served for scraping, and serves until the context ends.
 func (s *Signer) Run(ctx context.Context) error {
-	return run(ctx, s.cfg.ListenAddr, s.Serve)
+	return runWithMetrics(ctx, s.cfg.ListenAddr, s.metrics, s.cfg.Metrics.Prometheus.ListenAddr, s.ServeWithMetrics)
 }
 
 // Serve serves HTTPS on the listener (see serve) and runs the key rotation,
 // readiness and (with peers) peer polling loops, until the context ends.
 func (s *Signer) Serve(ctx context.Context, ln net.Listener) error {
+	return s.ServeWithMetrics(ctx, ln, nil)
+}
+
+// ServeWithMetrics is Serve, also serving the Prometheus endpoint on
+// metricsLn if it is not nil and the metrics are exported to Prometheus.
+// The metrics are flushed when it returns.
+func (s *Signer) ServeWithMetrics(ctx context.Context, ln, metricsLn net.Listener) error {
+	defer shutdownMetrics(ctx, s.metrics)
 	loops := []func(context.Context) error{s.keys.Run, s.readiness.Run}
 	if s.peers != nil {
 		loops = append(loops, s.peers.Run)
+	}
+	if metricsLn != nil && s.metrics.Handler() != nil {
+		loop, err := metricsLoop(s.cfg.Metrics.Prometheus, s.metrics.Handler(), s.cfg.MinTLSVersion(), metricsLn)
+		if err != nil {
+			_ = ln.Close()
+			_ = metricsLn.Close()
+			return err
+		}
+		loops = append(loops, loop)
 	}
 	return serve(ctx, ln, s.handler, s.cfg.TLSCertPath, s.cfg.TLSKeyPath, s.cfg.MinTLSVersion(), s.requestClientCert,
 		[]any{"component", "signer", "replica_id", s.cfg.ReplicaID},

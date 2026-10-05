@@ -6,15 +6,22 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/aggregator"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/clientaddr"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/config"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/health"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/jwks"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/ratelimit"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/requestid"
+	"github.com/dihedron/openstack-spiffe/pkg/metadata"
 )
+
+// aggregatorRoutes are the paths an aggregator serves, as recorded in the
+// metrics.
+var aggregatorRoutes = []string{"/.well-known/jwks.json", "/liveness", "/readiness"}
 
 // Aggregator is an assembled JWKS aggregator.
 type Aggregator struct {
@@ -22,6 +29,7 @@ type Aggregator struct {
 	merged    *aggregator.Aggregator
 	readiness *health.Readiness
 	handler   http.Handler
+	metrics   *metrics.Metrics
 }
 
 // NewAggregator builds a JWKS aggregator from a checked configuration.
@@ -72,18 +80,49 @@ func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating aggregator: %w", err)
 	}
-	return &Aggregator{cfg: cfg, merged: merged, readiness: readiness, handler: requestid.Middleware(resolver.Middleware(limited))}, nil
+	// aggregators have no replica ID: the host name identifies them
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	m, err := metrics.New(context.Background(), cfg.Metrics,
+		metrics.Resource{Component: "aggregator", InstanceID: host, Version: metadata.Version},
+		cfg.MinTLSVersion())
+	if err != nil {
+		return nil, fmt.Errorf("creating aggregator: %w", err)
+	}
+	return &Aggregator{cfg: cfg, merged: merged, readiness: readiness, metrics: m,
+		handler: m.Middleware(aggregatorRoutes, requestid.Middleware(resolver.Middleware(limited)))}, nil
 }
 
-// Run listens on the configured address and serves until the context ends.
+// Run listens on the configured address, and on the metrics address when
+// the metrics are served for scraping, and serves until the context ends.
 func (a *Aggregator) Run(ctx context.Context) error {
-	return run(ctx, a.cfg.ListenAddr, a.Serve)
+	return runWithMetrics(ctx, a.cfg.ListenAddr, a.metrics, a.cfg.Metrics.Prometheus.ListenAddr, a.ServeWithMetrics)
 }
 
 // Serve serves HTTPS on the listener (see serve) and runs the replica polling
 // and readiness loops, until the context ends.
 func (a *Aggregator) Serve(ctx context.Context, ln net.Listener) error {
+	return a.ServeWithMetrics(ctx, ln, nil)
+}
+
+// ServeWithMetrics is Serve, also serving the Prometheus endpoint on
+// metricsLn if it is not nil and the metrics are exported to Prometheus.
+// The metrics are flushed when it returns.
+func (a *Aggregator) ServeWithMetrics(ctx context.Context, ln, metricsLn net.Listener) error {
+	defer shutdownMetrics(ctx, a.metrics)
+	loops := []func(context.Context) error{a.merged.Run, a.readiness.Run}
+	if metricsLn != nil && a.metrics.Handler() != nil {
+		loop, err := metricsLoop(a.cfg.Metrics.Prometheus, a.metrics.Handler(), a.cfg.MinTLSVersion(), metricsLn)
+		if err != nil {
+			_ = ln.Close()
+			_ = metricsLn.Close()
+			return err
+		}
+		loops = append(loops, loop)
+	}
 	return serve(ctx, ln, a.handler, a.cfg.TLSCertPath, a.cfg.TLSKeyPath, a.cfg.MinTLSVersion(), false,
 		[]any{"component", "jwks-aggregator"},
-		a.merged.Run, a.readiness.Run)
+		loops...)
 }

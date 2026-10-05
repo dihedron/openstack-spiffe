@@ -97,6 +97,8 @@ type Signer struct {
 	Audit Audit `yaml:"audit"`
 	// Attest restricts where /attest may be called from (S-3).
 	Attest Attest `yaml:"attest"`
+	// Metrics configures the metrics (I-8, D-10).
+	Metrics Metrics `yaml:"metrics"`
 }
 
 // Attest restricts /attest to the hosts Nova calls it from (S-3, D-2):
@@ -273,6 +275,7 @@ func defaultSigner() *Signer {
 			Facility: "authpriv",
 			AppName:  "openstack-spire-issuer",
 		}},
+		Metrics: defaultMetrics(),
 	}
 }
 
@@ -305,6 +308,7 @@ func CheckSigner(file string, data []byte, opts CheckOptions) *Result[Signer] {
 		checkCABundle(result, "keystone.ca_cert_path", cfg.Keystone.CACertPath)
 		checkCABundle(result, "peers.ca_cert_path", cfg.Peers.CACertPath)
 		checkCABundle(result, "attest.client_ca_path", cfg.Attest.ClientCAPath)
+		checkMetricsFiles(result, cfg.Metrics, opts.Now())
 	}
 	return result
 }
@@ -432,6 +436,8 @@ func (s *Signer) validate(r *Result[Signer]) {
 		}
 	}
 
+	checkMetrics(r, s.Metrics, s.ListenAddr)
+
 	s.Peers.validate(r)
 	if s.Peers.Enabled() {
 		window := publicationWindow(s.Peers.PollInterval, s.Peers.FetchTimeout, s.Peers.CacheMaxAge)
@@ -445,6 +451,7 @@ func (s *Signer) validate(r *Result[Signer]) {
 
 // warn flags valid but risky settings.
 func (s *Signer) warn(r *Result[Signer]) {
+	warnMetrics(r, s.Metrics, true)
 	if len(s.Attest.AllowedSources) == 0 && s.Attest.ClientCAPath == "" {
 		r.warnf("attest", "neither allowed_sources nor client_ca_path is set: anyone holding Nova's vendordata credentials can request tokens from anywhere; restrict /attest to the hosts running nova-api-metadata")
 	}

@@ -60,10 +60,11 @@ func newFakeReplica(t *testing.T, kids ...string) *fakeReplica {
 }
 
 type aggregatorHarness struct {
-	client *http.Client
-	url    string
-	cancel context.CancelFunc
-	done   chan error
+	client     *http.Client
+	url        string
+	metricsURL string
+	cancel     context.CancelFunc
+	done       chan error
 }
 
 func startAggregator(t *testing.T, extra string, replicas ...*fakeReplica) *aggregatorHarness {
@@ -97,7 +98,14 @@ func startAggregator(t *testing.T, extra string, replicas ...*fakeReplica) *aggr
 		cancel: cancel,
 		done:   make(chan error, 1),
 	}
-	go func() { h.done <- agg.Serve(ctx, ln) }()
+	var metricsLn net.Listener
+	if agg.metrics.Handler() != nil {
+		if metricsLn, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		h.metricsURL = "http://" + metricsLn.Addr().String()
+	}
+	go func() { h.done <- agg.ServeWithMetrics(ctx, ln, metricsLn) }()
 	t.Cleanup(func() {
 		cancel()
 		select {

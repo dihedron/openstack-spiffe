@@ -31,7 +31,7 @@ This spec adds metrics, instrumented with OpenTelemetry and exported either for 
 - `prometheus`: a pull endpoint, `GET /metrics` in the Prometheus text format, served on its own listener (`metrics.prometheus.listen_addr`), never on the Nova-facing one (see protection). Uses `go.opentelemetry.io/otel/exporters/prometheus`.
 - `otlp`: periodic push (`metrics.otlp.interval`, default 30s) to an OpenTelemetry Collector over OTLP/HTTP (`go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp`), or OTLP/gRPC with `metrics.otlp.protocol: grpc`. gRPC is already a dependency of the module (through the SPIRE plugin SDK).
 
-**Configuration comes from the file only.** The SDK's `OTEL_*` environment variables are not read, as for the syslog audit sink: the metrics configuration decides what leaves the host, so `config check` must see all of it. The one exception is credentials for the collector (`metrics.otlp.headers_env`, below), which never belong in a file.
+**Configuration comes from the file only**, as for the syslog audit sink: the metrics configuration decides what leaves the host, so `config check` must see all of it. The OpenTelemetry exporters fall back on the `OTEL_*` environment variables for any option not set, so every option is set explicitly: endpoint, TLS, headers, timeout, compression (gzip), temporality and aggregation, exemplars (off) and the cardinality limit (2000 series per instrument, a last resort behind the closed attribute sets). The one exception is credentials for the collector (`metrics.otlp.headers_env`, below), which never belong in a file. The SDK always merges `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME` into the resource; they can add resource attributes but never override the four set here, which take precedence (found while implementing, Oct 5).
 
 **Resource attributes**, on every metric: `service.name` (`openstack-spire-issuer`), `service.version`, `service.instance.id` (the `replica_id` for a signer, the host name for an aggregator) and `openstack_spire.component` (`signer` or `aggregator`). With the Prometheus exporter they appear on the `target_info` series.
 
@@ -136,7 +136,7 @@ metrics:
     client_ca_path: ""                             # required beyond loopback: clients present a certificate
     rate_limit_per_source: "10/1s"
   otlp:
-    endpoint: "https://otel-collector.internal:4318"  # https only; required with exporter: otlp
+    endpoint: "https://otel-collector.internal:4318"  # https only; required with exporter: otlp; OTLP/HTTP adds /v1/metrics when the URL has no path
     protocol: "http/protobuf"                      # or "grpc"
     interval: "30s"                                # at least 5s
     timeout: "10s"                                 # less than interval
@@ -148,7 +148,7 @@ metrics:
 
 **Validation** (`config check`, `service start`, `jwks aggregate`):
 
-- Errors: an unknown exporter or protocol; `otlp.endpoint` missing or not `https`; `interval` under 5s or `timeout` not under it; a non-loopback `listen_addr` without the three TLS settings; `listen_addr` equal to the service's own `listen_addr`; a client certificate without its key (and the reverse); `max_projects` under 1; `headers_env` naming an unset variable (at startup only); the referenced certificate files, under the existing file checks.
+- Errors: an unknown exporter or protocol; `otlp.endpoint` missing or not `https`; `interval` under 5s or `timeout` not under it; a non-loopback `listen_addr` without the three TLS settings; a `listen_addr` that can collide with the service's own (the same port, and the same host or either on every interface; port 0, any free port, never collides); a client certificate without its key (and the reverse); `max_projects` under 1; `headers_env` naming an unset variable (at startup only); the referenced certificate files, under the existing file checks.
 - Warnings: `project_attribute` enabled (it discloses per-tenant activity, I-8); `otlp.ca_cert_path` unset; `project_attribute` set on an aggregator (ignored).
 - Metrics settings while `enabled` is `false` are validated but have no effect.
 
