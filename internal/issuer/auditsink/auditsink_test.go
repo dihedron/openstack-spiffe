@@ -108,12 +108,12 @@ func enabled(socket string) config.AuditSyslog {
 
 func newHandler(t *testing.T, base slog.Handler, cfg config.AuditSyslog) *slog.Logger {
 	t.Helper()
-	h, closeSink, err := New(base, cfg)
+	sink, err := New(base, cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = closeSink(context.Background()) })
-	return slog.New(h)
+	t.Cleanup(func() { _ = sink.Close(context.Background()) })
+	return slog.New(sink.Handler)
 }
 
 // inRequest runs f with the context of an HTTP request, which carries a
@@ -191,7 +191,7 @@ func TestDisabledSinkKeepsTheRegularLog(t *testing.T) {
 
 func TestUnopenableSocketIsAnError(t *testing.T) {
 	base, _ := regular(slog.LevelInfo)
-	_, _, err := New(base, enabled(filepath.Join(t.TempDir(), "no-such-socket")))
+	_, err := New(base, enabled(filepath.Join(t.TempDir(), "no-such-socket")))
 	if err == nil {
 		t.Fatal("New succeeded without a syslog socket")
 	}
@@ -235,11 +235,12 @@ func TestDropsAreReportedOnceOnTheRegularLog(t *testing.T) {
 func TestCloseDrainsTheQueue(t *testing.T) {
 	conn, path := listen(t)
 	base, _ := regular(slog.LevelInfo)
-	h, closeSink, err := New(base, enabled(path))
+	sink, err := New(base, enabled(path))
 	if err != nil {
 		t.Fatal(err)
 	}
-	logger := slog.New(h)
+	closeSink := sink.Close
+	logger := slog.New(sink.Handler)
 	for range 5 {
 		logger.Info("token issued", syslog.AuditKey, "token_issued")
 	}
@@ -271,7 +272,27 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestRejectsSlogBuiltinDefault(t *testing.T) {
 	cfg := enabled("/nonexistent")
 	cfg.Enabled = false
-	if _, _, err := New(slog.Default().Handler(), cfg); !errors.Is(err, errBuiltin) {
+	if _, err := New(slog.Default().Handler(), cfg); !errors.Is(err, errBuiltin) {
 		t.Fatalf("New with slog's built-in handler = %v, want errBuiltin", err)
+	}
+}
+
+func TestStats(t *testing.T) {
+	base, _ := regular(slog.LevelInfo)
+	disabled, err := New(base, config.AuditSyslog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := disabled.Stats(); ok {
+		t.Error("stats from a disabled sink")
+	}
+	_, path := listen(t)
+	sink, err := New(base, enabled(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sink.Close(context.Background()) }()
+	if stats, ok := sink.Stats(); !ok || stats.Dropped != 0 {
+		t.Errorf("stats %+v, %v", stats, ok)
 	}
 }

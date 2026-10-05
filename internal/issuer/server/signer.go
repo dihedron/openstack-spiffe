@@ -56,9 +56,13 @@ type Signer struct {
 // alone without peers), /liveness and /readiness unauthenticated, behind
 // their own per-source limit. The client
 // address is resolved, and a request ID assigned, before anything else.
-func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client) (_ *Signer, err error) {
+func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client, options ...Option) (_ *Signer, err error) {
 	if cfg == nil || client == nil {
 		return nil, errors.New("creating signer: missing configuration or OpenStack client")
+	}
+	var opts signerOptions
+	for _, option := range options {
+		option(&opts)
 	}
 	m, err := metrics.New(ctx, cfg.Metrics.Settings(),
 		metrics.Resource{Component: "signer", InstanceID: cfg.ReplicaID, Version: metadata.Version},
@@ -189,6 +193,26 @@ func NewSigner(ctx context.Context, cfg *config.Signer, client *osclient.Client)
 		return nil, fmt.Errorf("creating signer: %w", err)
 	}
 
+	// the state metrics, read when the metrics are collected
+	if err := errors.Join(
+		observeKeys(m, keys),
+		observeLimiter(m, metrics.LimiterSource, sourceLimiter),
+		observeLimiter(m, metrics.LimiterSourcePublic, publicLimiter),
+		observeLimiter(m, metrics.LimiterInstance, instanceLimiter),
+		observeReadiness(m, readiness),
+		observeAuditSink(m, opts.auditStats),
+	); err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+	if peers != nil {
+		if err := observeFetches(m, peers); err != nil {
+			return nil, fmt.Errorf("creating signer: %w", err)
+		}
+	} else if err := m.ObserveKeySet(metrics.KeySetMerged, keyCount(keys)); err != nil {
+		// without peers, the merged set is the local one
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	// outermost: every call is recorded, with the reason named by the layer
 	// that answered it
@@ -228,7 +252,7 @@ func (s *Signer) ServeWithMetrics(ctx context.Context, ln, metricsLn net.Listene
 		loops = append(loops, s.peers.Run)
 	}
 	if metricsLn != nil && s.metrics.Handler() != nil {
-		loop, err := metricsLoop(s.cfg.Metrics.Prometheus, s.metrics.Handler(), s.cfg.MinTLSVersion(), metricsLn)
+		loop, err := metricsLoop(s.cfg.Metrics.Prometheus, s.metrics, s.cfg.MinTLSVersion(), metricsLn)
 		if err != nil {
 			_ = ln.Close()
 			_ = metricsLn.Close()

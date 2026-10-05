@@ -33,7 +33,8 @@ func New(t *testing.T, cfg metrics.Config) (*metrics.Metrics, *Reader) {
 }
 
 // Point is a recorded data point: its attributes and its value (the sum of
-// a counter, or the count of a histogram).
+// a counter, the value of a gauge, truncated to an integer, or the count of
+// a histogram).
 type Point struct {
 	Attributes map[string]string
 	Value      int64
@@ -56,6 +57,14 @@ func (r *Reader) Points(t *testing.T, name string) []Point {
 			case metricdata.Sum[int64]:
 				for _, dp := range data.DataPoints {
 					points = append(points, Point{Attributes: attributes(dp.Attributes), Value: dp.Value})
+				}
+			case metricdata.Gauge[int64]:
+				for _, dp := range data.DataPoints {
+					points = append(points, Point{Attributes: attributes(dp.Attributes), Value: dp.Value})
+				}
+			case metricdata.Gauge[float64]: // whole units: enough for the tests
+				for _, dp := range data.DataPoints {
+					points = append(points, Point{Attributes: attributes(dp.Attributes), Value: int64(dp.Value)})
 				}
 			case metricdata.Histogram[float64]:
 				for _, dp := range data.DataPoints {

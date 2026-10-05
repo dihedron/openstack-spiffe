@@ -399,3 +399,28 @@ func TestParseFacility(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditStatsAcrossEpisodes(t *testing.T) {
+	var calls atomic.Int32
+	sender := &fakeSender{send: func(*Message) error {
+		switch calls.Add(1) {
+		case 1, 2, 4: // two failure episodes: 2 records, then 1
+			return errors.New("socket down")
+		}
+		return nil
+	}}
+	var r reports
+	h, err := newAuditHandler(sender, FacilityAuthpriv, r.options()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close(context.Background()) }()
+	logger := slog.New(h)
+	for range 5 {
+		logger.Info("event", "audit", "token_issued")
+	}
+	eventually(t, func() bool { _, recoveries := r.get(); return len(recoveries) == 2 })
+	if got := h.Stats(); got.Dropped != 3 || got.Queued != 0 {
+		t.Errorf("stats %+v, want 3 dropped in all and an empty queue", got)
+	}
+}

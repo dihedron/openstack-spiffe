@@ -63,6 +63,7 @@ type Metrics struct {
 
 	httpDuration metric.Float64Histogram
 	issuance     *issuance
+	state        *state
 }
 
 type options struct {
@@ -128,6 +129,7 @@ func New(ctx context.Context, cfg Config, res Resource, minTLSVersion uint16, op
 		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
 		sdkmetric.WithCardinalityLimit(cardinalityLimit),
 	)
+	m.state = &state{}
 	m.issuance = &issuance{
 		projectAttribute: cfg.ProjectAttribute,
 		maxProjects:      max(cfg.MaxProjects, 1),
@@ -154,7 +156,10 @@ func (m *Metrics) instrument(meter metric.Meter) error {
 	if err != nil {
 		return fmt.Errorf("creating the metrics instruments: %w", err)
 	}
-	return m.issuance.instrument(meter)
+	if err := m.issuance.instrument(meter); err != nil {
+		return err
+	}
+	return m.state.instrument(meter)
 }
 
 // Handler returns the Prometheus endpoint, or nil when the metrics are not

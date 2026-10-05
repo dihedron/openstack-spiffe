@@ -76,7 +76,7 @@ Instances attested per hour is `rate(openstack_spire_tokens_issued_total)` divid
 | `openstack_spire.jwks.fetches` | counter | `peer` (the URL's host), `result` (`ok`, `error`, `invalid`) | Peer fetches (signer) or replica fetches (aggregator) |
 | `openstack_spire.jwks.fetch.age` | gauge `s` | `peer` | Time since the last successful fetch: approaching `stale_key_retention` means keys are about to be dropped |
 | `openstack_spire.jwks.keys` | gauge `{key}` | `set` (`local`, `merged`) | Keys served |
-| `openstack_spire.jwks.conflicts` | counter | `peer` | Kids excluded for conflicting material |
+| `openstack_spire.jwks.conflicts` | gauge `{key}` | `peer` | Kids currently excluded because this peer publishes them with different material than another source |
 
 `peer` takes its values from the configuration (`peers.urls`, `replicas`), so it is bounded.
 
@@ -84,11 +84,11 @@ Instances attested per hour is `rate(openstack_spire_tokens_issued_total)` divid
 
 | Instrument | Type | Attributes | Meaning |
 | --- | --- | --- | --- |
-| `openstack_spire.rate_limit.rejections` | counter | `limiter` (`source`, `source_public`, `instance`) | Requests refused by each limiter, the public endpoints included |
+| `openstack_spire.rate_limit.rejections` | counter | `limiter`, named after its configuration key: `source` (`/attest` on a signer, every endpoint on an aggregator), `source_public`, `instance`, and `metrics` (the metrics listener's own limit) | Requests refused by each limiter, the public endpoints included |
 | `openstack_spire.rate_limit.tracked` | gauge | `limiter` | Buckets held, against their bound |
 | `openstack_spire.audit.syslog.dropped` | counter `{record}` | — | Audit records the syslog sink dropped (R-1): should stay at zero |
 | `openstack_spire.audit.syslog.queue` | gauge `{record}` | — | Records waiting in the sink's queue |
-| `openstack_spire.readiness.check` | gauge | `check` (`key_store`, `keystone`, `nova`, `replicas`) | 1 when the check passes, 0 when failing |
+| `openstack_spire.readiness.check` | gauge | `check` (`key_store`, `keystone`, `nova`, `replicas`) | 1 when the check passes, 0 when failing; nothing before its first run |
 | `http.server.request.duration` | histogram `s` | `http.route` (the fixed routes), `http.request.method`, `http.response.status_code` | Every endpoint, per the OpenTelemetry HTTP conventions; unknown paths share the route `other` |
 
 Go runtime metrics (memory, goroutines, GC) come from `go.opentelemetry.io/contrib/instrumentation/runtime` when `metrics.runtime` is on (default `true`).
@@ -162,7 +162,7 @@ metrics:
 - `project_attribute`: off, no `project_id` attribute; on, one series per project up to `max_projects`, then `other`, with one warning.
 - Keystone: cached, merged and fresh validations are told apart; `in_flight` returns to zero; `busy` counted when the cap is reached.
 - Keys: a rotation moves the `keys` gauge between states, resets `key.active.age` and increments `key.rotations`.
-- Peers and aggregator: a failing peer increments `jwks.fetches{result="error"}` and its `fetch.age` grows; a conflict increments `jwks.conflicts`.
+- Peers and aggregator: a failing peer increments `jwks.fetches{result="error"}` and its `fetch.age` grows; a conflict raises `jwks.conflicts` for the peers involved, and clearing it lowers it again.
 - Disabled metrics: the no-op provider is used, and no listener is opened.
 - No metric carries an attribute outside the allowed set (a test walks every collected data point).
 
@@ -207,3 +207,8 @@ Settled while implementing (Oct 5):
 6. **`lookup_unavailable`** replaces `nova_unavailable`: the same `503` path covers the Keystone project lookup, needed for the `project_name` and `domain_id` enrichment claims.
 7. **Verification lookups** (`verification.lookups`, `verification.lookup.duration`) replace `nova.lookups` and `nova.lookup.duration`, with a `kind` attribute, so that Keystone project lookups are measured too.
 8. **A method other than `POST`** on `/attest` counts as `invalid_request`; the status attribute (`405`) tells it apart.
+9. **`jwks.conflicts` is a gauge**, the kids currently excluded: a conflict persists from poll to poll, so a counter would only measure its duration.
+10. **Limiter names follow the configuration keys**, plus `metrics` for the metrics listener's own limiter.
+11. **A readiness check reports nothing before its first run**, rather than a 0 that would look like a failure at every start.
+
+**Collection**: the state metrics (keys, key sets and fetches, rate limiters, the syslog sink, readiness) are read from each component when the metrics are collected (OpenTelemetry observable instruments), never recorded on the request path. The components shared with the server plugin (`keystore`, `aggregator`, `pkg/syslog`) expose read-only statistics and never import OpenTelemetry, so that the plugin's binary does not grow.

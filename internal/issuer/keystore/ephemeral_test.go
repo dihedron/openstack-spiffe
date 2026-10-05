@@ -535,3 +535,25 @@ func TestRunRotatesAndStopsOnCancel(t *testing.T) {
 		t.Fatal("Run did not stop after cancellation")
 	}
 }
+
+func TestStats(t *testing.T) {
+	clock := newFakeClock(testStart)
+	s := newTestStore(t, clock, "signer-a", "ES256")
+	if got := s.Stats(); got != (Stats{Published: 1}) {
+		t.Fatalf("at start: %+v, want one published key", got)
+	}
+	clock.Advance(testPublishAhead)
+	if got := s.Stats(); got != (Stats{Active: 1, ActiveSince: testStart.Add(testPublishAhead)}) {
+		t.Fatalf("after publish_ahead: %+v", got)
+	}
+	rotate(t, s, clock) // the next key is published ahead
+	got := s.Stats()
+	if got.Published != 1 || got.Active != 1 || got.Retired != 0 || got.Rotations != 1 {
+		t.Fatalf("after the next key's generation: %+v", got)
+	}
+	clock.Advance(testPublishAhead) // it activates, the first retires
+	got = s.Stats()
+	if got.Published != 0 || got.Active != 1 || got.Retired != 1 || !got.ActiveSince.Equal(clock.Now()) {
+		t.Fatalf("after the switch: %+v (now %v)", got, clock.Now())
+	}
+}

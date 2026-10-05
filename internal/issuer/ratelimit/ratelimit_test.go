@@ -411,3 +411,15 @@ func TestSourceMiddlewareReasons(t *testing.T) {
 		t.Errorf("%d rate-limited requests counted, want 1", got)
 	}
 }
+
+func TestStats(t *testing.T) {
+	clock := &testClock{now: testNow}
+	l := newLimiter(t, 1, time.Minute, clock)
+	l.Allow("a")
+	l.Allow("a")
+	l.Allow("b")
+	l.Allow("a")
+	if got := l.Stats(); got != (Stats{Rejections: 2, Tracked: 2}) {
+		t.Errorf("stats %+v, want 2 rejections and 2 buckets", got)
+	}
+}

@@ -92,6 +92,44 @@ type Ephemeral struct {
 	// lastDate and lastN are the date and sequence of the latest kid.
 	lastDate string
 	lastN    int
+	// generated counts the keys generated, the first one included.
+	generated uint64
+}
+
+// Stats describes the keys at a moment, for the metrics.
+type Stats struct {
+	// Published counts the keys published ahead, not active yet.
+	Published int
+	// Active is 1 while a key is active, else 0.
+	Active int
+	// Retired counts the retired keys still published.
+	Retired int
+	// ActiveSince is when the active key became active (zero if none).
+	ActiveSince time.Time
+	// Rotations counts the keys generated after the first.
+	Rotations uint64
+}
+
+// Stats returns the current Stats.
+func (e *Ephemeral) Stats() Stats {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var s Stats
+	active := e.activeIndex(e.now())
+	for i := range e.keys {
+		switch {
+		case i == active:
+			s.Active, s.ActiveSince = 1, e.keys[i].activatesAt
+		case i > active:
+			s.Published++
+		default:
+			s.Retired++
+		}
+	}
+	if e.generated > 0 {
+		s.Rotations = e.generated - 1
+	}
+	return s
 }
 
 var _ KeyStore = (*Ephemeral)(nil)
@@ -357,6 +395,7 @@ func (e *Ephemeral) addKey(ctx context.Context) error {
 		activatesAt: now.Add(e.publishAhead),
 	}
 	e.keys = append(e.keys, key)
+	e.generated++
 	e.mu.Unlock()
 	// an ephemeral key is published as soon as it is generated
 	e.logLifecycle(ctx, key.record(eventGenerated, now))

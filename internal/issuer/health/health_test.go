@@ -300,3 +300,21 @@ func TestNewReadinessValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestResults(t *testing.T) {
+	failing := errors.New("down")
+	r, err := NewReadiness([]Check{
+		{Name: "a", Run: func(context.Context) error { return nil }},
+		{Name: "b", Run: func(context.Context) error { return failing }},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Results(); len(got) != 0 {
+		t.Errorf("results before the first run: %v", got)
+	}
+	r.runChecks(context.Background())
+	if got := r.Results(); len(got) != 2 || !got["a"] || got["b"] {
+		t.Errorf("results %v, want a passing and b failing", got)
+	}
+}

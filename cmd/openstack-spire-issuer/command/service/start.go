@@ -49,15 +49,15 @@ func (cmd *Start) Execute(args []string) error {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
 
-	handler, closeSink, err := auditsink.New(slog.Default().Handler(), cfg.Audit.Syslog)
+	sink, err := auditsink.New(slog.Default().Handler(), cfg.Audit.Syslog)
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(sink.Handler))
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), auditDrainTimeout)
 		defer cancel()
-		if err := closeSink(ctx); err != nil {
+		if err := sink.Close(ctx); err != nil {
 			slog.Error("cannot send every queued audit record to syslog, they remain in the regular log", "error", err)
 		}
 	}()
@@ -93,7 +93,7 @@ func (cmd *Start) Execute(args []string) error {
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}
-	signer, err := server.NewSigner(ctx, cfg, client)
+	signer, err := server.NewSigner(ctx, cfg, client, server.WithAuditSink(sink.Stats))
 	if err != nil {
 		return fmt.Errorf("refusing to start: %w", err)
 	}

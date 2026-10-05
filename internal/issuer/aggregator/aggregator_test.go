@@ -590,3 +590,43 @@ func TestNewValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestStats(t *testing.T) {
+	ra, rb, rc := newReplica(t), newReplica(t), newReplica(t)
+	clash := ecKey(t, "clash")
+	ra.publish(t, clash, ecKey(t, "a-only"))
+	rb.publish(t, ecKey(t, "clash"))
+	rc.serve(http.StatusOK, []byte("not json"))
+	clock := &testClock{now: testNow}
+	a := newAggregator(t, clock, ra, rb, rc)
+	a.poll(context.Background())
+
+	stats := map[string]ReplicaStats{}
+	for _, s := range a.Stats() {
+		stats[s.URL] = s
+	}
+	if s := stats[ra.url()]; s.OK != 1 || s.Conflicts != 1 || !s.LastSuccess.Equal(testNow) {
+		t.Errorf("replica a: %+v", s)
+	}
+	if s := stats[rb.url()]; s.OK != 1 || s.Conflicts != 1 {
+		t.Errorf("replica b: %+v", s)
+	}
+	if s := stats[rc.url()]; s.Invalid != 1 || s.OK != 0 || !s.LastSuccess.IsZero() {
+		t.Errorf("replica c (invalid response): %+v", s)
+	}
+
+	// the conflict clears, and replica b becomes unreachable
+	rb.publish(t, clash) // the same material as replica a's
+	rc.serve(http.StatusServiceUnavailable, nil)
+	clock.Advance(time.Minute)
+	a.poll(context.Background())
+	for _, s := range a.Stats() {
+		stats[s.URL] = s
+	}
+	if s := stats[ra.url()]; s.Conflicts != 0 || s.OK != 2 {
+		t.Errorf("replica a after the conflict cleared: %+v", s)
+	}
+	if s := stats[rc.url()]; s.Error != 1 || s.Invalid != 1 {
+		t.Errorf("replica c after a 503: %+v", s)
+	}
+}

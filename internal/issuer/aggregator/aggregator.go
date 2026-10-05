@@ -79,6 +79,45 @@ type replicaState struct {
 	lastSuccess time.Time
 	fetched     bool
 	failing     bool
+	// the fetches so far, by outcome, and the kids it currently publishes
+	// in conflict with another source
+	ok, failed, invalid uint64
+	conflicts           int
+}
+
+// errInvalidResponse marks a fetch whose response arrived but could not be
+// used: oversized, undecodable, or with too many keys.
+var errInvalidResponse = errors.New("invalid JWK Set response")
+
+// ReplicaStats describes a replica's fetches, for the metrics.
+type ReplicaStats struct {
+	// URL is the replica's configured URL.
+	URL string
+	// OK, Error and Invalid count the fetches that succeeded, failed to
+	// get an answer (or got another status than 200) and got an unusable
+	// one.
+	OK, Error, Invalid uint64
+	// LastSuccess is the time of the last successful fetch (zero if none).
+	LastSuccess time.Time
+	// Conflicts counts the kids this replica publishes with different
+	// material than another source, which are excluded.
+	Conflicts int
+}
+
+// Stats returns the current ReplicaStats of every replica, in the
+// configured order.
+func (a *Aggregator) Stats() []ReplicaStats {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	stats := make([]ReplicaStats, 0, len(a.replicas))
+	for _, r := range a.replicas {
+		s := ReplicaStats{URL: r.url, OK: r.ok, Error: r.failed, Invalid: r.invalid, Conflicts: r.conflicts}
+		if r.fetched {
+			s.LastSuccess = r.lastSuccess
+		}
+		stats = append(stats, s)
+	}
+	return stats
 }
 
 // Aggregator polls the replicas and serves their merged keys. It is a
@@ -215,6 +254,11 @@ func (a *Aggregator) poll(ctx context.Context) {
 	for i, r := range a.replicas {
 		switch o := outcomes[i]; {
 		case o.err != nil:
+			if errors.Is(o.err, errInvalidResponse) {
+				r.invalid++
+			} else {
+				r.failed++
+			}
 			if !r.failing {
 				slog.WarnContext(ctx, "replica fetch failing", "replica", r.url, "error", o.err)
 			}
@@ -224,9 +268,18 @@ func (a *Aggregator) poll(ctx context.Context) {
 				slog.InfoContext(ctx, "replica fetch recovered", "replica", r.url)
 			}
 			r.keys, r.lastSuccess, r.fetched, r.failing = o.keys, now, true, false
+			r.ok++
 		}
 	}
 	_, conflicts := a.merge(now, local)
+	for _, r := range a.replicas {
+		r.conflicts = 0
+		for _, sources := range conflicts {
+			if slices.Contains(sources, r.url) {
+				r.conflicts++
+			}
+		}
+	}
 	a.mu.Unlock()
 
 	for kid, sources := range conflicts {
@@ -259,18 +312,18 @@ func (a *Aggregator) fetch(ctx context.Context, replica string) ([]keystore.Publ
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
 	if len(body) > maxResponseBytes {
-		return nil, fmt.Errorf("response larger than %d bytes", maxResponseBytes)
+		return nil, fmt.Errorf("%w: larger than %d bytes", errInvalidResponse, maxResponseBytes)
 	}
 	var set struct {
 		Keys []jsontext.Value `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &set); err != nil {
-		return nil, fmt.Errorf("decoding JWK Set: %w", err)
+		return nil, fmt.Errorf("%w: decoding: %w", errInvalidResponse, err)
 	}
 	// a replica publishes a handful of keys: a larger set fails the whole
 	// fetch rather than being truncated to an arbitrary subset
 	if len(set.Keys) > iid.MaxJWKSKeys {
-		return nil, fmt.Errorf("JWK Set has %d keys, at most %d allowed", len(set.Keys), iid.MaxJWKSKeys)
+		return nil, fmt.Errorf("%w: %d keys, at most %d allowed", errInvalidResponse, len(set.Keys), iid.MaxJWKSKeys)
 	}
 
 	var keys []keystore.PublicKey

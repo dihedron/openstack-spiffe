@@ -221,15 +221,15 @@ replicas:
 	}
 
 	// the log handler service start installs, around the test's own
-	handler, closeSink, err := auditsink.New(slog.Default().Handler(), signerResults[0].Config.Audit.Syslog)
+	sink, err := auditsink.New(slog.Default().Handler(), signerResults[0].Config.Audit.Syslog)
 	if err != nil {
 		t.Fatalf("auditsink.New: %v", err)
 	}
 	previous := slog.Default()
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(sink.Handler))
 	t.Cleanup(func() {
 		// after the servers have stopped (cleanups run last-in, first-out)
-		if err := closeSink(context.Background()); err != nil {
+		if err := sink.Close(context.Background()); err != nil {
 			t.Errorf("closing the syslog audit sink: %v", err)
 		}
 		slog.SetDefault(previous)

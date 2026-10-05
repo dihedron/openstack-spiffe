@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics"
+	"github.com/dihedron/openstack-spiffe/internal/issuer/metrics/metricstest"
 	"github.com/dihedron/openstack-spiffe/internal/issuer/openstacktest"
+	"github.com/dihedron/openstack-spiffe/pkg/syslog"
 )
 
 const metricsOn = "metrics:\n  enabled: true\n  prometheus:\n    listen_addr: 127.0.0.1:0\n"
@@ -256,5 +258,126 @@ func TestGuardReasonsEndToEnd(t *testing.T) {
 				t.Errorf("%s: %v", tt.want, got)
 			}
 		})
+	}
+}
+
+// series returns the sum of the values of a Prometheus metric's series whose
+// labels include every given one (name, value pairs), and whether any did.
+func series(body, metric string, labels ...string) (float64, bool) {
+	var total float64
+	found := false
+	for _, line := range strings.Split(body, "\n") {
+		name, rest, ok := strings.Cut(line, "{")
+		if !ok || name != metric {
+			continue
+		}
+		match := true
+		for i := 0; i+1 < len(labels); i += 2 {
+			match = match && strings.Contains(rest, labels[i]+`="`+labels[i+1]+`"`)
+		}
+		if !match {
+			continue
+		}
+		fields := strings.Fields(line)
+		var v float64
+		if _, err := fmt.Sscan(fields[len(fields)-1], &v); err == nil {
+			total, found = total+v, true
+		}
+	}
+	return total, found
+}
+
+func scrapeMetrics(t *testing.T, url string) string {
+	t.Helper()
+	code, body := get(t, &http.Client{Timeout: 10 * time.Second}, http.MethodGet, url+"/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("/metrics: %d", code)
+	}
+	return body
+}
+
+func TestSignerStateMetrics(t *testing.T) {
+	h := start(t, metricsOn+"rate_limit_per_source_public: 1/1m\n")
+	// the first takes the only public token, the second is refused
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		if code, _ := get(t, h.client, http.MethodGet, h.url+"/liveness"); code != want {
+			t.Fatalf("/liveness #%d: %d, want %d", i+1, code, want)
+		}
+	}
+	// the metrics listener has its own limit: wait there for the first key
+	var body string
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		body = scrapeMetrics(t, h.metricsURL)
+		if v, _ := series(body, "openstack_spire_readiness_check", "check", "key_store"); v == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the key store never became ready:\n%s", body)
+		}
+	}
+	for _, tt := range []struct {
+		metric string
+		labels []string
+		min    float64
+	}{
+		{"openstack_spire_keys", []string{"state", "active"}, 1},
+		{"openstack_spire_key_rotations_total", nil, 0},
+		{"openstack_spire_key_active_age_seconds", nil, 0},
+		{"openstack_spire_jwks_keys", []string{"set", "local"}, 1},
+		{"openstack_spire_jwks_keys", []string{"set", "merged"}, 1},
+		{"openstack_spire_readiness_check", []string{"check", "key_store"}, 1},
+		{"openstack_spire_readiness_check", []string{"check", "keystone"}, 1},
+		{"openstack_spire_rate_limit_rejections_total", []string{"limiter", "source_public"}, 1},
+		{"openstack_spire_rate_limit_tracked", []string{"limiter", "instance"}, 0},
+		{"openstack_spire_rate_limit_tracked", []string{"limiter", "metrics"}, 1},
+	} {
+		v, ok := series(body, tt.metric, tt.labels...)
+		if !ok || v < tt.min {
+			t.Errorf("%s %v: %v (found %v), want at least %v", tt.metric, tt.labels, v, ok, tt.min)
+		}
+	}
+	if _, ok := series(body, "openstack_spire_audit_syslog_dropped_total"); ok {
+		t.Error("syslog metrics without an audit sink")
+	}
+}
+
+func TestAggregatorStateMetrics(t *testing.T) {
+	good, bad := newFakeReplica(t, "k1", "k2"), newFakeReplica(t)
+	bad.mu.Lock()
+	bad.body = []byte("not a JWK Set")
+	bad.mu.Unlock()
+	h := startAggregator(t, metricsOn, good, bad)
+	goodPeer, badPeer := peerName(good.URL), peerName(bad.URL)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		body := scrapeMetrics(t, h.metricsURL)
+		ok, _ := series(body, "openstack_spire_jwks_fetches_total", "peer", goodPeer, "result", "ok")
+		invalid, _ := series(body, "openstack_spire_jwks_fetches_total", "peer", badPeer, "result", "invalid")
+		keys, _ := series(body, "openstack_spire_jwks_keys", "set", "merged")
+		_, aged := series(body, "openstack_spire_jwks_fetch_age_seconds", "peer", goodPeer)
+		_, badAged := series(body, "openstack_spire_jwks_fetch_age_seconds", "peer", badPeer)
+		if ok >= 1 && invalid >= 1 && keys == 2 && aged && !badAged {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ok %v, invalid %v, merged keys %v, good aged %v, bad aged %v\n%s", ok, invalid, keys, aged, badAged, body)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func TestObserveAuditSink(t *testing.T) {
+	m, r := metricstest.New(t, metrics.Config{})
+	if err := observeAuditSink(m, func() (syslog.AuditStats, bool) { return syslog.AuditStats{}, false }); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Points(t, "openstack_spire.audit.syslog.dropped")) != 0 {
+		t.Error("syslog metrics while the sink is disabled")
+	}
+	if err := observeAuditSink(m, func() (syslog.AuditStats, bool) { return syslog.AuditStats{Dropped: 4, Queued: 1}, true }); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Value(t, "openstack_spire.audit.syslog.dropped"); got != 4 {
+		t.Errorf("%d dropped, want 4", got)
 	}
 }

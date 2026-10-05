@@ -91,6 +91,13 @@ func NewAggregator(cfg *config.Aggregator) (*Aggregator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating aggregator: %w", err)
 	}
+	if err := errors.Join(
+		observeFetches(m, merged),
+		observeLimiter(m, metrics.LimiterSource, limiter),
+		observeReadiness(m, readiness),
+	); err != nil {
+		return nil, fmt.Errorf("creating aggregator: %w", errors.Join(err, m.Shutdown(context.Background())))
+	}
 	return &Aggregator{cfg: cfg, merged: merged, readiness: readiness, metrics: m,
 		handler: m.Middleware(aggregatorRoutes, requestid.Middleware(resolver.Middleware(limited)))}, nil
 }
@@ -114,7 +121,7 @@ func (a *Aggregator) ServeWithMetrics(ctx context.Context, ln, metricsLn net.Lis
 	defer shutdownMetrics(ctx, a.metrics)
 	loops := []func(context.Context) error{a.merged.Run, a.readiness.Run}
 	if metricsLn != nil && a.metrics.Handler() != nil {
-		loop, err := metricsLoop(a.cfg.Metrics.Prometheus, a.metrics.Handler(), a.cfg.MinTLSVersion(), metricsLn)
+		loop, err := metricsLoop(a.cfg.Metrics.Prometheus, a.metrics, a.cfg.MinTLSVersion(), metricsLn)
 		if err != nil {
 			_ = ln.Close()
 			_ = metricsLn.Close()

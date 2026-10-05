@@ -149,6 +149,18 @@ func (r *Readiness) runChecks(ctx context.Context) {
 	r.checkedAt = r.now()
 }
 
+// Results returns whether each check passed in its latest run; a check
+// that has not run yet is absent.
+func (r *Readiness) Results() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	results := make(map[string]bool, len(r.results))
+	for name, err := range r.results {
+		results[name] = err == nil
+	}
+	return results
+}
+
 // ServeHTTP reports the latest results.
 func (r *Readiness) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !allowed(w, req) {

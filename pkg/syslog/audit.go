@@ -86,7 +86,23 @@ type auditSink struct {
 	done   chan struct{}
 
 	failing atomic.Bool
-	dropped atomic.Uint64
+	dropped atomic.Uint64 // in the current failure episode
+	// droppedTotal counts every record dropped since the start
+	droppedTotal atomic.Uint64
+}
+
+// AuditStats describes an AuditHandler's delivery, for the metrics.
+type AuditStats struct {
+	// Dropped counts the records dropped since the handler started.
+	Dropped uint64
+	// Queued is the number of records waiting to be sent.
+	Queued int
+}
+
+// Stats returns the current AuditStats; handlers derived with WithAttrs or
+// WithGroup share them.
+func (h *AuditHandler) Stats() AuditStats {
+	return AuditStats{Dropped: h.sink.droppedTotal.Load(), Queued: len(h.sink.queue)}
 }
 
 // AuditHandler is a slog.Handler that forwards to syslog only the records
@@ -271,6 +287,7 @@ func (s *auditSink) run() {
 // drop counts a dropped record, and reports the start of a failure episode.
 func (s *auditSink) drop(err error) {
 	s.dropped.Add(1)
+	s.droppedTotal.Add(1)
 	if s.failing.CompareAndSwap(false, true) {
 		s.onFailure(err)
 	}

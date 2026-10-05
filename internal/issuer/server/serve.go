@@ -94,10 +94,14 @@ const metricsShutdownTimeout = 5 * time.Second
 // its own listener (I-8, D-10): GET /metrics only, plain HTTP on loopback,
 // TLS (with client certificates when client_ca_path is set) otherwise,
 // behind its own per-source limit and the service's server timeouts.
-func metricsLoop(cfg config.MetricsPrometheus, metricsHandler http.Handler, minTLSVersion uint16, ln net.Listener) (func(context.Context) error, error) {
+func metricsLoop(cfg config.MetricsPrometheus, m *metrics.Metrics, minTLSVersion uint16, ln net.Listener) (func(context.Context) error, error) {
+	metricsHandler := m.Handler()
 	limiter, err := ratelimit.NewLimiter(cfg.RateLimitPerSource.Events, cfg.RateLimitPerSource.Per)
 	if err != nil {
 		return nil, fmt.Errorf("metrics per-source limit: %w", err)
+	}
+	if err := observeLimiter(m, metrics.LimiterMetrics, limiter); err != nil {
+		return nil, err
 	}
 	resolver, err := clientaddr.NewResolver(nil, "")
 	if err != nil {

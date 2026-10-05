@@ -36,9 +36,25 @@ type Limiter struct {
 	maxKeys int
 	now     func() time.Time
 
-	mu        sync.Mutex
-	buckets   map[string]*bucket
-	lastSweep time.Time
+	mu         sync.Mutex
+	buckets    map[string]*bucket
+	lastSweep  time.Time
+	rejections uint64
+}
+
+// Stats describes a Limiter, for the metrics.
+type Stats struct {
+	// Rejections counts the requests refused so far.
+	Rejections uint64
+	// Tracked is the number of buckets held.
+	Tracked int
+}
+
+// Stats returns the current Stats.
+func (l *Limiter) Stats() Stats {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return Stats{Rejections: l.rejections, Tracked: len(l.buckets)}
 }
 
 // Option configures a Limiter.
@@ -106,6 +122,7 @@ func (l *Limiter) Allow(key string) (bool, time.Duration) {
 		b.tokens--
 		return true, 0
 	}
+	l.rejections++
 	wait := time.Duration(math.Ceil((1 - b.tokens) / l.refill * float64(time.Second)))
 	return false, wait
 }

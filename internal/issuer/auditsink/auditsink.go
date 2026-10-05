@@ -23,7 +23,33 @@ var builtin = slog.Default().Handler()
 // errBuiltin is returned for a base that is slog's built-in default handler.
 var errBuiltin = errors.New("log handler: slog's built-in default handler cannot be wrapped (it writes through package log, which slog.SetDefault redirects to the wrapper, deadlocking); install a handler of your own first")
 
-// New returns the handler to install as the default: every record goes to
+// Sink is the installed logging: its handler and, when the sink is enabled,
+// the syslog audit handler behind it.
+type Sink struct {
+	// Handler is the handler to install as the default.
+	Handler slog.Handler
+	audit   *syslog.AuditHandler // nil when the sink is disabled
+}
+
+// Close sends the records still queued until the context is done, then
+// closes the connection; it does nothing when the sink is disabled.
+func (s *Sink) Close(ctx context.Context) error {
+	if s.audit == nil {
+		return nil
+	}
+	return s.audit.Close(ctx)
+}
+
+// Stats returns the syslog delivery statistics, and false when the sink is
+// disabled.
+func (s *Sink) Stats() (syslog.AuditStats, bool) {
+	if s.audit == nil {
+		return syslog.AuditStats{}, false
+	}
+	return s.audit.Stats(), true
+}
+
+// New returns the Sink whose handler is to be installed as the default: every record goes to
 // base, the regular log, and, when the sink is enabled, the audit records
 // also go to syslog. The request ID handler wraps both, so that the copy
 // sent to syslog carries the request ID too. base decides which records the
@@ -31,24 +57,22 @@ var errBuiltin = errors.New("log handler: slog's built-in default handler cannot
 // record, whatever the regular log's level.
 //
 // Delivery to syslog never blocks: dropped records are reported on base,
-// once when dropping starts and once when delivery resumes. The returned
-// function sends the records still queued until its context is done, then
-// closes the connection; it does nothing when the sink is disabled. New
-// fails if the sink is enabled and its socket cannot be opened.
-func New(base slog.Handler, cfg config.AuditSyslog) (slog.Handler, func(context.Context) error, error) {
+// once when dropping starts and once when delivery resumes. New fails if
+// the sink is enabled and its socket cannot be opened.
+func New(base slog.Handler, cfg config.AuditSyslog) (*Sink, error) {
 	if base == builtin {
-		return nil, nil, errBuiltin
+		return nil, errBuiltin
 	}
 	if !cfg.Enabled {
-		return requestid.NewLogHandler(base), func(context.Context) error { return nil }, nil
+		return &Sink{Handler: requestid.NewLogHandler(base)}, nil
 	}
 	facility, err := syslog.ParseFacility(cfg.Facility)
 	if err != nil {
-		return nil, nil, fmt.Errorf("syslog audit sink: %w", err)
+		return nil, fmt.Errorf("syslog audit sink: %w", err)
 	}
 	client, err := syslog.New(syslog.WithSocket(cfg.Socket), syslog.WithApplication(cfg.AppName))
 	if err != nil {
-		return nil, nil, fmt.Errorf("syslog audit sink: %w", err)
+		return nil, fmt.Errorf("syslog audit sink: %w", err)
 	}
 	log := slog.New(base)
 	audit, err := syslog.NewAuditHandler(client, facility,
@@ -60,7 +84,7 @@ func New(base slog.Handler, cfg config.AuditSyslog) (slog.Handler, func(context.
 		}),
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("syslog audit sink: %w", errors.Join(err, client.Close()))
+		return nil, fmt.Errorf("syslog audit sink: %w", errors.Join(err, client.Close()))
 	}
-	return requestid.NewLogHandler(slog.NewMultiHandler(base, audit)), audit.Close, nil
+	return &Sink{Handler: requestid.NewLogHandler(slog.NewMultiHandler(base, audit)), audit: audit}, nil
 }
