@@ -18,15 +18,20 @@ func TestLookupMetrics(t *testing.T) {
 	v := newVerifier(t, b, &testClock{now: testNow}, WithMetrics(m), WithEnrichment([]string{iid.ClaimProjectName}))
 	ctx := context.Background()
 
+	// successful verifications wait for the project lookup
 	if _, err := v.Verify(ctx, projectID, instanceID); err != nil { // both looked up
 		t.Fatal(err)
 	}
 	if _, err := v.Verify(ctx, projectID, instanceID); err != nil { // both cached
 		t.Fatal(err)
 	}
-	_, _ = v.Verify(ctx, projectID, "9d8e7f6a-1b2c-4d3e-8f9a-0b1c2d3e4f5a") // unknown instance
+	// a failed server check returns without waiting for the project lookup,
+	// which completes (and is recorded) in the background, possibly after
+	// the metrics are read: these verifications look up no project
+	plain := newVerifier(t, b, &testClock{now: testNow}, WithMetrics(m))
+	_, _ = plain.Verify(ctx, projectID, "9d8e7f6a-1b2c-4d3e-8f9a-0b1c2d3e4f5a") // unknown instance
 	b.serverErr = errors.New("connection refused")
-	_, _ = v.Verify(ctx, projectID, "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d") // Nova failing
+	_, _ = plain.Verify(ctx, projectID, "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d") // Nova failing
 
 	for _, tt := range []struct {
 		attrs []string
@@ -37,7 +42,8 @@ func TestLookupMetrics(t *testing.T) {
 		{[]string{"kind", metrics.LookupServer, "result", metrics.ResultNotFound}, 1},
 		{[]string{"kind", metrics.LookupServer, "result", metrics.ResultError}, 1},
 		{[]string{"kind", metrics.LookupProject, "result", metrics.ResultFound, "source", "backend"}, 1},
-		{[]string{"kind", metrics.LookupProject, "source", "cache"}, 3},
+		{[]string{"kind", metrics.LookupProject, "result", metrics.ResultFound, "source", "cache"}, 1},
+		{[]string{"kind", metrics.LookupProject}, 2},
 	} {
 		if got := r.Value(t, lookups, tt.attrs...); got != tt.want {
 			t.Errorf("%v: %d, want %d", tt.attrs, got, tt.want)
