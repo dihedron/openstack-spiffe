@@ -325,9 +325,9 @@ func TestValidateReplicaID(t *testing.T) {
 func TestValidateKeyID(t *testing.T) {
 	longest := "2026-10-04-" + strings.Repeat("r", 63) + "-key-" + strings.Repeat("9", 128-len("2026-10-04-")-63-len("-key-"))
 	for _, valid := range []string{
-		"2026-10-04-signer-a-key-0",
-		"2026-10-04-signer-a-key-86399",
-		"2026-10-04-key-key-12", // a replica ID may itself be "key"
+		"2026-10-04-signer-a-key-0",     //gitleaks:allow
+		"2026-10-04-signer-a-key-86399", //gitleaks:allow
+		"2026-10-04-key-key-12",         // a replica ID may itself be "key"
 		"2026-10-04-a-key-b-key-7",
 		longest,
 	} {
