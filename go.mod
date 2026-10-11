@@ -18,7 +18,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
-	go.opentelemetry.io/proto/otlp v1.11.0
+	go.opentelemetry.io/proto/otlp v1.11.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.84.0
@@ -34,7 +34,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/hashicorp/go-plugin v1.4.0 // indirect
 	github.com/hashicorp/yamux v0.0.0-20180604194846-3520598351bb // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
