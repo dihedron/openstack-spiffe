@@ -85,7 +85,9 @@ SPIRE Server logs the plugin's records, and returns its errors to the agent, whi
 | `PermissionDenied` | `attestation rejected: <detail>` | The token failed verification: see the details below | Per detail |
 | `PermissionDenied` | `attestation rejected: project <id> is not in allowed_project_ids` | The instance's project is not served by this SPIRE deployment | Add it to `allowed_project_ids` if it should be |
 | `PermissionDenied` | `attestation rejected: token already used; a fresh token is needed` | The token was accepted before: a replay, or an agent presenting a token twice | Transient for an agent: its next attempt gets a fresh token. Repeated: someone replays tokens |
-| `PermissionDenied` | `attestation rejected: token issued before this server started; a fresh token is needed` | The startup watermark, right after a SPIRE Server restart | None: the agent's next attempt succeeds |
+| `PermissionDenied` | `attestation rejected: token issued before this server started; a fresh token is needed` | The startup watermark, right after a SPIRE Server restart: every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default) | None: the agent succeeds by itself once Nova serves a token minted after the window |
+| `PermissionDenied` | `attestation rejected: agent <SPIFFE ID> is already attested and reattest is false: evict it to attest again` | Trust on first use (`reattest = false`): the agent attested before. Either it lost its state, or someone else presents the instance's tokens: the `reattest_refused` audit record carries the token's `jti` | If the agent lost its state, evict it (*Routine procedures*, Evicting agents). Otherwise, see *Incident procedures*: a token theft |
+| `Unavailable` | `attestation rejected: checking whether the agent is attested: ...` | With `reattest = false`, SPIRE Server's AgentStore did not answer: the attestation is refused (fail closed) | SPIRE Server's log and its datastore |
 | `Unavailable` | `attestation rejected: replay cache full` | 100,000 tokens accepted within their lifetime: far above any normal rate; it fails closed | An attestation flood: find its source |
 | `FailedPrecondition` | `not configured` | The plugin received an attestation before its configuration | SPIRE Server's log shows why configuration failed |
 
@@ -121,6 +123,7 @@ The plugin fails to configure, and SPIRE Server to start, with `InvalidArgument`
 | `audit_syslog: ...`, `audit_syslog.facility: ...`, `audit_syslog.app_name: ...` | Fix the block; the socket must be openable |
 | `trust domain "..." from the core configuration is not a valid SPIFFE trust domain name` | Fix SPIRE Server's `trust_domain` |
 | `creating JWK Set client: ...` | The TLS settings or CA bundle cannot be used |
+| `reattest = false needs SPIRE Server's AgentStore host service, which it did not provide` | SPIRE Server too old to provide the host service: upgrade it, or set `reattest = true` |
 | An unknown key, a malformed duration, or a value out of range | The message names the key |
 
 Configuration warnings (`jwks_ca_cert_path`, `allowed_project_ids`, `allowed_tag_keys` unset, `audit_syslog` disabled) do not stop SPIRE Server.

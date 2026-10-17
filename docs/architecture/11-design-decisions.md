@@ -18,7 +18,7 @@ The significant choices behind the design, and why they were made.
 
 **Tenant-asserted values passed on, and marked.** Host names and tags are useful to tell instances apart within a project, so they become selectors. They are never presented as control-plane facts, and the registration entry rule keeps them from crossing projects.
 
-**Replay protection in SPIRE Server, with a startup watermark.** A cache of used tokens makes each token single use; the watermark keeps a restart from reopening replay, at the cost of one refused attempt for agents attesting right after a restart. Sharing the cache across SPIRE Servers was left out: the tokens' short life and protected path make lateral replay an accepted risk.
+**Replay protection in SPIRE Server, with a startup watermark.** A cache of used tokens makes each token single use; the watermark keeps a restart from reopening replay, at the cost of refusing agents that attest right after a restart, at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default), until they present a token minted after the restart. Sharing the cache across SPIRE Servers was left out: the tokens' short life and protected path make lateral replay an accepted risk.
 
 **Re-attestation configurable, with detection.** Allowing re-attestation lets identities lapse with their instances, while trust on first use defeats later token theft: the right trade-off depends on the deployment, so it is the operator's. Detection of quick re-attestations is always on, and never refuses.
 

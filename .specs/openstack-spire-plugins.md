@@ -1,6 +1,6 @@
 # OpenStack node attestor plugins — implementation spec
 
-Sep 20, 2026 (revised Oct 2 and Oct 4, 2026) · @Andrea Funtò
+Sep 20, 2026 (revised Oct 2, Oct 4 and Oct 17, 2026) · @Andrea Funtò
 
 *Revision notes (Oct 2)*: aligned with the issuer spec and `pkg/iid`; then revised for the review observations on replay across restarts and Nova's metadata cache, replay across HA servers, payload and JWK Set size limits, and clock skew.
 
@@ -12,7 +12,11 @@ Sep 20, 2026 (revised Oct 2 and Oct 4, 2026) · @Andrea Funtò
 - Configuration warnings (S-5, S-8).
 - Deployment guidance on `agent_ttl` and signed releases (E-4, T-7).
 
-Requirements introduced by this revision are tagged with the threat ID they address. They were implemented on Oct 4 and 5, 2026, in eight chunks, each with its tests and, where it involves OpenStack, its lab scenarios (see the test environment spec).
+*Revision notes (Oct 17, approved Oct 17)*: findings of the lab's stress test (`openstack-spire-stress-test.md`):
+- **TOFU enforced by the server plugin** (S-4, E-4). With `reattest = false`, a second attestation of an attested agent was accepted: SPIRE Server does not refuse it on `CanReattest = false`, which only tells it that the agent renews its SVID without attesting again. SPIRE leaves trust on first use to the node attestor, through its `AgentStore` host service. The plugin now asks it whether the agent is attested and refuses if so (see re-attestation mode).
+- **The startup watermark's cost** (D-8): right after a SPIRE Server restart, every attempt is refused for `clock_skew_tolerance` (and Nova's cache window), not only the first.
+
+Requirements introduced by the Oct 4 revision are tagged with the threat ID they address. They were implemented on Oct 4 and 5, 2026, in eight chunks, each with its tests and, where it involves OpenStack, its lab scenarios (see the test environment spec).
 
 ## Overview
 
@@ -135,12 +139,12 @@ Claude should keep JWT verification in its own pure, testable function (token, k
 
 - **Replay cache**: after a token passes every other check, its `jti` is recorded in an in-memory cache until `exp + clock_skew_tolerance`, the end of its acceptance window, and a token whose `jti` is already recorded is rejected with a distinct error ("token already used"). Only successful attestations are recorded, so a rejected attempt never burns a `jti`. The cache is bounded (100,000 entries, far above any realistic attestation rate over 7 minutes); when it is full even after purging expired entries, attestations are rejected and the condition is logged as an error, rather than forgetting a `jti` early (fail closed).
 - **Startup watermark**: the cache is lost when the plugin process restarts, so a token accepted just before a restart could otherwise be replayed just after it. The plugin therefore records its process start time and rejects, with a distinct error ("token issued before this server started"), any token whose `iat` is earlier than that start time plus `clock_skew_tolerance`. Since the issuer's and the server's clocks differ by at most the tolerance, every token accepted was minted after the process started, and so was never presented to a previous process. The rule is always on and stops mattering once tokens minted before the start have expired. The watermark and the cache belong to the process, not to the configuration: a new `Configure` call keeps both.
-- **Cost for legitimate agents**: right after a SPIRE Server restart, an agent attesting with a token minted shortly before it (still served by Nova's cache) is rejected once, and succeeds on SPIRE Agent's next attempt with a fresh token, typically within `clock_skew_tolerance` plus Nova's cache window (about 45s by default). A running agent never presents the same token twice (see the agent's freshness wait), and a restarted one usually does not attest at all.
+- **Cost for legitimate agents** (D-8): right after a SPIRE Server restart, every token minted before the start plus `clock_skew_tolerance` is refused, so an agent attesting then is refused at each attempt, not only the first, until Nova serves it a token minted after that: within `clock_skew_tolerance` plus Nova's cache window (about 45s by default). SPIRE Agent retries by itself, and succeeds then. A running agent never presents the same token twice (see the agent's freshness wait), and a restarted one usually does not attest at all.
 
 **Re-attestation mode** (`reattest`, S-4, E-4): `CanReattest` is configurable. Each setting changes what SPIRE Server does with a second attestation of the same agent ID, so the choice is the operator's:
 
 - `true` (default): SPIRE Agent renews its SVID by re-attesting with a fresh token, and an agent that lost its state attests again without operator action. Since renewal requires a fresh token, which the issuer refuses for a deleted or disallowed instance, an agent's identity lapses at its next renewal once its instance is gone. However, a stolen token can displace the legitimate agent at any time within its window.
-- `false` (trust on first use): SPIRE Server refuses to attest an agent ID that is already attested, until it is evicted. A token stolen after the agent's first attestation is useless. On the other hand, an agent that lost its state needs an operator's `spire-server agent evict`. The SVID is renewed without re-attestation, so the identity also survives the instance's deletion until it is evicted or expires. Operators choosing `false` must evict agents of deleted instances.
+- `false` (trust on first use): the plugin refuses to attest an agent ID that is already attested, until it is evicted. A token stolen after the agent's first attestation is useless. SPIRE Server does not enforce this on `CanReattest = false`, which only makes it renew the agent's SVID without attesting again: like SPIRE's own TOFU attestors, the plugin asks SPIRE Server's `AgentStore` host service (`GetAgentInfo`) whether the agent ID it computed is attested. The check comes after every other check but the replay cache, so that only verified tokens reach it and a refused attempt never burns a `jti`. An attested agent is refused with `PermissionDenied`, `attestation rejected: agent <SPIFFE ID> is already attested and reattest is false: evict it to attest again`, and logged as a `warn` audit record, `audit=reattest_refused`, with the instance and project IDs and the `jti` (to syslog too, with severity `warning`). `NOT_FOUND` means a first attestation. Any other answer of the host service refuses the attestation with `Unavailable` (fail closed). `Configure` refuses `reattest = false` when SPIRE Server did not provide the host service, rather than accept a mode it cannot enforce. On the other hand, an agent that lost its state needs an operator's `spire-server agent evict`. The SVID is renewed without re-attestation, so the identity also survives the instance's deletion until it is evicted or expires. Operators choosing `false` must evict agents of deleted instances.
 
 **Re-attestation detection** (S-4, E-1): the plugin keeps, in memory, the time of the last successful attestation of each `instance_id`. The record is bounded at 100,000 instances, with the oldest evicted first. It is lost on restart, like the replay cache. When an instance attests again within `reattest_alert_window` (default 5m, `0` disables), the plugin logs a `warn` record, `possible token theft: instance re-attested`, with the instance and project IDs, both `jti`s and the time between them. A running SPIRE Agent re-attests only near its SVID's expiry (tens of minutes), and a restarted one reuses its persisted SVID. A quick second attestation therefore means either an agent that lost its state, or a second presenter of the instance's tokens. Detection never rejects: rejecting would let a thief who attests first lock out the legitimate agent.
 
@@ -274,7 +278,8 @@ The binary paths are those installed by the `openstack-agent-plugin` and `openst
 | Malformed `kid` (not the issuer's format, or over 128 bytes) | N/A | Reject without re-fetching, log `kid=invalid` and its length |
 | Tag key not in `allowed_tag_keys` | N/A | Accept; no selector for that tag |
 | Same `instance_id` attested again within `reattest_alert_window` | N/A | Accept; log a "possible token theft" warning |
-| Agent ID already attested, with `reattest = false` | N/A | SPIRE Server refuses the attestation until the agent is evicted |
+| Agent ID already attested, with `reattest = false` | N/A | Reject with a distinct "already attested" error until the agent is evicted; log a `reattest_refused` audit record |
+| `AgentStore` host service fails, with `reattest = false` | N/A | Reject with `Unavailable` (fail closed) |
 | `project_id` not in `allowed_project_ids` | N/A | Reject, return error naming the disallowed project |
 | `jti` already used | N/A | Reject with a distinct "token already used" error, log the `instance_id` |
 | Token issued before the plugin process started (startup watermark) | N/A | Reject with a distinct "issued before this server started" error; the agent's next attempt carries a fresh token |
@@ -295,6 +300,7 @@ None of these paths should panic. Every rejection must be a clean gRPC error sur
 - JWK Set retrieval: key filtering, kid conflict exclusion, a set with more than `iid.MaxJWKSKeys` keys treated as a failed fetch, last-known-good retention and its expiry, a rate-limited re-fetch on an unknown kid that then succeeds.
 - Replay cache: a reused `jti` rejected, a rejected attempt not recorded, entries forgotten after `exp + clock_skew_tolerance`, a full cache rejecting attestations.
 - Startup watermark: a token minted before the process start (plus tolerance) rejected, one minted after accepted; a new `Configure` call keeps the cache and the watermark.
+- TOFU (S-4, E-4), against a fake `AgentStore`: with `reattest = false`, an agent the store knows is refused with the "already attested" error and a `reattest_refused` record, without burning the token's `jti`; one it does not know (`NOT_FOUND`) attests; a store error refuses with `Unavailable`; the store is not asked for a token that fails verification, nor with `reattest = true`; `Configure` refuses `reattest = false` without the host service.
 - Config validation: missing, unknown, malformed and out-of-range fields produce errors naming them; a non-https `jwks_url` or one ending in `/jwks/local.json` rejected.
 - Key ID (T-5): a kid of the wrong format, or over 128 bytes, or carrying control characters is rejected without a re-fetch, and the log record never contains it.
 - Character validation (T-4): tag keys and values and enrichment values with control characters, format characters (e.g. U+202E, U+200B) or invalid UTF-8 rejected.

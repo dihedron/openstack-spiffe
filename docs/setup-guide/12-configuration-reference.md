@@ -295,13 +295,13 @@ The `plugin_data` of the `openstack_iid` node attestor in SPIRE Server's configu
 :   *List of tag keys, default: empty (every tag).* Only tags with these keys become `openstack_iid:tag` selectors; the others are ignored. Tags are set by any member of the instance's project (`T-3`): list the keys your registration entries use. This lets SPIRE Server's operator decide, whatever the issuer's `tags.allowlist` lets through. The plugin warns when the list is empty.
 
 `reattest`
-:   *Boolean, default `true`.* Whether an agent may attest again: `true` lets it renew its identity with a fresh token, and lose it once its instance is deleted, but lets a stolen token displace it; `false` is trust on first use, which makes a token stolen after the first attestation useless, at the cost of manual eviction for agents that lost their state and for deleted instances (`S-4`, `E-4`). See *Installing the server plugin*.
+:   *Boolean, default `true`.* Whether an agent may attest again: `true` lets it renew its identity with a fresh token, and lose it once its instance is deleted, but lets a stolen token displace it; `false` is trust on first use, which makes a token stolen after the first attestation useless, at the cost of manual eviction for agents that lost their state and for deleted instances (`S-4`, `E-4`). The plugin enforces `false` itself, asking SPIRE Server's AgentStore host service whether the agent is attested, and logs each refusal as a `reattest_refused` audit record. See *Installing the server plugin*.
 
 `reattest_alert_window`
 :   *Duration, default `5m`, `0` disables, at most `1h`.* An instance attesting again within this window is logged as `possible token theft: instance re-attested`, an audit record. A running agent re-attests only near its identity's expiry, so a quick second attestation means an agent that lost its state, or a second presenter of the instance's tokens. The attestation is still accepted.
 
 `audit_syslog.enabled`
-:   *Boolean, default `false`.* Also sends the plugin's audit records (`agent_attested`, `reattest_alert`) to the local syslog daemon (`R-2`), to be joined with the issuer's on the token ID. The plugin warns when it is off.
+:   *Boolean, default `false`.* Also sends the plugin's audit records (`agent_attested`, `reattest_alert`, `reattest_refused`) to the local syslog daemon (`R-2`), to be joined with the issuer's on the token ID. The plugin warns when it is off.
 
 `audit_syslog.socket`
 :   *Path, default `/dev/log`.* The syslog daemon's socket. The plugin fails to configure when it cannot be opened.

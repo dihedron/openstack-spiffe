@@ -274,7 +274,7 @@ Root, or the agent's user, in the instance can still read the token: root owns t
 Each token is accepted once by a given SPIRE Server.
 
 - **Repeated attestations.** Nova's metadata cache (`[api] metadata_cache_expiration`, 15s by default) can serve the same token again. In that case the agent plugin waits, for up to `fresh_token_timeout` (30s), until Nova serves a fresh one.
-- **After a SPIRE Server restart.** The server plugin rejects tokens minted before its process started. Agents attesting right after a restart may be refused once, and succeed on SPIRE Agent's next attempt.
+- **After a SPIRE Server restart.** The server plugin rejects tokens minted before its process started. Agents attesting right after a restart are refused at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default), and succeed by themselves afterwards.
 - **Clock skew.** `clock_skew_tolerance` (30s, at most 60s) absorbs clock differences between the issuer and SPIRE Server. A token is accepted for at most 5 minutes plus twice the tolerance; keep both clocks synchronized.
 - **Limitation.** The replay cache is local to each SPIRE Server instance. In an HA deployment, a token intercepted within its acceptance window could be presented once to each other SPIRE Server instance. Tokens travel only from the instance's metadata service to SPIRE Agent and then over SPIRE's TLS channel, and they are never logged.
 

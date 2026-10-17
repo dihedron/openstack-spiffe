@@ -29,11 +29,11 @@ Add the node attestor to the `plugins` block of SPIRE Server's configuration. Th
 **Re-attestation.** `reattest` decides what SPIRE Server does when an agent that already attested attests again:
 
 - `true` (the default): the agent renews its identity by attesting with a fresh token. Since the issuer refuses tokens for deleted instances, an instance's agent loses its identity at its next renewal once the instance is gone. However, someone who steals one of the instance's tokens can attest in the agent's place at any time.
-- `false` (trust on first use): a second attestation of the same agent is refused until an operator evicts the agent (`spire-server agent evict`). A token stolen after the first attestation is useless. But an agent that lost its state needs an operator to recover, and the identities of deleted instances last until evicted, so evict them when instances are deleted.
+- `false` (trust on first use): the plugin refuses a second attestation of the same agent until an operator evicts it (`spire-server agent evict`), with the error `... is already attested and reattest is false: evict it to attest again` and a `reattest_refused` audit record. SPIRE Server itself does not refuse it: the plugin asks SPIRE Server's AgentStore host service whether the agent is attested, as SPIRE's own trust-on-first-use attestors do. A token stolen after the first attestation is useless. But an agent that lost its state needs an operator to recover, and the identities of deleted instances last until evicted, so evict them when instances are deleted.
 
 `reattest_alert_window` (5 minutes by default) logs a `possible token theft` warning when an instance attests again that soon, which a running agent never does. The attestation is still accepted: refusing it would let a thief who attests first lock out the real agent.
 
-**Audit.** `audit_syslog` sends the plugin's audit records, one per attestation and one per re-attestation alert, to the local syslog daemon. Each attestation record carries the token's ID (`jti`), which the issuer's `token issued` record also carries: together they tie every agent identity to the Nova call that produced its token.
+**Audit.** `audit_syslog` sends the plugin's audit records, one per attestation, one per re-attestation alert and one per attestation refused by trust on first use, to the local syslog daemon. Each attestation record carries the token's ID (`jti`), which the issuer's `token issued` record also carries: together they tie every agent identity to the Nova call that produced its token.
 
 **Agent identities' lifetime.** Keep SPIRE Server's own `agent_ttl` at one hour or less (its default). It bounds how long an agent identity, a stolen one or one of a deleted instance, remains usable.
 

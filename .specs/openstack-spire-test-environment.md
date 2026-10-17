@@ -144,6 +144,7 @@ Each test boots the instances it needs and deletes them afterwards, so tests are
 | E2E-2 | Freshness | Restarting an agent with its data directory wiped attests again within the bound of the spec (Nova cache plus one retry), with the "already used" rejection at most once | 3.5 |
 | E2E-3 | Rotation | With `rotation_interval: 5m` on both issuers, instances keep attesting across two rotations; no attestation fails on an unknown kid | 3.5 |
 | E2E-4 | Unlisted project | An instance in a project missing from `allowed_project_ids` is refused | 3.5 |
+| E2E-5 | Trust on first use | With the server plugin's `reattest = false`, an agent that lost its state is refused ("already attested", a `reattest_refused` record) and keeps its identity until evicted; once evicted, it attests again | TOFU fix (plugins spec, Oct 17) |
 | PKG-1 | Packages | deb on `issuer-a` and `spire`, rpm on `issuer-b`, and both in the guests, install and upgrade cleanly; units are installed disabled, then started by `deploy`; `config check` passes on the deployed files | 3.5 |
 | AUD-1 | Syslog under the unit | Every token issued during E2E-1 has exactly one `token_issued` entry in `issuer-a`'s journal with `SYSLOG_IDENTIFIER=openstack-spire-issuer`, the token's `jti`, and the `authpriv` facility; key rotations in E2E-3 appear as `key_lifecycle` entries | 3.5 (closes chunk 3) |
 | AUD-2 | Log level off | With `OPENSTACK_SPIRE_ISSUER_LOG_LEVEL=off`, AUD-1 still holds and the unit's standard error still carries the audit records | 3.5 |

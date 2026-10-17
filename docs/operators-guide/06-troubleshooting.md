@@ -23,7 +23,7 @@ Follow the token from Nova to SPIRE Server:
 
 ## Tokens are refused as already used, or issued before the server started
 
-- **`token issued before this server started`**, right after a SPIRE Server restart: expected; each agent's next attempt succeeds. If it lasts longer than a few minutes, an agent keeps presenting an old token: check that agents run the current agent plugin.
+- **`token issued before this server started`**, right after a SPIRE Server restart: expected, at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default); the agents then succeed by themselves. If it lasts longer than a few minutes, an agent keeps presenting an old token: check that agents run the current agent plugin.
 - **`token already used`**, once for an agent that lost its state: expected, since Nova's cache served it the token it presented before; its next attempt succeeds.
 - **`token already used`** repeatedly, or for agents that did not restart: someone is presenting tokens a second time. Correlate the `jti` with the `agent_attested` record that first used it, and see *Incident procedures*.
 

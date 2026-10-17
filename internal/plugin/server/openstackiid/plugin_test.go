@@ -17,6 +17,7 @@ import (
 
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	"github.com/spiffe/spire-plugin-sdk/plugintest"
+	agentstorev1 "github.com/spiffe/spire-plugin-sdk/proto/spire/hostservice/server/agentstore/v1"
 	nodeattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/nodeattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
@@ -33,13 +34,23 @@ type harness struct {
 	config *configv1.ConfigServiceClient
 	jwks   *jwksServer
 	caPath string
+	// store is SPIRE Server's AgentStore host service, nil when not offered
+	store *fakeAgentStore
 }
 
 // serve runs the plugin with a fake clock at testNow, a startup watermark
-// an hour earlier, and a JWKS server publishing keys.
+// an hour earlier, a JWKS server publishing keys, and SPIRE Server's
+// AgentStore host service knowing no agent.
 func serve(t *testing.T, keys ...*signingKey) *harness {
 	t.Helper()
+	return serveWith(t, newFakeAgentStore(), keys...)
+}
+
+// serveWith is serve with an AgentStore, or none when store is nil.
+func serveWith(t *testing.T, store *fakeAgentStore, keys ...*signingKey) *harness {
+	t.Helper()
 	h := &harness{
+		store:  store,
 		plugin: New(),
 		clock:  &fakeClock{now: testNow},
 		na:     new(nodeattestorv1.NodeAttestorPluginClient),
@@ -57,11 +68,16 @@ func serve(t *testing.T, keys ...*signingKey) *harness {
 	if err := os.WriteFile(h.caPath, ca, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var hostServices []pluginsdk.ServiceServer
+	if store != nil {
+		hostServices = append(hostServices, agentstorev1.AgentStoreServiceServer(store))
+	}
 	plugintest.ServeInBackground(t, plugintest.Config{
-		PluginServer:   nodeattestorv1.NodeAttestorPluginServer(h.plugin),
-		PluginClient:   h.na,
-		ServiceServers: []pluginsdk.ServiceServer{configv1.ConfigServiceServer(h.plugin)},
-		ServiceClients: []pluginsdk.ServiceClient{h.config},
+		PluginServer:       nodeattestorv1.NodeAttestorPluginServer(h.plugin),
+		PluginClient:       h.na,
+		ServiceServers:     []pluginsdk.ServiceServer{configv1.ConfigServiceServer(h.plugin)},
+		ServiceClients:     []pluginsdk.ServiceClient{h.config},
+		HostServiceServers: hostServices,
 	})
 	t.Cleanup(h.plugin.close)
 	return h

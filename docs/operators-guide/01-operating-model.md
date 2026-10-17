@@ -17,7 +17,7 @@ Nothing the solution holds survives a restart, by design:
 
 - **A signer replica** keeps its signing keys only in memory. A restart generates a new key, which the replica publishes for `publish_ahead` (2 minutes) before signing with it. During that time it reports *not ready*, and its load balancer sends Nova to the other replicas. The old key is gone: the merged key sets drop it at their next fetch. A token the replica signed just before the restart, and not yet presented, is then refused, and its agent attests again with a fresh token. Restart replicas one at a time.
 - **A JWKS aggregator** holds nothing but its configuration. A restarted aggregator fetches every replica at once and is ready as soon as one answers.
-- **The server plugin** keeps its replay cache in memory. After a SPIRE Server restart, it refuses every token issued before it started, so agents attesting right then are refused once, and succeed on their next attempt with a fresh token.
+- **The server plugin** keeps its replay cache in memory. After a SPIRE Server restart, it refuses every token issued before it started, so agents attesting right then are refused at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default), and succeed by themselves afterwards.
 - **The agent plugin** holds only the ID of the last token it presented.
 
 Nothing needs backing up, apart from the configuration files, certificates and credentials.

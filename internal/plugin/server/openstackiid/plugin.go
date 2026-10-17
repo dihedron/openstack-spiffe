@@ -16,6 +16,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
+	agentstorev1 "github.com/spiffe/spire-plugin-sdk/proto/spire/hostservice/server/agentstore/v1"
 	nodeattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/nodeattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
@@ -38,7 +39,8 @@ const maxPayloadBytes = iid.MaxTokenBytes + 1024
 var trustDomainPattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 var (
-	_ pluginsdk.NeedsLogger = (*Plugin)(nil)
+	_ pluginsdk.NeedsLogger       = (*Plugin)(nil)
+	_ pluginsdk.NeedsHostServices = (*Plugin)(nil)
 )
 
 // Config is the plugin_data block of the server configuration.
@@ -123,6 +125,11 @@ type Plugin struct {
 
 	mu       sync.RWMutex
 	settings *settings
+	// store is SPIRE Server's AgentStore host service, which trust on first
+	// use needs (reattest = false); hasStore is false when SPIRE Server did
+	// not provide it
+	store    agentstorev1.AgentStoreServiceClient
+	hasStore bool
 
 	// logMu guards the logging setup: the handler records go to (SPIRE's
 	// log, through hclog) and the syslog audit sink, if any.
@@ -148,6 +155,16 @@ func New() *Plugin {
 		replay:    newReplayCache(maxReplayEntries, processStart),
 		reattests: newReattestTracker(maxTrackedInstances),
 	}
+}
+
+// BrokerHostServices takes SPIRE Server's AgentStore host service, which
+// reattest = false needs: SPIRE leaves trust on first use to the node
+// attestor (S-4, E-4).
+func (p *Plugin) BrokerHostServices(broker pluginsdk.ServiceBroker) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hasStore = broker.BrokerClient(&p.store)
+	return nil
 }
 
 // SetLogger routes the plugin's logs, and those of log/slog, to SPIRE.
@@ -217,6 +234,14 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 	s, err := p.parseConfig(req)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	p.mu.RLock()
+	hasStore := p.hasStore
+	p.mu.RUnlock()
+	if !s.reattest && !hasStore {
+		s.keys.close()
+		// a TOFU mode the plugin could not enforce would be worse than none
+		return nil, status.Errorf(codes.InvalidArgument, "%v: reattest = false needs SPIRE Server's AgentStore host service, which it did not provide", config.ErrInvalid)
 	}
 	if err := p.applyAudit(s.audit); err != nil {
 		s.keys.close()
@@ -490,6 +515,14 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Hea
 		return iid.Header{}, iid.Claims{}, status.Errorf(codes.PermissionDenied, "attestation rejected: project %s is not in allowed_project_ids", claims.ProjectID)
 	}
 
+	// TOFU last but the replay cache: only verified tokens reach the host
+	// service, and a refused attempt does not burn its jti
+	if !s.reattest {
+		if err := p.firstAttestation(ctx, log, SPIFFEID(s.trustDomain, claims), claims); err != nil {
+			return iid.Header{}, iid.Claims{}, err
+		}
+	}
+
 	if err := p.replay.record(claims, now, s.skew); err != nil {
 		switch {
 		case errors.Is(err, ErrReplayCacheFull):
@@ -503,6 +536,31 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Hea
 		}
 	}
 	return header, claims, nil
+}
+
+// firstAttestation enforces trust on first use (reattest = false, S-4,
+// E-4): it refuses an agent ID SPIRE Server already holds, until an
+// operator evicts it. SPIRE Server does not refuse it on CanReattest =
+// false, which only makes it renew the agent's SVID without attesting
+// again.
+func (p *Plugin) firstAttestation(ctx context.Context, log *slog.Logger, agentID string, claims iid.Claims) error {
+	p.mu.RLock()
+	store := p.store
+	p.mu.RUnlock()
+	_, err := store.GetAgentInfo(ctx, &agentstorev1.GetAgentInfoRequest{AgentId: agentID})
+	switch status.Code(err) {
+	case codes.NotFound:
+		return nil
+	case codes.OK:
+		// the token's jti ties the refusal to the Nova call that produced
+		// it: a refused second presenter is a likely token theft
+		log.WarnContext(ctx, "attestation refused: agent already attested and reattest is false", syslog.AuditKey, "reattest_refused",
+			"spiffe_id", agentID, "jti", claims.ID)
+		return status.Errorf(codes.PermissionDenied, "attestation rejected: agent %s is already attested and reattest is false: evict it to attest again", agentID)
+	default:
+		log.ErrorContext(ctx, "attestation rejected: checking whether the agent is attested", "spiffe_id", agentID, "error", err)
+		return status.Errorf(codes.Unavailable, "attestation rejected: checking whether the agent is attested: %v", err)
+	}
 }
 
 // kidAttributes returns the log attributes describing a token's kid: the kid

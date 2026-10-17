@@ -46,7 +46,7 @@ Restart the replica: it discards its key and generates a new one. Use this on su
 
 ## Evicting agents
 
-With `reattest = false` in the server plugin, an agent that lost its state cannot attest again until evicted, and a deleted instance's agent identity lasts until evicted or expired:
+With `reattest = false` in the server plugin, an agent that lost its state cannot attest again until evicted (it is refused with `... is already attested and reattest is false: evict it to attest again`), and a deleted instance's agent identity lasts until evicted or expired:
 
 ```bash
 spire-server agent list

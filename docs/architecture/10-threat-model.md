@@ -124,7 +124,7 @@ Each threat below has one of these statuses, after every control described in th
 | D-5 | The unauthenticated key set and health endpoints flooded | Their own per-source limit, separate from `/attest`'s; precomputed readiness | Mitigated |
 | D-6 | The server plugin flooded with tokens carrying invented key IDs, or its replay cache saturated | Refetches rate-limited; malformed key IDs rejected before any fetch; only fully verified tokens enter the bounded cache, which fails closed | Mitigated: saturation would need about 240 valid tokens per second |
 | D-7 | The key set endpoint unreachable beyond the stale key retention | The last known keys kept for 5 minutes, then every attestation refused | Accepted: unavailability is never a reason to loosen verification |
-| D-8 | Agents refused once after a SPIRE Server restart (the startup watermark) | The agent's next attempt carries a fresh token | Accepted: a documented cost |
+| D-8 | Agents refused after a SPIRE Server restart (the startup watermark), at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default) | SPIRE Agent retries by itself, and succeeds with a token minted after the window | Accepted: a documented cost |
 | D-9 | Oversized vendordata or attestation payloads | A 1 MiB vendordata cap; the token size limit; a payload cap | Mitigated |
 | D-10 | Metrics scrapes, or series of unbounded cardinality, exhausting a signer | A separate, rate-limited metrics listener; closed attribute sets; a cap on per-project series; exporters never block issuance | Mitigated |
 

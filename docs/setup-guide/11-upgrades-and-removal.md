@@ -28,7 +28,7 @@ sudo -u openstack-spire-issuer openstack-spire-issuer config check --signer /etc
 
 The plugins' packages do not restart SPIRE. After upgrading, update `plugin_checksum` with the new binary's SHA-256 and restart SPIRE Server, or, for the agent plugin, roll out the new image.
 
-After a SPIRE Server restart, its plugin refuses tokens issued before it started, since it no longer knows which ones it already accepted. Agents attesting right then are refused once, and succeed on their next attempt with a fresh token.
+After a SPIRE Server restart, its plugin refuses tokens issued before it started, since it no longer knows which ones it already accepted. Agents attesting right then are refused at every attempt for `clock_skew_tolerance` plus Nova's cache window (about 45 seconds by default), and succeed by themselves once Nova serves them a token minted after the restart.
 
 ## Removal
 
