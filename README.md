@@ -289,11 +289,14 @@ test/lab/lab.sh preflight    # check the machine; installs missing software afte
 test/lab/lab.sh up           # build the lab (about 15 minutes) and snapshot it
 test/lab/lab.sh deploy       # build the packages here and install them on the VMs (about 3 minutes)
 test/lab/lab.sh test         # run the acceptance tests (about 20 minutes; -long adds key rotation)
+test/lab/lab.sh stress       # reset, deploy, then boot, restart and delete instances in parallel for an hour
 test/lab/lab.sh reset        # return to the snapshot in under a minute, then deploy again
 test/lab/lab.sh down         # remove everything but the download cache
 ```
 
 `status`, `ssh <vm>` and `logs <vm> [unit]` inspect it. Nothing is compiled in the VMs: `deploy` installs the baseline amd64 packages that `make snapshot` builds on the lab host.
+
+`stress` is the soak and stress test ([.specs/openstack-spire-stress-test.md](.specs/openstack-spire-stress-test.md)): for `--duration` (default `1h`) it keeps as many instances cycling as the lab holds, checks every node attestation and every workload SVID, follows the services' journals for run-wide inconsistencies, and logs each failure with its evidence before carrying on. Its report, records and evidence go to `test/lab/.state/stress/<time>/`; it exits non-zero when an attestation failed. `stress --help` lists its options (`--chaos` restarts services during the run, `--tofu` runs with `reattest = false`), `stress --self-test` checks that the harness detects injected faults, and `stress --cleanup` undoes an interrupted run.
 
 ## Documents
 

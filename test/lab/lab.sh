@@ -44,6 +44,12 @@ commands:
                             VMs, configured for the lab
   test [-run REGEX] [-long] run the acceptance tests (-long: also the long
                             scenarios, e.g. key rotation)
+  stress [options]          reset, build and deploy, then boot, stop, start
+                            and delete instances in parallel for --duration
+                            (default 1h), checking every node and workload
+                            attestation (stress --help: the options;
+                            stress --self-test: check the harness itself;
+                            stress --cleanup: undo an interrupted run)
   help                      show this help
 
 VMs: ${LAB_VMS[*]}
@@ -207,6 +213,18 @@ cmd_test() {
 	LAB_STATE_DIR="$LAB_STATE_DIR" LAB_LONG="$long" go test -tags lab -count=1 -v -timeout 90m "${args[@]}" .
 }
 
+# cmd_stress: the stress test (.specs/openstack-spire-stress-test.md), a Go
+# program behind the lab build tag; it runs reset and deploy itself.
+cmd_stress() {
+	local verb=run
+	if [[ "${1:-}" == --cleanup ]]; then
+		verb=cleanup
+		shift
+	fi
+	cd "$REPO_DIR"
+	LAB_DIR="$LAB_DIR" LAB_STATE_DIR="$LAB_STATE_DIR" go run -tags lab ./test/lab/stress "$verb" "$@"
+}
+
 main() {
 	local command="${1:-help}"
 	shift || true
@@ -234,6 +252,10 @@ main() {
 	test)
 		require_state
 		cmd_test "$@"
+		;;
+	stress)
+		require_state
+		cmd_stress "$@"
 		;;
 	help | -h | --help) usage ;;
 	*)

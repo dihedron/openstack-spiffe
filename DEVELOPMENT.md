@@ -76,7 +76,8 @@ go test ./...                       # unit and integration tests (in-process ser
 go test -race ./...                 # the same, with the race detector
 go test -cpu 1,2 ./...              # the same on one and two CPUs, like CI runners: before pushing
 golangci-lint run ./...             # lint; --new-from-rev=HEAD for your changes only
-golangci-lint run --build-tags lab ./test/lab/acceptance   # the lab's tests are behind a build tag
+golangci-lint run --build-tags lab ./test/lab/...          # the lab's tests and stress test are behind a build tag
+go test -tags lab ./test/lab/stress  # the stress test's unit tests: no lab needed
 docker run --rm -v "$PWD:/mnt" -w /mnt/test/lab koalaman/shellcheck:stable -x -P lib lab.sh lib/*.sh
 make lint                           # gofmt, go vet and golangci-lint with gosec, as CI runs them
 make                                # a development build for this machine (dist/); lints first

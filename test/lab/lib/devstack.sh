@@ -300,6 +300,33 @@ devstack_images() {
 	done
 }
 
+# devstack_compute_config: Nova stops instances as a production cloud does,
+# with a clean shutdown of up to a minute (Nova's default) before powering
+# them off. DevStack sets shutdown_timeout to 0, an immediate power-off,
+# which loses what a guest has not written to its disk yet: an Ubuntu guest
+# stopped in its first minute loses the SSH host keys cloud-init generated,
+# and its agent may lose its SVID (the stress test's restart cycles).
+devstack_compute_config() {
+	info "configuring Nova to stop instances cleanly (shutdown_timeout 60)"
+	vm_ssh devstack "sudo bash -s -- $(printf '%q ' "$DEVSTACK_DIR")" <<'SCRIPT'
+set -euo pipefail
+dir="$1"
+# shellcheck disable=SC1091
+source "$dir/inc/ini-config"
+changed=""
+for conf in /etc/nova/nova.conf /etc/nova/nova-cpu.conf; do
+	[[ -f "$conf" ]] || continue
+	if [[ "$(iniget "$conf" DEFAULT shutdown_timeout)" != 60 ]]; then
+		iniset -sudo "$conf" DEFAULT shutdown_timeout 60
+		changed=1
+	fi
+done
+if [[ -n "$changed" ]]; then
+	systemctl restart devstack@n-cpu.service
+fi
+SCRIPT
+}
+
 # devstack_guest_access: the flavor of the guests, and the lab's SSH key and
 # SSH and ICMP access in the demo project, where the tests boot them.
 devstack_guest_access() {
@@ -332,6 +359,7 @@ devstack_configure() {
 	devstack_users
 	devstack_ca
 	devstack_vendordata_config
+	devstack_compute_config
 	devstack_images
 	devstack_guest_access
 }
