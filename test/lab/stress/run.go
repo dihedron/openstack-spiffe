@@ -506,15 +506,17 @@ func (r *stressRun) readinessLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		now := time.Now()
 		for _, vm := range []string{"issuer-a", "issuer-b"} {
+			probed := time.Now()
 			err := r.kit.IssuerReady(ctx, vm)
 			if ctx.Err() != nil {
 				return
 			}
+			// a fault that began while the probe ran explains it too
+			now := time.Now()
 			explained := false
 			for _, w := range r.faults.Windows() {
-				if faultVM[w.Fault] == vm && w.contains(now) {
+				if faultVM[w.Fault] == vm && (w.contains(probed) || w.contains(now)) {
 					explained = true
 				}
 			}
