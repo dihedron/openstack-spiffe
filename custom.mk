@@ -6,14 +6,29 @@
 #
 .DEFAULT_GOAL := compile
 
+# GOLANGCI_LINT_VERSION is the golangci-lint the lint target expects: the one
+# CI runs (.github/workflows/ci.yml)
+GOLANGCI_LINT_VERSION := 2.14
+
+.PHONY: lint
+lint: ## check that the code is clean (gofmt, go vet, golangci-lint); every build runs it first
+	@echo "Checking the code..."
+	@unformatted="$$(gofmt -l cmd internal pkg test)"; \
+		if [ -n "$$unformatted" ]; then echo "not formatted with gofmt (run gofmt -w):" >&2; echo "$$unformatted" >&2; exit 1; fi
+	@go vet ./...
+	@go vet -tags lab ./test/lab/...
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint is not installed: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION).0" >&2; exit 1; }
+	@golangci-lint version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION)\." || echo "warning: golangci-lint is not v$(GOLANGCI_LINT_VERSION), which CI runs: its findings may differ" >&2
+	@golangci-lint run --build-tags lab ./...
+
 .PHONY: compile
-compile: go-dev ## build for the default linux/amd64 platform
+compile: lint go-dev ## build for the default linux/amd64 platform
 
 .PHONY: snapshot
-snapshot: signing-check go-snapshot ## build a snapshot version for the supported platforms (signed if GPG_FINGERPRINT and GPG_KEY_FILE are set)
+snapshot: signing-check lint go-snapshot ## build a snapshot version for the supported platforms (signed if GPG_FINGERPRINT and GPG_KEY_FILE are set)
 
 .PHONY: release
-release: signing-check ## build a release version (requires a valid tag and the packaging key), documents included
+release: signing-check lint ## build a release version (requires a valid tag and the packaging key), documents included
 	@test -n "$(GPG_FINGERPRINT)" || { echo "a release must be signed: set GPG_FINGERPRINT and GPG_KEY_FILE" >&2; exit 1; }
 	@DOCS_VERSION="$$(git describe --tags --exact-match)" docs/build.sh
 	@$(MAKE) --no-print-directory go-release

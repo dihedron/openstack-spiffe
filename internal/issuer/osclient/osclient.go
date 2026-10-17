@@ -188,7 +188,7 @@ func New(ctx context.Context, creds Credentials, caCertPath string, opts ...Opti
 	}
 	tlsConfig := &tls.Config{MinVersion: o.minTLSVersion}
 	if caCertPath != "" {
-		pem, err := os.ReadFile(caCertPath)
+		pem, err := os.ReadFile(caCertPath) //nolint:gosec // G304: the CA bundle the operator configures
 		if err != nil {
 			return nil, fmt.Errorf("reading OpenStack CA bundle: %w", err)
 		}

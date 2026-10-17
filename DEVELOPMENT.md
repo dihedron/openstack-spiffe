@@ -22,7 +22,7 @@ The [lab](#the-lab) is a different matter. It runs DevStack and three more VMs, 
 | git, make, curl, bash | any recent | the build |
 | goreleaser | v2 | `make`, `make snapshot`, `make release`: binaries, archives, deb and rpm packages |
 | syft | any recent | the SBOMs `make snapshot` generates |
-| golangci-lint | v2 (CI runs v2) | lint |
+| golangci-lint | v2.14 (CI runs it; `make lint` warns on another version) | lint, before every build |
 | gpg | 2.2 or later | signed builds, the packaging key, the lab |
 | shellcheck | any recent, or docker to run `koalaman/shellcheck:stable` | the lab's and packaging scripts |
 | Docker or Podman | any recent | `make docs`: the release documents build in pinned pandoc and mermaid-cli images |
@@ -78,7 +78,8 @@ go test -cpu 1,2 ./...              # the same on one and two CPUs, like CI runn
 golangci-lint run ./...             # lint; --new-from-rev=HEAD for your changes only
 golangci-lint run --build-tags lab ./test/lab/acceptance   # the lab's tests are behind a build tag
 docker run --rm -v "$PWD:/mnt" -w /mnt/test/lab koalaman/shellcheck:stable -x -P lib lab.sh lib/*.sh
-make                                # a development build for this machine (dist/)
+make lint                           # gofmt, go vet and golangci-lint with gosec, as CI runs them
+make                                # a development build for this machine (dist/); lints first
 make snapshot                       # every platform, archive and package, unsigned
 make checksum                       # the plugins' SHA-256, for plugin_checksum
 make docs                           # the release documents (PDF) into build/docs/: needs docker or podman

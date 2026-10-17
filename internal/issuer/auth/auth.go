@@ -21,7 +21,7 @@ import (
 )
 
 // TokenHeader is the header carrying the caller's Keystone token.
-const TokenHeader = "X-Auth-Token"
+const TokenHeader = "X-Auth-Token" //nolint:gosec // G101: a header name, not a credential
 
 var (
 	// ErrMissingToken is returned when the request carries no token (401).

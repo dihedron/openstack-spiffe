@@ -13,3 +13,16 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+
+  # the workflows' actions, pinned by commit SHA with the version in a
+  # comment: Dependabot moves the SHA and the comment together; minor and
+  # patch updates come in one pull request, each major in its own
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions-minor:
+        update-types:
+          - "minor"
+          - "patch"

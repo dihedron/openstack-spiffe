@@ -1,46 +1,112 @@
-name: Continuous Build
+name: CI
+
+# One workflow, three parallel jobs: the build (gofmt, go vet,
+# golangci-lint with gosec, compile, tests and coverage, all through
+# "make"), the secret scans, and, on pull requests, the dependency review.
+# Jobs run side by side on their own runners, so the run takes as long as
+# the slowest of them; CodeQL, the documents and releases keep workflows
+# of their own (other triggers and permissions).
+#
+# Branch pushes run the build and the scans; their checks show on a pull
+# request for the same commit, so pull requests only add the dependency
+# review. The daily schedule re-runs the secret scans with current rules.
 
 on:
   push:
     branches:
       - "**"
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  
+
 permissions:
   contents: read
-  pull-requests: write
+
+# a newer push to the same branch cancels the run it supersedes, except on
+# main, where every commit keeps its run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
+    name: Build and test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # git describe stamps the version
 
       - name: Set up Go compiler
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
 
-      - name: Ensure GoReleaser is installed
-        uses: goreleaser/goreleaser-action@v5
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@5742e2a039330cbb23ebf35f046f814d4c6ff811 # v5.1.0
         with:
           distribution: goreleaser
           version: "~> v2"
           install-only: true
 
-      - name: Run Makefile target
+      - name: Install golangci-lint (make lint, before every build)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14
+          install-only: true
+
+      - name: Lint and build
         run: make
+
+      - name: Test with coverage
+        run: go test ./... -coverprofile=coverage.txt
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  secrets:
+    name: Secret scans
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0 # both scanners read the whole history
+
+      # the default rules; false positives carry an inline gitleaks:allow
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Test and produce Go code coverage report
-        run: go test ./... -coverprofile=coverage.txt
-
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+      # reports only secrets it can verify as live, or cannot rule out
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9 # v3.99.2
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          base: ""
+          head: ${{ github.ref_name }}
+          extra_args: --results=verified,unknown
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high

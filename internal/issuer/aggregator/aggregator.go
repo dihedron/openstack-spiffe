@@ -54,7 +54,7 @@ func NewHTTPClient(caCertPath string, minTLSVersion uint16) (*http.Client, error
 	}
 	tlsConfig := &tls.Config{MinVersion: minTLSVersion}
 	if caCertPath != "" {
-		pem, err := os.ReadFile(caCertPath)
+		pem, err := os.ReadFile(caCertPath) //nolint:gosec // G304: the CA bundle the operator configures
 		if err != nil {
 			return nil, fmt.Errorf("reading replica CA bundle: %w", err)
 		}

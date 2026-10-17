@@ -144,7 +144,7 @@ func (m *Metrics) ObserveKeys(read func() KeyState) error {
 		if !k.ActiveSince.IsZero() {
 			o.ObserveFloat64(s.activeAge, time.Since(k.ActiveSince).Seconds())
 		}
-		o.ObserveInt64(s.rotations, int64(k.Rotations))
+		o.ObserveInt64(s.rotations, int64(k.Rotations)) //nolint:gosec // G115: a count, far below 2^63
 		return nil
 	}, s.keys, s.activeAge, s.rotations)
 }
@@ -159,7 +159,7 @@ func (m *Metrics) ObserveFetches(read func() []PeerFetches) error {
 		for _, p := range read() {
 			peer := attribute.String("peer", p.Peer)
 			for result, n := range map[string]uint64{ResultOK: p.OK, ResultError: p.Error, "invalid": p.Invalid} {
-				o.ObserveInt64(s.fetches, int64(n), metric.WithAttributes(peer, attribute.String("result", result)))
+				o.ObserveInt64(s.fetches, int64(n), metric.WithAttributes(peer, attribute.String("result", result))) //nolint:gosec // G115: a count, far below 2^63
 			}
 			if !p.LastSuccess.IsZero() {
 				o.ObserveFloat64(s.fetchAge, time.Since(p.LastSuccess).Seconds(), metric.WithAttributes(peer))
@@ -197,7 +197,7 @@ func (m *Metrics) ObserveLimiter(name string, read func() LimiterState) error {
 	return m.observe(func(_ context.Context, o metric.Observer) error {
 		l := read()
 		attrs := metric.WithAttributes(attribute.String("limiter", name))
-		o.ObserveInt64(s.limiterRejected, int64(l.Rejections), attrs)
+		o.ObserveInt64(s.limiterRejected, int64(l.Rejections), attrs) //nolint:gosec // G115: a count, far below 2^63
 		o.ObserveInt64(s.limiterTracked, int64(l.Tracked), attrs)
 		return nil
 	}, s.limiterRejected, s.limiterTracked)
@@ -211,7 +211,7 @@ func (m *Metrics) ObserveSyslog(read func() SyslogState) error {
 	s := m.state
 	return m.observe(func(_ context.Context, o metric.Observer) error {
 		st := read()
-		o.ObserveInt64(s.syslogDropped, int64(st.Dropped))
+		o.ObserveInt64(s.syslogDropped, int64(st.Dropped)) //nolint:gosec // G115: a count, far below 2^63
 		o.ObserveInt64(s.syslogQueued, int64(st.Queued))
 		return nil
 	}, s.syslogDropped, s.syslogQueued)
