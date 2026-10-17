@@ -27,8 +27,13 @@ verify_checksums() {
 	gpg --dearmor <"$(pki_dir)/packaging-key.pub.asc" >"$keyring"
 	gpgv --keyring "$keyring" "${checksums[0]}.asc" "${checksums[0]}" 2>/dev/null ||
 		die "the signature of ${checksums[0]##*/} does not verify"
-	(cd "$REPO_DIR/dist" && sha256sum --check --quiet --strict "${checksums[0]##*/}") ||
+	# the release documents, when built (make docs), are covered from build/docs/
+	(cd "$REPO_DIR/dist" && grep -v '\.pdf$' "${checksums[0]}" | sha256sum --check --quiet --strict -) ||
 		die "dist/ does not match ${checksums[0]##*/}"
+	if grep -q '\.pdf$' "${checksums[0]}"; then
+		(cd "$REPO_DIR/build/docs" && grep '\.pdf$' "${checksums[0]}" | sha256sum --check --quiet --strict -) ||
+			die "build/docs/ does not match ${checksums[0]##*/}"
+	fi
 	info "verified the signed ${checksums[0]##*/}"
 }
 
@@ -327,6 +332,9 @@ readonly ARTIFACTS=/srv/lab-artifacts
 readonly ARTIFACTS_PORT=8080
 # the OpenTelemetry Collector's OTLP/HTTP port on spire (MET-2)
 readonly OTELCOL_PORT=4318
+# the guests' workload users, for the stress test's registration entries
+readonly STRESS_WORKLOAD_UID=2000
+readonly STRESS_OUTSIDER_UID=2001
 
 spire_tarball() {
 	fetch "$(spire_url "$(env_get .versions.spire)")" "$(env_get .versions.spire_sha256)"
@@ -483,6 +491,16 @@ users:
     system: true
     homedir: /var/lib/spire
     shell: /usr/sbin/nologin
+  # the stress test's workloads: one with a registration entry, one without
+  # (.specs/openstack-spire-stress-test.md, workload attestation)
+  - name: workload
+    uid: $STRESS_WORKLOAD_UID
+    shell: /bin/sh
+    lock_passwd: true
+  - name: outsider
+    uid: $STRESS_OUTSIDER_UID
+    shell: /bin/sh
+    lock_passwd: true
 $([[ "$os" == ubuntu ]] || printf 'packages:\n  - nftables\n')
 write_files:
   - path: /etc/openstack-metadata.nft
@@ -562,6 +580,8 @@ lab_deploy() {
 	# idempotent: also brings a lab restored from an older snapshot up to date
 	devstack_guest_access
 	devstack_vendordata_config
+	devstack_compute_config
+	devstack_wait_compute
 	section "Build"
 	deploy_build
 	section "Metrics"

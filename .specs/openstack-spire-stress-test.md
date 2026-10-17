@@ -86,7 +86,7 @@ The report records the bounds in effect, and its latency table shows how close e
 **`restart`** (an identity that survives a stop):
 1. Boot and check as in `create`, steps 1 to 3, recording the agent's SVID serial number.
 2. Stop the instance (`openstack server stop`, bound: 2 minutes to `SHUTOFF`), wait for the `--hold` time, start it again (bound: 3 minutes to `ACTIVE`).
-3. The agent comes back: within 3 minutes it serves identities again (step 3 of `create`). While its persisted SVID is valid, SPIRE Agent does not attest the node again, so the same serial is expected and there must be no new `agent_attested` record. If the SVID expired while the instance was stopped, a single new node attestation with a fresh token is acceptable. In either case, at most one "token already used" rejection is acceptable (the plugins spec's freshness bound).
+3. The agent comes back: within 3 minutes it serves identities again (step 3 of `create`). While its persisted SVID is valid, SPIRE Agent does not attest the node again, so the same serial is expected and there must be no new `agent_attested` record. If the SVID expired while the instance was stopped, or was past half its lifetime (when SPIRE Agent renews it, by attesting again when it can), a single new node attestation with a fresh token is acceptable. In either case, at most one "token already used" rejection is acceptable (the plugins spec's freshness bound).
 4. Delete and evict as in `create`, step 5.
 
 The scheduler picks each new cycle's kind by the `--mix` weights and alternates the distros, using the run's seed.
@@ -114,7 +114,7 @@ The scheduler picks each new cycle's kind by the `--mix` weights and alternates 
 
 Faults are drawn with the run's seed, at random times, at least 10 minutes apart, with none in the first or last 10 minutes of the run. The report lists them with their times. From the start of a fault until one minute after the service is healthy again:
 - each step's bound is extended by how long the service was down;
-- for a SPIRE Server restart, each agent may get at most one transient rejection ("token minted before the plugin started" or "token already used") before it succeeds;
+- for a SPIRE Server restart, the "token issued before this server started" rejections inside the window are expected: the startup watermark refuses every attempt for the plugin's `clock_skew_tolerance` (30 seconds by default) after its start, not only the first, as the first self-test found; each agent may also get one more "token already used" rejection, since the restart empties the replay cache;
 - the observer and the in-guest checks tolerate SPIRE Server being unreachable while it restarts, recording it as an expected `harness` event, not a failure.
 
 `--chaos` combines with `--rotation`, which covers key rotation: the issuer has no command to rotate keys on demand, and rotations on a short interval exercise the same path.
@@ -138,7 +138,10 @@ All guests run nested inside the `devstack` VM (24 GiB by default), so the bindi
 - what Placement says the compute host can still hold of the `lab.guest` flavor (VCPU, MEMORY_MB, DISK_GB), with its allocation ratios;
 - what the `devstack` VM's `MemAvailable` holds, minus a 3 GiB margin, divided by the flavor's RAM: Placement counts allocations, not what DevStack's own services actually use;
 - the lab host's `MemAvailable`, minus 4 GiB, must stay positive, and its load average below its CPU count; otherwise the target drops by one;
-- `--max-parallel`.
+- `--max-parallel`;
+- the compute host's total slots for the flavor, less the kept failures: the free slots and the running instances are read seconds apart, so an instance deleted in between would otherwise count twice.
+
+The running instances are the cycles' own: an instance in `ERROR` holds no allocation, and a kept failure's capacity is not the cycles' to use. Failures of class `capacity` are never kept, since their instance never ran.
 
 The harness computes the target at the start and again every minute while it runs, and moves it by at most one per minute in either direction. A `NoValidHost` failure at boot also lowers it by one. Such a failure is recorded as class `capacity`, not as an attestation failure. With the defaults this gives about 4 to 6 parallel cycles; a larger `LAB_DEVSTACK_RAM_GIB` gives more. The report records the target over time and the highest value reached.
 
@@ -168,7 +171,7 @@ A failure is classed by its first failing step and what the logs say about it. A
 - No `error`-level record from either issuer or the server plugin, except for those that explain a failure already recorded in another class.
 - Both issuers stay ready: `/readiness` is polled every 30 seconds; a non-ready answer is a failure with its reason.
 - Resource drift: the RSS of both signers and of SPIRE Server is sampled every minute. A sustained growth (a linear fit over the last half of the run, above 10% of the starting value per hour) is reported as a `warning` in the report, not a failure: an hour is too short to tell a leak from a cache filling up. Longer runs make it meaningful.
-- Counters agree: the issuers' `openstack_spire_tokens_issued_total` (from `issuer-a`'s Prometheus endpoint, and `issuer-b`'s collector output) has grown by the number of `token_issued` records during the run.
+- Counters agree: `issuer-a`'s `openstack_spire_tokens_issued_total` (from its Prometheus endpoint) has grown by the number of its `token_issued` records during the run. Nova calls only `issuer-a`, so `issuer-b` issues no token in a run, and its OTLP output is not compared. The check is skipped when `issuer-a` restarted during the run (the self-test), since its counter restarts too.
 
 **Evidence** for each failure, in `failures/<cycle>/`: the instance's console log (`openstack console log show`), the guest's `spire-agent` and `cloud-init` journals when the guest is reachable, the issuers', SPIRE Server's and `nova-api-metadata`'s journal lines for the instance's ID and `jti`s around the failure, the output of `spire-server agent show`, and the step's own output. A failed instance is kept, up to `--keep-failed`, with its name in the report, for `lab.sh ssh` inspection; `lab.sh stress --cleanup` deletes kept instances later.
 
@@ -203,7 +206,7 @@ The scheduler, classification, run-wide checks and report sit behind an interfac
 
 - **ST-1, unit tests (no lab)**: the scheduler never exceeds the target and adjusts it as specified; a seed reproduces the same cycle sequence; each failure example in the classes table, fed to the classifier from recorded outputs, gets its class; the run-wide checks flag an `agent_attested` without a matching `token_issued`, a duplicate `jti`, a `reattest_alert` on a `create` cycle, and pass on the clean case; the exit status follows the verdict; `--bound` overrides only the named steps and refuses unknown names and non-positive durations.
 - **ST-2, clean run**: `lab.sh stress --duration 30m` on a freshly reset lab completes with exit status 0, at least 2 parallel cycles reached, both cycle kinds and both distros run, and leaves no `stress-` instance, registration entry, quota change or issuer configuration change behind.
-- **ST-3, the harness sees failures** (self-test, `lab.sh stress --self-test`, a short run that injects known faults and expects them to be found): stopping `issuer-a` for 3 minutes produces `node` failures for the cycles attesting meanwhile, with evidence naming the refused vendordata call, and the run recovers afterwards. Removing the workload entry produces `workload` failures. Restarting SPIRE Server (which clears the plugin's replay and re-attestation caches) does not produce false `invariant` failures.
+- **ST-3, the harness sees failures** (self-test, `lab.sh stress --self-test`, a short run that injects known faults and expects them to be found; unless given, it runs for 25 minutes, with an `attest` bound of 2 minutes so that the `issuer-a` outage outlasts it, and keeps no failed instance): stopping `issuer-a` for 3 minutes produces `node` failures for the cycles attesting meanwhile, with evidence naming the refused vendordata call, and the run recovers afterwards. Removing the workload entry produces `workload` failures. Restarting SPIRE Server (which clears the plugin's replay and re-attestation caches) does not produce false `invariant` failures.
 - **ST-4, interruption**: `SIGINT` during a run drains and tears down; a second `SIGINT` aborts and still tears down; `kill -9` followed by a new run cleans the leftovers in step 2.
 - **ST-5, TOFU**: `lab.sh stress --tofu --agent-ttl 15m --hold 5m-10m --duration 30m` exits with status 0 and reports at least one SVID renewal and no re-attestation. A deliberate re-attestation of an attested, non-evicted agent during it (the self-test's TOFU step: wiping a guest's agent data directory and restarting the agent) is refused and recognised as expected. `--agent-ttl 10m` is refused at start.
 - **ST-6, chaos**: `lab.sh stress --chaos --duration 1h` injects both faults at least once and exits with status 0. The unit tests also check that a failure inside a fault's window still counts against the verdict, and that the extended bounds and the single transient rejection are applied only inside the window.
