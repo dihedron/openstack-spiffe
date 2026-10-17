@@ -41,10 +41,17 @@ lab_snapshot() {
 }
 
 # lab_reset: returns every VM to the snapshot, then fixes their clocks, which
-# resume at the time of the snapshot, and checks DevStack.
+# resume at the time of the snapshot, and checks DevStack. A saved state
+# (lab.sh stop) is discarded: the snapshot wins.
 lab_reset() {
 	all_snapshots_exist || die "no snapshot of the whole lab: run lab.sh up (or lab.sh snapshot)"
 	local vm
+	for vm in "${LAB_VMS[@]}"; do
+		if vm_saved "$vm"; then
+			info "discarding the saved state of $vm"
+			vsh managedsave-remove "$(vm_domain "$vm")" >/dev/null
+		fi
+	done
 	for vm in "${LAB_VMS[@]}"; do
 		info "reverting $vm"
 		vsh snapshot-revert "$(vm_domain "$vm")" "$LAB_SNAPSHOT" --running >/dev/null
@@ -74,4 +81,91 @@ devstack_wait_compute() {
 		((SECONDS < deadline)) || die "Nova's compute service is not up after the revert (lab.sh logs devstack devstack@n-cpu)"
 		sleep 5
 	done
+}
+
+# --- Stop and start -------------------------------------------------------------
+# A session ends with "stop", which keeps the lab as it is, and resumes with
+# "start". libvirt's managed save writes each VM's memory and devices to its
+# save directory and stops it; starting the VM resumes it from there. A
+# shutdown would lose DevStack, which does not survive a cold boot.
+
+readonly LIBVIRT_SAVE_DIR=/var/lib/libvirt/qemu/save
+
+# vm_saved VM: whether VM is stopped with a saved state.
+vm_saved() {
+	[[ "$(vsh domstate --reason "$(vm_domain "$1")" 2>/dev/null)" == "shut off (saved)" ]]
+}
+
+# lab_saved: whether any VM of the lab is stopped with a saved state.
+lab_saved() {
+	local vm
+	for vm in "${LAB_VMS[@]}"; do
+		vm_saved "$vm" && return 0
+	done
+	return 1
+}
+
+# require_started: refuses a command that needs the VMs while the lab is
+# stopped.
+require_started() {
+	! lab_saved || die "the lab is stopped: run lab.sh start first"
+}
+
+# lab_stop: saves every running VM, after checking that libvirt's save
+# directory has room for their memory plus 10%.
+lab_stop() {
+	local vm running=() need_kib=0 avail_kib
+	for vm in "${LAB_VMS[@]}"; do
+		if [[ "$(vsh domstate "$(vm_domain "$vm")" 2>/dev/null)" == running ]]; then
+			running+=("$vm")
+			need_kib=$((need_kib + $(vsh dominfo "$(vm_domain "$vm")" | awk '/^Used memory:/ { print $3 }')))
+		fi
+	done
+	if ((${#running[@]} == 0)); then
+		if lab_saved; then
+			info "the lab is already stopped: lab.sh start resumes it"
+		else
+			info "no VM of the lab is running: nothing to save"
+		fi
+		return
+	fi
+	need_kib=$((need_kib * 110 / 100))
+	# the save directory itself is libvirt's, not readable by the user: the
+	# file system holding it
+	avail_kib="$(df --output=avail -k "$(dirname "$LIBVIRT_SAVE_DIR")" | tail -n1)"
+	((avail_kib >= need_kib)) ||
+		die "saving the VMs needs $((need_kib / 1024 / 1024)) GiB under $LIBVIRT_SAVE_DIR, $((avail_kib / 1024 / 1024)) GiB are free: free some space (nothing was saved)"
+	for vm in "${running[@]}"; do
+		info "saving $vm"
+		vsh managedsave "$(vm_domain "$vm")" >/dev/null || die "cannot save $vm (lab.sh status)"
+	done
+	info "the lab is stopped, as it was: lab.sh start resumes it"
+}
+
+# lab_start: resumes the saved VMs, then fixes their clocks, which resume at
+# the time they were saved, and checks DevStack, as lab_reset does.
+lab_start() {
+	local vm state saved=()
+	for vm in "${LAB_VMS[@]}"; do
+		state="$(vsh domstate "$(vm_domain "$vm")" 2>/dev/null)" || die "$vm does not exist: run lab.sh up"
+		if vm_saved "$vm"; then
+			saved+=("$vm")
+		elif [[ "$state" != running ]]; then
+			die "$vm is $state without a saved state, and DevStack does not survive a cold boot: run lab.sh reset"
+		fi
+	done
+	if ((${#saved[@]} == 0)); then
+		info "the lab is already running"
+		return
+	fi
+	for vm in "${saved[@]}"; do
+		info "resuming $vm"
+		vsh start "$(vm_domain "$vm")" >/dev/null || die "cannot resume $vm (lab.sh status)"
+	done
+	for vm in "${LAB_VMS[@]}"; do
+		set_clock "$vm"
+	done
+	devstack_wait_compute
+	devstack_smoke
+	info "the lab is running again, as it was stopped"
 }

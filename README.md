@@ -291,6 +291,8 @@ test/lab/lab.sh deploy       # build the packages here and install them on the V
 test/lab/lab.sh test         # run the acceptance tests (about 20 minutes; -long adds key rotation)
 test/lab/lab.sh stress       # reset, deploy, then boot, restart and delete instances in parallel for an hour
 test/lab/lab.sh reset        # return to the snapshot in under a minute, then deploy again
+test/lab/lab.sh stop         # end a session: save the VMs as they are, memory included
+test/lab/lab.sh start        # resume them where they stopped, in under a minute
 test/lab/lab.sh down         # remove everything but the download cache
 ```
 

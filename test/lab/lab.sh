@@ -40,6 +40,9 @@ commands:
   snapshot                  save the running lab as its baseline (up takes
                             one when there is none)
   reset                     return the lab to its baseline, in minutes
+  stop                      save the VMs as they are, memory included, and
+                            stop them: ends a session, keeping the lab
+  start                     resume the VMs saved by stop
   deploy                    build the packages here and install them on the
                             VMs, configured for the lab
   test [-run REGEX] [-long] run the acceptance tests (-long: also the long
@@ -109,6 +112,11 @@ cmd_up() {
 	resolve_versions
 	ensure_pki
 
+	if lab_saved; then
+		section "Start"
+		lab_start
+	fi
+
 	section "VMs"
 	ensure_pool
 	ensure_base_images
@@ -155,6 +163,7 @@ cmd_status() {
 	local vm state
 	for vm in "${LAB_VMS[@]}"; do
 		state="$(vsh domstate "$(vm_domain "$vm")" 2>/dev/null || echo absent)"
+		vm_saved "$vm" && state="saved (lab.sh start)"
 		printf '        %-9s %-12s %s\n' "$vm" "$(vm_ip "$vm")" "$state"
 	done
 	section "Snapshot"
@@ -235,26 +244,44 @@ main() {
 	up) cmd_up ;;
 	down) cmd_down ;;
 	status) cmd_status ;;
-	ssh) cmd_ssh "$@" ;;
-	logs) cmd_logs "$@" ;;
+	ssh)
+		require_started
+		cmd_ssh "$@"
+		;;
+	logs)
+		require_started
+		cmd_logs "$@"
+		;;
 	snapshot)
 		require_state
+		require_started
 		lab_snapshot
 		;;
 	reset)
 		require_state
 		lab_reset
 		;;
+	stop)
+		require_state
+		lab_stop
+		;;
+	start)
+		require_state
+		lab_start
+		;;
 	deploy)
 		require_state
+		require_started
 		lab_deploy
 		;;
 	test)
 		require_state
+		require_started
 		cmd_test "$@"
 		;;
 	stress)
 		require_state
+		require_started
 		cmd_stress "$@"
 		;;
 	help | -h | --help) usage ;;

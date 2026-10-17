@@ -243,6 +243,8 @@ destroy_all() {
 		vsh dominfo "$domain" >/dev/null 2>&1 || continue
 		info "destroying VM $vm"
 		vsh destroy "$domain" >/dev/null 2>&1 || true
+		# a saved state (lab.sh stop) goes with the VM
+		vsh managedsave-remove "$domain" >/dev/null 2>&1 || true
 		vsh undefine "$domain" --remove-all-storage --snapshots-metadata >/dev/null 2>&1 ||
 			vsh undefine "$domain" --snapshots-metadata >/dev/null
 	done

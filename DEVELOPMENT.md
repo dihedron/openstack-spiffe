@@ -103,6 +103,8 @@ test/lab/lab.sh reset && test/lab/lab.sh deploy && test/lab/lab.sh test [-run RE
 
 `deploy` builds the packages on the host, signed with a lab-only packaging key as CI signs a release. It verifies them, then installs them on the VMs. Nothing is compiled in the VMs.
 
+End a session with `test/lab/lab.sh stop`, which saves the VMs as they are, and resume it with `start`. A plain shutdown loses the lab: DevStack does not survive a cold boot, and only `reset` brings it back.
+
 ## Maintainers
 
 ### Releasing
