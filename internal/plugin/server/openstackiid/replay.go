@@ -29,20 +29,70 @@ var (
 // been accepted by a previous process, whose replay cache is lost.
 var processStart = time.Now()
 
+// errSetFull is returned by expiringSet.add when every key is unexpired.
+var errSetFull = errors.New("full")
+
+// expiringSet holds keys, each until its own expiry, up to a bound: the
+// replay cache's jtis and the TOFU reservations' agent IDs. It is safe for
+// concurrent use.
+type expiringSet struct {
+	max int
+
+	mu      sync.Mutex
+	entries map[string]time.Time // key -> expiry
+}
+
+func newExpiringSet(max int) *expiringSet {
+	return &expiringSet{max: max, entries: map[string]time.Time{}}
+}
+
+// add holds key until the given time and reports true, unless it is already
+// held (false). When the set is full, expired keys are purged first; if
+// none is, add fails with errSetFull and holds nothing.
+func (s *expiringSet) add(key string, until, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expiry, ok := s.entries[key]; ok && now.Before(expiry) {
+		return false, nil
+	}
+	if _, ok := s.entries[key]; !ok && len(s.entries) >= s.max {
+		for k, expiry := range s.entries {
+			if !now.Before(expiry) {
+				delete(s.entries, k)
+			}
+		}
+		if len(s.entries) >= s.max {
+			return false, errSetFull
+		}
+	}
+	s.entries[key] = until
+	return true, nil
+}
+
+// remove forgets key.
+func (s *expiringSet) remove(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, key)
+}
+
+func (s *expiringSet) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
 // replayCache accepts each token at most once. It is local to this SPIRE
 // Server process: HA servers do not share it (a documented limitation), and
 // the startup watermark covers what a restart forgets. It is safe for
 // concurrent use.
 type replayCache struct {
-	max   int
 	start time.Time
-
-	mu      sync.Mutex
-	entries map[string]time.Time // jti -> end of its acceptance window
+	jtis  *expiringSet // jti -> end of its acceptance window
 }
 
 func newReplayCache(max int, start time.Time) *replayCache {
-	return &replayCache{max: max, start: start, entries: map[string]time.Time{}}
+	return &replayCache{start: start, jtis: newExpiringSet(max)}
 }
 
 // record accepts the token's jti, unless the token was minted before the
@@ -55,27 +105,14 @@ func (r *replayCache) record(c iid.Claims, now time.Time, skew time.Duration) er
 	if time.Unix(c.IssuedAt, 0).Before(r.start.Add(skew)) {
 		return fmt.Errorf("%w (iat %d)", ErrIssuedBeforeStart, c.IssuedAt)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if until, ok := r.entries[c.ID]; ok && now.Before(until) {
+	added, err := r.jtis.add(c.ID, time.Unix(c.Expiry, 0).Add(skew), now)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w (%d entries)", ErrReplayCacheFull, r.jtis.max)
+	case !added:
 		return fmt.Errorf("%w (jti %s)", ErrReplayed, c.ID)
 	}
-	if _, ok := r.entries[c.ID]; !ok && len(r.entries) >= r.max {
-		for jti, until := range r.entries {
-			if !now.Before(until) {
-				delete(r.entries, jti)
-			}
-		}
-		if len(r.entries) >= r.max {
-			return fmt.Errorf("%w (%d entries)", ErrReplayCacheFull, len(r.entries))
-		}
-	}
-	r.entries[c.ID] = time.Unix(c.Expiry, 0).Add(skew)
 	return nil
 }
 
-func (r *replayCache) len() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.entries)
-}
+func (r *replayCache) len() int { return r.jtis.len() }

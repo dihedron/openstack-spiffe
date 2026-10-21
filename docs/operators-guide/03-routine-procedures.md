@@ -55,6 +55,8 @@ spire-server agent evict -spiffeID spiffe://<trust domain>/spire/agent/openstack
 
 Evict agents when their instances are deleted, or automate it from Nova's instance deletion notifications.
 
+An agent evicted within about 7 minutes of its first attestation (its token's lifetime plus twice `clock_skew_tolerance`) is still refused until that time has passed: the plugin holds each new agent ID for that long, so that two attestations arriving together cannot both pass.
+
 ## Upgrading
 
 Upgrade the issuer replicas before the server plugin, one replica at a time, as the *Setup Guide*'s *Upgrades and removal* describes.

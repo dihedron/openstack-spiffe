@@ -122,6 +122,10 @@ type Plugin struct {
 	// watermark.
 	replay    *replayCache
 	reattests *reattestTracker
+	// reservations hold the agent IDs attested with reattest = false until
+	// the end of their token's acceptance window, so that SPIRE Server has
+	// recorded the agent before another attestation of it gets past TOFU
+	reservations *expiringSet
 
 	mu       sync.RWMutex
 	settings *settings
@@ -151,9 +155,10 @@ const auditDrainTimeout = 5 * time.Second
 // New returns an unconfigured Plugin.
 func New() *Plugin {
 	return &Plugin{
-		now:       time.Now,
-		replay:    newReplayCache(maxReplayEntries, processStart),
-		reattests: newReattestTracker(maxTrackedInstances),
+		now:          time.Now,
+		replay:       newReplayCache(maxReplayEntries, processStart),
+		reattests:    newReattestTracker(maxTrackedInstances),
+		reservations: newExpiringSet(maxReplayEntries),
 	}
 }
 
@@ -476,9 +481,16 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 			"project_id", claims.ProjectID, "instance_id", claims.InstanceID,
 			"jti", claims.ID, "previous_jti", previous, "interval", interval.Round(time.Second).String())
 	}
-	return stream.Send(&nodeattestorv1.AttestResponse{
+	if err := stream.Send(&nodeattestorv1.AttestResponse{
 		Response: &nodeattestorv1.AttestResponse_AgentAttributes{AgentAttributes: attributes},
-	})
+	}); err != nil {
+		if !s.reattest {
+			// SPIRE Server never got the answer, so it records no agent
+			p.reservations.remove(attributes.SpiffeId)
+		}
+		return err
+	}
+	return nil
 }
 
 // verify runs every check on the token, the replay checks last so that
@@ -517,13 +529,17 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Hea
 
 	// TOFU last but the replay cache: only verified tokens reach the host
 	// service, and a refused attempt does not burn its jti
+	agentID := SPIFFEID(s.trustDomain, claims)
 	if !s.reattest {
-		if err := p.firstAttestation(ctx, log, SPIFFEID(s.trustDomain, claims), claims); err != nil {
+		if err := p.firstAttestation(ctx, log, agentID, claims, now, s.skew); err != nil {
 			return iid.Header{}, iid.Claims{}, err
 		}
 	}
 
 	if err := p.replay.record(claims, now, s.skew); err != nil {
+		if !s.reattest {
+			p.reservations.remove(agentID)
+		}
 		switch {
 		case errors.Is(err, ErrReplayCacheFull):
 			log.ErrorContext(ctx, "attestation rejected: replay cache full", "error", err)
@@ -542,25 +558,43 @@ func (p *Plugin) verify(ctx context.Context, s *settings, token string) (iid.Hea
 // E-4): it refuses an agent ID SPIRE Server already holds, until an
 // operator evicts it. SPIRE Server does not refuse it on CanReattest =
 // false, which only makes it renew the agent's SVID without attesting
-// again.
-func (p *Plugin) firstAttestation(ctx context.Context, log *slog.Logger, agentID string, claims iid.Claims) error {
+// again. SPIRE Server records the agent only once the plugin has answered,
+// so the agent ID is reserved first, until the end of the token's
+// acceptance window: a concurrent attestation of it is refused here, and
+// a refused one releases the reservation.
+func (p *Plugin) firstAttestation(ctx context.Context, log *slog.Logger, agentID string, claims iid.Claims, now time.Time, skew time.Duration) error {
+	added, err := p.reservations.add(agentID, time.Unix(claims.Expiry, 0).Add(skew), now)
+	switch {
+	case err != nil:
+		log.ErrorContext(ctx, "attestation rejected: TOFU reservations full", "spiffe_id", agentID)
+		return status.Errorf(codes.Unavailable, "attestation rejected: TOFU reservations full (%d entries)", p.reservations.max)
+	case !added:
+		return refuseAttested(ctx, log, agentID, claims)
+	}
 	p.mu.RLock()
 	store := p.store
 	p.mu.RUnlock()
-	_, err := store.GetAgentInfo(ctx, &agentstorev1.GetAgentInfoRequest{AgentId: agentID})
+	_, err = store.GetAgentInfo(ctx, &agentstorev1.GetAgentInfoRequest{AgentId: agentID})
 	switch status.Code(err) {
 	case codes.NotFound:
 		return nil
 	case codes.OK:
-		// the token's jti ties the refusal to the Nova call that produced
-		// it: a refused second presenter is a likely token theft
-		log.WarnContext(ctx, "attestation refused: agent already attested and reattest is false", syslog.AuditKey, "reattest_refused",
-			"spiffe_id", agentID, "jti", claims.ID)
-		return status.Errorf(codes.PermissionDenied, "attestation rejected: agent %s is already attested and reattest is false: evict it to attest again", agentID)
+		p.reservations.remove(agentID)
+		return refuseAttested(ctx, log, agentID, claims)
 	default:
+		p.reservations.remove(agentID)
 		log.ErrorContext(ctx, "attestation rejected: checking whether the agent is attested", "spiffe_id", agentID, "error", err)
 		return status.Errorf(codes.Unavailable, "attestation rejected: checking whether the agent is attested: %v", err)
 	}
+}
+
+// refuseAttested logs the reattest_refused audit record and returns the
+// "already attested" error. The token's jti ties the refusal to the Nova
+// call that produced it: a refused second presenter is a likely token theft.
+func refuseAttested(ctx context.Context, log *slog.Logger, agentID string, claims iid.Claims) error {
+	log.WarnContext(ctx, "attestation refused: agent already attested and reattest is false", syslog.AuditKey, "reattest_refused",
+		"spiffe_id", agentID, "jti", claims.ID)
+	return status.Errorf(codes.PermissionDenied, "attestation rejected: agent %s is already attested and reattest is false: evict it to attest again", agentID)
 }
 
 // kidAttributes returns the log attributes describing a token's kid: the kid
