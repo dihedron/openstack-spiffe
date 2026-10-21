@@ -1,0 +1,11 @@
+# Gitleaks findings reviewed as false positives: test fixtures in past
+# commits (kids of the form <date>-<replica>-key-<n>, and a fake JWT whose
+# signature decodes to "secret-signature"). One line per finding:
+# <commit>:<file>:<rule>:<line>, so a real leak anywhere else still fails.
+18a81086512b8e1d3a02d448f3ca1ce397180cdb:internal/metadata/attest/handler_test.go:generic-api-key:451
+18a81086512b8e1d3a02d448f3ca1ce397180cdb:internal/metadata/attest/handler_test.go:generic-api-key:497
+267edd6e1cd5f9e5e5ef583b5641d85081797eaa:internal/vendordata/server/aggregator_test.go:generic-api-key:152
+5f0d94a5102f4cd2631cd9917705201e444bf1d6:pkg/iid/iid_test.go:generic-api-key:328
+5f0d94a5102f4cd2631cd9917705201e444bf1d6:pkg/iid/iid_test.go:generic-api-key:340
+5f0d94a5102f4cd2631cd9917705201e444bf1d6:pkg/iid/iid_test.go:generic-api-key:342
+5f0d94a5102f4cd2631cd9917705201e444bf1d6:pkg/iid/iid_test.go:generic-api-key:346
