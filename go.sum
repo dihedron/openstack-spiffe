@@ -68,8 +68,8 @@ github.com/prometheus/otlptranslator v1.0.0 h1:s0LJW/iN9dkIH+EnhiD3BlkkP5QVIUVEo
 github.com/prometheus/otlptranslator v1.0.0/go.mod h1:vRYWnXvI6aWGpsdY/mOT/cbeVRBlPWtBNDb7kGR3uKM=
 github.com/prometheus/procfs v0.22.0 h1:6q9+/JL9IKAPbCmBrv9n5O5Ty3NKnciV5X7YGw0oics=
 github.com/prometheus/procfs v0.22.0/go.mod h1:CvmFr/GVhIjIvWJZW3tgkODBQMRIf0EyWMQLHCHab58=
-github.com/spiffe/spire-plugin-sdk v1.15.3 h1:7tsyjLaPZAatgr2h6Ov45J4363AX8ohar0nu1s4JTbM=
-github.com/spiffe/spire-plugin-sdk v1.15.3/go.mod h1:QvrRDiBlXiJ7kNd176ZHsF5eklxxeTRgJSu2CXe0MKw=
+github.com/spiffe/spire-plugin-sdk v1.16.0 h1:yvqQdwZRf0H3HEnaUBFqtAOqZg9XzTPWZ7UTUdj5Jg0=
+github.com/spiffe/spire-plugin-sdk v1.16.0/go.mod h1:t0XDS0NyQG1OBkW1qsFzX93mqCHhxt4FRgy22gjO40Q=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/testify v1.7.2/go.mod h1:R6va5+xMeoiuVRoj+gSkQ7d3FALtqAAGI1FQKckRals=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
