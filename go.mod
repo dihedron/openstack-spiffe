@@ -3,7 +3,7 @@ module github.com/dihedron/openstack-spiffe
 go 1.27
 
 require (
-	github.com/gophercloud/gophercloud/v2 v2.15.0
+	github.com/gophercloud/gophercloud/v2 v2.16.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/hcl v1.0.0
 	github.com/jessevdk/go-flags v1.6.1
